@@ -66,8 +66,9 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-osxoverlay-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
+            duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
             duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch deps and AWS SDK C++ (S3, vcpkg)
         run: |
