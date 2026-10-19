@@ -1,5 +1,6 @@
 #include "check.hpp"
 
+#include "duckbox/init_sql.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/sandbox.hpp"
@@ -47,15 +48,16 @@ int main() {
 	}
 
 	std::map<std::string, std::unique_ptr<TenantSandbox>> boxes;
-	auto box_for = [&](const std::string &raw) -> TenantSandbox & {
-		auto it = boxes.find(raw);
+	auto box_for = [&](const std::string &raw, const std::string &init_sql) -> TenantSandbox & {
+		auto cache_key = raw + "\n" + init_sql;
+		auto it = boxes.find(cache_key);
 		if (it != boxes.end()) {
 			return *it->second;
 		}
 		auto key = ParseTenantKey(raw, policy.key);
-		auto box = std::make_unique<TenantSandbox>(daemon, policy, key, "", spec_dir);
+		auto box = std::make_unique<TenantSandbox>(daemon, policy, key, init_sql, spec_dir);
 		auto *ptr = box.get();
-		boxes.emplace(raw, std::move(box));
+		boxes.emplace(cache_key, std::move(box));
 		return *ptr;
 	};
 
@@ -84,8 +86,10 @@ int main() {
 		if (stage.empty()) {
 			stage = expect == "deny" ? "rewrite" : "execute";
 		}
+		bool do_initsql = stage == "initsql";
 		bool do_rewrite = stage == "rewrite" || stage == "both";
 		bool do_execute = stage == "execute" || stage == "both";
+		auto init_sql = Trim(node.GetString("init_sql"));
 		auto key = ParseTenantKey(key_raw, policy.key);
 		auto contains = YamlStringList(node.Get("contains"), node.path + ".contains");
 		auto not_contains = YamlStringList(node.Get("not_contains"), node.path + ".not_contains");
@@ -99,6 +103,33 @@ int main() {
 				Expect(found == want, id + " " + what + (want ? " contains " : " lacks ") + n);
 			}
 		};
+
+		auto record_deny = [&](const std::exception &e, const char *where) {
+			if (expect == "allow") {
+				g_failed++;
+				std::cerr << "FAIL: " << id << " " << where << " allowed SQL threw '" << e.what() << "'\n";
+			} else if (!reason.empty() && !HasNeedle(e.what(), reason)) {
+				g_failed++;
+				std::cerr << "FAIL: " << id << " " << where << " deny got '" << e.what() << "', expected '" << reason
+				          << "'\n";
+			} else {
+				g_passed++;
+			}
+		};
+
+		if (do_initsql) {
+			try {
+				InitSqlGuard{}.Check(sql, daemon, policy);
+				if (expect == "deny") {
+					g_failed++;
+					std::cerr << "FAIL: " << id << " expected initSQL deny of " << sql << "\n";
+				} else {
+					g_passed++;
+				}
+			} catch (const std::exception &e) {
+				record_deny(e, "initSQL");
+			}
+		}
 
 		if (do_rewrite) {
 			try {
@@ -131,7 +162,7 @@ int main() {
 
 		if (do_execute) {
 			try {
-				auto out = box_for(key_raw).Execute(sql);
+				auto out = box_for(key_raw, init_sql).Execute(sql);
 				if (expect == "deny") {
 					g_failed++;
 					std::cerr << "FAIL: " << id << " expected execute deny of " << sql << "\n";

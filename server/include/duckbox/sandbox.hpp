@@ -47,7 +47,7 @@ public:
 		return static_cast<bool>(db_);
 	}
 
-	QueryOutput Execute(const std::string &sql); // rewrite + plan guard + single in-memory Arrow export
+	QueryOutput Execute(const std::string &sql); // rewrite + plan guard; failures ROLLBACK so the next query can run
 	QueryOutput ExecuteRewritten(const std::string &sql, std::vector<ddb::Value> params); // re-validates handle SQL
 	std::vector<ColumnSchema> DescribeRewritten(const std::string &sql);
 	ddb::unique_ptr<ddb::LogicalOperator> ExtractPlan(const std::string &sql); // tests: real bound plans
@@ -84,6 +84,9 @@ public:
 
 private:
 	QueryOutput RunTimed(const std::string &sql, std::vector<ddb::Value> params);
+	// ROLLBACK so a plan-guard / binder / timeout failure cannot leave DuckLake's
+	// catalog transaction aborted (next query would be a cheap DoS).
+	void RecoverAfterFailure();
 
 	DaemonConfig daemon_;
 	Policy policy_;

@@ -255,6 +255,8 @@ bool ScanHasTypedPred(ddb::LogicalGet &get, const MandatoryPred &pred, const std
 
 bool LooksLikeDucklakeCatalogTable(const std::string &tname) {
 	auto lower = ddb::StringUtil::Lower(tname);
+	// ducklake_metadata, ducklake_inlined_data_*, ducklake_inlined_delete_*.
+	// User SQL naming these is rejected at the AST; DuckLake may seq_scan them internally.
 	return ddb::StringUtil::StartsWith(lower, "ducklake_");
 }
 
@@ -315,10 +317,12 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 		if (policy.lake.kind != LakeKind::Ducklake) {
 			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
 		}
-		// DuckLake metadata I/O is postgres_scan of information_schema / ducklake_*
-		// (parameters hold the DSN). Throwing here aborts the postgres transaction
-		// and DuckLake only reports "Current transaction is aborted". User-written
-		// postgres_scan(...) is already denied at the AST. Do not DSN-match.
+		// Residual risk: this cannot tell DuckLake catalog I/O from a smuggled
+		// postgres_scan. Users still cannot name postgres_scan, replacement scans,
+		// or ducklake_inlined_data_* in SQL (AST) or hide them in initSQL VIEW/MACRO
+		// bodies. A rewrite/AST skip would let a ducklake sandbox read postgres
+		// metadata or inlined rows. Keep deny_table_functions. Do not DSN-match.
+		// Throwing here aborts the postgres transaction; RecoverAfterFailure rolls it back.
 		return;
 	}
 	if (IsDucklakeScan(fname)) {

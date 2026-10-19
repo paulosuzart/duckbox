@@ -97,7 +97,25 @@ void TenantSandbox::Warmup(bool validate_lake) {
 	Metrics().ObserveWarmup(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
+void TenantSandbox::RecoverAfterFailure() {
+	if (!con_) {
+		return;
+	}
+	try {
+		if (!con_->HasActiveTransaction()) {
+			return;
+		}
+		con_->Rollback();
+	} catch (...) {
+		try {
+			con_->Rollback();
+		} catch (...) {
+		}
+	}
+}
+
 QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Value> params) {
+	RecoverAfterFailure();
 	std::mutex wait_mu;
 	std::condition_variable cv;
 	bool finished = false;
@@ -157,6 +175,7 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
 		return out;
 	} catch (...) {
 		finish_watchdog();
+		RecoverAfterFailure();
 		if (timed_out) {
 			throw Error("query timeout");
 		}
@@ -200,6 +219,7 @@ QueryOutput TenantSandbox::Execute(const std::string &sql) {
 		            out);
 		return out;
 	} catch (const std::exception &e) {
+		RecoverAfterFailure();
 		ObserveFailure(Metrics(), &policy_, &key_, e, cold,
 		               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 		throw;
@@ -221,6 +241,7 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql, std::vector<
 		            out);
 		return out;
 	} catch (const std::exception &e) {
+		RecoverAfterFailure();
 		ObserveFailure(Metrics(), &policy_, &key_, e, cold,
 		               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 		throw;
@@ -231,24 +252,36 @@ ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::stri
 	Warmup(false);
 	std::lock_guard<std::mutex> hold(mu_);
 	Touch();
-	return con_->ExtractPlan(sql);
+	RecoverAfterFailure();
+	try {
+		return con_->ExtractPlan(sql);
+	} catch (...) {
+		RecoverAfterFailure();
+		throw;
+	}
 }
 
 std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sql) {
 	Warmup(false);
 	std::lock_guard<std::mutex> hold(mu_);
 	Touch();
-	auto ps = con_->Prepare(sql);
-	if (ps->HasError()) {
-		throw Error(ps->GetError());
+	RecoverAfterFailure();
+	try {
+		auto ps = con_->Prepare(sql);
+		if (ps->HasError()) {
+			throw Error(ps->GetError());
+		}
+		std::vector<ColumnSchema> out;
+		auto &names = ps->GetNames();
+		auto &types = ps->GetTypes();
+		for (idx_t i = 0; i < names.size(); i++) {
+			out.push_back(ColumnSchema{names[i], types[i].ToString()});
+		}
+		return out;
+	} catch (...) {
+		RecoverAfterFailure();
+		throw;
 	}
-	std::vector<ColumnSchema> out;
-	auto &names = ps->GetNames();
-	auto &types = ps->GetTypes();
-	for (idx_t i = 0; i < names.size(); i++) {
-		out.push_back(ColumnSchema{names[i], types[i].ToString()});
-	}
-	return out;
 }
 
 SandboxRuntime::SandboxRuntime(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases,

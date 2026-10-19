@@ -31,6 +31,48 @@ cases:
     sql: "SELECT * FROM 's3://duckbox-lake/data/secret.parquet'"
     expect: deny
     reason: replacement scans
+    stage: both
+
+  - id: replacement_scan_parquet_file
+    sql: "SELECT * FROM 'secret.parquet'"
+    expect: deny
+    reason: replacement scans
+
+  - id: ducklake_inlined_data
+    sql: "SELECT * FROM ducklake_inlined_data_deals"
+    expect: deny
+    reason: not allowlisted
+    stage: both
+
+  - id: ducklake_inlined_delete
+    sql: "SELECT * FROM ducklake_inlined_delete_deals"
+    expect: deny
+    reason: not allowlisted
+    stage: both
+
+  - id: ducklake_metadata_table
+    sql: "SELECT * FROM ducklake_metadata"
+    expect: deny
+    reason: not allowlisted
+    stage: both
+
+  - id: initsql_view_postgres_scan
+    sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
+    expect: deny
+    reason: table functions
+    stage: initsql
+
+  - id: initsql_macro_postgres_scan
+    sql: "CREATE TEMP MACRO sneak() AS TABLE SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
+    expect: deny
+    reason: table functions
+    stage: initsql
+
+  - id: initsql_view_replacement_scan
+    sql: "CREATE TEMP VIEW v AS SELECT * FROM 's3://duckbox-lake/data/secret.parquet'"
+    expect: deny
+    reason: replacement scans
+    stage: initsql
 
   - id: parquet_scan
     sql: "SELECT * FROM parquet_scan('x.parquet')"

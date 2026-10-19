@@ -35,6 +35,14 @@ void duckbox::test::RunSandboxExecTests() {
 
 	ExpectThrowContains([&] { box_a.ExecuteRewritten("COPY deals TO '/tmp/x.csv'", {}); }, "only SELECT",
 	                    "A2 handle SQL is re-validated");
+	ExpectThrowContains([&] { box_a.Execute("SELECT * FROM secrets"); }, "allowlisted", "denied query is rejected");
+	auto after_deny = box_a.Execute("SELECT id, title FROM deals ORDER BY id");
+	Expect(after_deny.row_count == 1 && after_deny.text_table.find("alpha deal") != std::string::npos,
+	       "denied query does not poison the sandbox for the next query");
+	ExpectThrowContains([&] { box_a.Execute("SELECT note FROM deals"); }, "note",
+	                    "binder/column error is a rejection");
+	auto after_binder = box_a.Execute("SELECT id FROM deals ORDER BY id");
+	Expect(after_binder.row_count == 1, "binder rejection does not poison the next Execute");
 
 	{
 		auto leaked = box_a.Execute("WITH deals AS (SELECT 1) SELECT * FROM main.deals WHERE tenant_id=21");
@@ -63,6 +71,8 @@ void duckbox::test::RunSandboxExecTests() {
 		                    "real plan denies secrets seq_scan");
 		ExpectThrowContains([&] { box_a.ExtractPlan("WITH secrets AS (SELECT 1) SELECT * FROM main.secrets"); },
 		                    "allowlisted", "real plan denies qualified secrets despite CTE");
+		auto after_plan = box_a.Execute("SELECT id FROM deals ORDER BY id");
+		Expect(after_plan.row_count == 1, "plan-guard rejection does not poison the next Execute");
 	}
 
 	{
