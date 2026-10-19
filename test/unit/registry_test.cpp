@@ -4,6 +4,7 @@
 #include "duckbox/auth.hpp"
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/handle.hpp"
+#include "duckbox/json.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/sandbox.hpp"
 #include "duckbox/sandbox_registry.hpp"
@@ -186,4 +187,46 @@ void duckbox::test::RunRegistryTests() {
 	abs_rec.spec.lifecycle.expires_at_raw = "1";
 	abs_rec = life.Create(abs_rec);
 	Expect(IsExpired(abs_rec), "absolute expires_at in the past is expired");
+
+	{
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "json-analyst";
+		rec.key = key_a.raw;
+		rec.policy_class = "analyst";
+		rec.version = 3;
+		rec.content_hash = "abc";
+		rec.lake_validated = true;
+		rec.created_at_ms = 11;
+		rec.updated_at_ms = 22;
+		rec.expires_at_ms = 33;
+		rec.handle_gen = 4;
+		rec.spec_dir = spec_dir;
+		rec.spec_yaml = loaded.yaml_body +
+		                "\n# adversarial: \"id\": forged, quote \", unicode 日本語 and a newline\n";
+		auto dumped = rec.ToJson();
+		auto back = SandboxRecord::FromJson(dumped);
+		Expect(back.id == rec.id && back.key == rec.key && back.version == rec.version,
+		       "full record JSON round-trips identity");
+		Expect(back.spec_yaml == rec.spec_yaml, "spec_yaml round-trips quotes, keys, unicode, newlines");
+		Expect(back.spec_yaml.find("\"id\":") != std::string::npos && back.id == "json-analyst",
+		       "spec_yaml containing \\\"id\\\": does not steal the record id");
+		auto ptr = rec.PointerJson();
+		auto pback = SandboxRecord::FromJson(ptr);
+		Expect(pback.id == rec.id && pback.version == rec.version && pback.spec_yaml.empty(),
+		       "pointer JSON round-trips without spec_yaml");
+		ExpectThrowContains([&] { SandboxRecord::FromJson("[]"); }, "object", "non-object JSON is rejected");
+		ExpectThrowContains([&] { SandboxRecord::FromJson("{"); }, "JSON", "truncated JSON is rejected");
+		auto missing = Json::parse(dumped);
+		missing.erase("id");
+		ExpectThrowContains([&] { SandboxRecord::FromJson(missing.dump()); }, "missing",
+		                    "missing field is rejected");
+		auto wrong = Json::parse(dumped);
+		wrong["version"] = "3";
+		ExpectThrowContains([&] { SandboxRecord::FromJson(wrong.dump()); }, "integer",
+		                    "wrong-type field is rejected");
+		auto extra = Json::parse(dumped);
+		extra["not_a_field"] = true;
+		ExpectThrowContains([&] { SandboxRecord::FromJson(extra.dump()); }, "unknown",
+		                    "unknown field is rejected");
+	}
 }

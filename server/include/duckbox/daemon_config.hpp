@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace duckbox {
@@ -83,7 +84,9 @@ DaemonConfig DefaultDaemonConfig();
 // Refuses empty/short handle_secret unless allow_insecure_dev; requires bearer or JWT otherwise.
 void ValidateDaemonOrThrow(const DaemonConfig &cfg);
 
-bool GlobMatch(const std::string &pattern, const std::string &value); // `*` only; used for caller key patterns
+bool GlobMatch(const std::string &pattern, const std::string &value); // POSIX fnmatch; caller key patterns
+// HOST:PORT (optional scheme). Arrow URI parser; default_port if the URI has none.
+std::pair<std::string, int> ParseListenAddress(const std::string &listen, int default_port);
 // Throws AuthError if this identity may not use sandbox_key.
 void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity, const std::string &sandbox_key);
 

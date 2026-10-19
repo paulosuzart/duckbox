@@ -1,6 +1,7 @@
 #include "duckbox/sandbox.hpp"
 #include "duckbox/arrow_ipc.hpp"
 #include "duckbox/init_sql.hpp"
+#include "duckbox/json.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/metrics.hpp"
 #include "duckbox/plan_check.hpp"
@@ -687,34 +688,19 @@ int64_t SandboxRuntime::LastUsedWallMs(const std::string &id) const {
 	return box ? box->last_used_wall_ms() : 0;
 }
 
-namespace {
-
-std::string JsonEscSummary(const std::string &s) {
-	std::string out;
-	out.reserve(s.size() + 8);
-	for (unsigned char c : s) {
-		if (c == '"' || c == '\\') {
-			out.push_back('\\');
-			out.push_back(static_cast<char>(c));
-		} else if (c == '\n') {
-			out += "\\n";
-		} else {
-			out.push_back(static_cast<char>(c));
-		}
-	}
-	return out;
-}
-
-} // namespace
-
 std::string SandboxSummaryJson(const SandboxSummary &s) {
-	std::ostringstream os;
-	os << "{\"id\":\"" << JsonEscSummary(s.id) << "\",\"key\":\"" << JsonEscSummary(s.key)
-	   << "\",\"policy_class\":\"" << JsonEscSummary(s.policy_class) << "\",\"version\":" << s.version
-	   << ",\"state\":\"" << JsonEscSummary(s.state) << "\",\"owner\":\"" << JsonEscSummary(s.owner)
-	   << "\",\"created_at\":" << s.created_at_ms << ",\"updated_at\":" << s.updated_at_ms
-	   << ",\"last_used_at\":" << s.last_used_at_ms << ",\"expires_at\":" << s.expires_at_ms << "}";
-	return os.str();
+	Json j;
+	j["id"] = s.id;
+	j["key"] = s.key;
+	j["policy_class"] = s.policy_class;
+	j["version"] = s.version;
+	j["state"] = s.state;
+	j["owner"] = s.owner;
+	j["created_at"] = s.created_at_ms;
+	j["updated_at"] = s.updated_at_ms;
+	j["last_used_at"] = s.last_used_at_ms;
+	j["expires_at"] = s.expires_at_ms;
+	return j.dump();
 }
 
 std::vector<SandboxSummary> SandboxRuntime::Summarize(const std::vector<SandboxRecord> &recs,

@@ -46,7 +46,7 @@ brew install apache-arrow openssl cmake
 ```
 
 ```bash
-bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp
+bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp + nlohmann/json + tinyxml2
 ```
 
 ### 2. Build

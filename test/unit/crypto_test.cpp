@@ -67,4 +67,12 @@ void duckbox::test::RunCryptoTests() {
 	auto b64 = Base64UrlEncode(std::string("hi"));
 	auto back = Base64UrlDecode(b64);
 	Expect(std::string(back.begin(), back.end()) == "hi", "base64url roundtrip");
+	Expect(Base64UrlEncode(std::string()).empty(), "base64url empty encode");
+	auto one = Base64UrlDecode(Base64UrlEncode(std::string("a")));
+	Expect(std::string(one.begin(), one.end()) == "a", "base64url 1-byte (padding)");
+	auto two = Base64UrlDecode(Base64UrlEncode(std::string("ab")));
+	Expect(std::string(two.begin(), two.end()) == "ab", "base64url 2-byte (padding)");
+	auto three = Base64UrlDecode(Base64UrlEncode(std::string("abc")));
+	Expect(std::string(three.begin(), three.end()) == "abc", "base64url 3-byte (no padding)");
+	ExpectThrowContains([&] { Base64UrlDecode("!!!!"); }, "invalid", "base64url rejects corrupt alphabet");
 }

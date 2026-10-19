@@ -1,132 +1,14 @@
 #include "duckbox/sandbox_registry.hpp"
 #include "duckbox/crypto.hpp"
+#include "duckbox/json.hpp"
 #include "duckbox/spec_validator.hpp"
 
-#include <cctype>
 #include <chrono>
+#include <set>
 #include <sstream>
 
 namespace duckbox {
 namespace {
-
-std::string JsonEsc(const std::string &s) {
-	std::string out;
-	out.reserve(s.size() + 8);
-	for (unsigned char c : s) {
-		if (c == '"' || c == '\\') {
-			out.push_back('\\');
-			out.push_back(static_cast<char>(c));
-		} else if (c == '\n') {
-			out += "\\n";
-		} else if (c == '\r') {
-			out += "\\r";
-		} else if (c == '\t') {
-			out += "\\t";
-		} else {
-			out.push_back(static_cast<char>(c));
-		}
-	}
-	return out;
-}
-
-std::string JsonUnesc(const std::string &s) {
-	std::string out;
-	for (size_t i = 0; i < s.size(); i++) {
-		if (s[i] == '\\' && i + 1 < s.size()) {
-			char n = s[i + 1];
-			if (n == 'n') {
-				out.push_back('\n');
-			} else if (n == 'r') {
-				out.push_back('\r');
-			} else if (n == 't') {
-				out.push_back('\t');
-			} else {
-				out.push_back(n);
-			}
-			i++;
-		} else {
-			out.push_back(s[i]);
-		}
-	}
-	return out;
-}
-
-std::string JsonStr(const std::string &json, const std::string &key, const std::string &def = "") {
-	auto pat = "\"" + key + "\"";
-	auto pos = json.find(pat);
-	if (pos == std::string::npos) {
-		return def;
-	}
-	pos = json.find(':', pos + pat.size());
-	if (pos == std::string::npos) {
-		return def;
-	}
-	pos++;
-	while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) {
-		pos++;
-	}
-	if (pos >= json.size()) {
-		return def;
-	}
-	if (json[pos] == '"') {
-		pos++;
-		std::string raw;
-		while (pos < json.size() && json[pos] != '"') {
-			if (json[pos] == '\\' && pos + 1 < json.size()) {
-				raw.push_back('\\');
-				raw.push_back(json[pos + 1]);
-				pos += 2;
-				continue;
-			}
-			raw.push_back(json[pos++]);
-		}
-		return JsonUnesc(raw);
-	}
-	size_t end = pos;
-	while (end < json.size() && json[end] != ',' && json[end] != '}' && json[end] != '\n') {
-		end++;
-	}
-	auto v = json.substr(pos, end - pos);
-	while (!v.empty() && std::isspace(static_cast<unsigned char>(v.back()))) {
-		v.pop_back();
-	}
-	return v;
-}
-
-bool JsonBool(const std::string &json, const std::string &key, bool def = false) {
-	auto v = JsonStr(json, key);
-	if (v == "true") {
-		return true;
-	}
-	if (v == "false") {
-		return false;
-	}
-	return def;
-}
-
-int JsonInt(const std::string &json, const std::string &key, int def = 0) {
-	auto v = JsonStr(json, key);
-	if (v.empty()) {
-		return def;
-	}
-	try {
-		return std::stoi(v);
-	} catch (...) {
-		return def;
-	}
-}
-
-int64_t JsonI64(const std::string &json, const std::string &key, int64_t def = 0) {
-	auto v = JsonStr(json, key);
-	if (v.empty()) {
-		return def;
-	}
-	try {
-		return std::stoll(v);
-	} catch (...) {
-		return def;
-	}
-}
 
 std::string VersionKey(const std::string &id, int version) {
 	return "sandboxes/" + id + "/v" + std::to_string(version) + ".json";
@@ -165,43 +47,91 @@ void ValidateRecordOrThrow(SandboxRecord &rec) {
 
 } // namespace
 
+namespace {
+
+const std::set<std::string> kFullRecordKeys = {"id",           "key",           "policy_class",  "version",
+                                               "content_hash", "lake_validated", "tombstone",     "created_at_ms",
+                                               "updated_at_ms", "expires_at_ms",  "handle_gen",    "spec_dir",
+                                               "spec_yaml"};
+const std::set<std::string> kPointerKeys = {"id",      "version",         "content_hash", "lake_validated",
+                                            "tombstone", "created_at_ms", "updated_at_ms", "expires_at_ms",
+                                            "handle_gen"};
+
+const char *kRecordWhat = "sandbox record JSON";
+
+void LoadCommon(SandboxRecord &r, const Json &j) {
+	r.id = JsonRequireString(j, "id", kRecordWhat);
+	r.version = static_cast<int>(JsonRequireInt(j, "version", kRecordWhat));
+	r.content_hash = JsonRequireString(j, "content_hash", kRecordWhat);
+	r.lake_validated = JsonRequireBool(j, "lake_validated", kRecordWhat);
+	r.tombstone = JsonRequireBool(j, "tombstone", kRecordWhat);
+	r.created_at_ms = JsonRequireInt(j, "created_at_ms", kRecordWhat);
+	r.updated_at_ms = JsonRequireInt(j, "updated_at_ms", kRecordWhat);
+	r.expires_at_ms = JsonRequireInt(j, "expires_at_ms", kRecordWhat);
+	r.handle_gen = static_cast<int>(JsonRequireInt(j, "handle_gen", kRecordWhat));
+}
+
+} // namespace
+
 std::string SandboxRecord::ToJson() const {
-	std::ostringstream os;
-	os << "{\"id\":\"" << JsonEsc(id) << "\",\"key\":\"" << JsonEsc(key) << "\",\"policy_class\":\""
-	   << JsonEsc(policy_class) << "\",\"version\":" << version << ",\"content_hash\":\"" << JsonEsc(content_hash)
-	   << "\",\"lake_validated\":" << (lake_validated ? "true" : "false") << ",\"tombstone\":"
-	   << (tombstone ? "true" : "false") << ",\"created_at_ms\":" << created_at_ms << ",\"updated_at_ms\":"
-	   << updated_at_ms << ",\"expires_at_ms\":" << expires_at_ms << ",\"handle_gen\":" << handle_gen
-	   << ",\"spec_dir\":\"" << JsonEsc(spec_dir) << "\",\"spec_yaml\":\"" << JsonEsc(spec_yaml) << "\"}";
-	return os.str();
+	Json j;
+	j["id"] = id;
+	j["key"] = key;
+	j["policy_class"] = policy_class;
+	j["version"] = version;
+	j["content_hash"] = content_hash;
+	j["lake_validated"] = lake_validated;
+	j["tombstone"] = tombstone;
+	j["created_at_ms"] = created_at_ms;
+	j["updated_at_ms"] = updated_at_ms;
+	j["expires_at_ms"] = expires_at_ms;
+	j["handle_gen"] = handle_gen;
+	j["spec_dir"] = spec_dir;
+	j["spec_yaml"] = spec_yaml;
+	return j.dump();
 }
 
 std::string SandboxRecord::PointerJson() const {
-	std::ostringstream os;
-	os << "{\"id\":\"" << JsonEsc(id) << "\",\"version\":" << version << ",\"content_hash\":\"" << JsonEsc(content_hash)
-	   << "\",\"lake_validated\":" << (lake_validated ? "true" : "false") << ",\"tombstone\":"
-	   << (tombstone ? "true" : "false") << ",\"created_at_ms\":" << created_at_ms << ",\"updated_at_ms\":"
-	   << updated_at_ms << ",\"expires_at_ms\":" << expires_at_ms << ",\"handle_gen\":" << handle_gen << "}";
-	return os.str();
+	Json j;
+	j["id"] = id;
+	j["version"] = version;
+	j["content_hash"] = content_hash;
+	j["lake_validated"] = lake_validated;
+	j["tombstone"] = tombstone;
+	j["created_at_ms"] = created_at_ms;
+	j["updated_at_ms"] = updated_at_ms;
+	j["expires_at_ms"] = expires_at_ms;
+	j["handle_gen"] = handle_gen;
+	return j.dump();
 }
 
 SandboxRecord SandboxRecord::FromJson(const std::string &json) {
+	auto j = ParseJsonObject(json, kRecordWhat);
+	bool full = JsonHas(j, "spec_yaml") || JsonHas(j, "spec_dir") || JsonHas(j, "key") || JsonHas(j, "policy_class");
+	JsonRejectUnknown(j, full ? kFullRecordKeys : kPointerKeys, kRecordWhat);
+	if (full) {
+		for (auto &k : kFullRecordKeys) {
+			if (!JsonHas(j, k.c_str())) {
+				throw PolicyError(std::string(kRecordWhat) + " missing '" + k + "'");
+			}
+		}
+	} else {
+		for (auto &k : kPointerKeys) {
+			if (!JsonHas(j, k.c_str())) {
+				throw PolicyError(std::string(kRecordWhat) + " missing '" + k + "'");
+			}
+		}
+	}
 	SandboxRecord r;
-	r.id = JsonStr(json, "id");
-	r.key = JsonStr(json, "key");
-	r.policy_class = JsonStr(json, "policy_class");
-	r.version = JsonInt(json, "version");
-	r.content_hash = JsonStr(json, "content_hash");
-	r.lake_validated = JsonBool(json, "lake_validated");
-	r.tombstone = JsonBool(json, "tombstone");
-	r.created_at_ms = JsonI64(json, "created_at_ms");
-	r.updated_at_ms = JsonI64(json, "updated_at_ms");
-	r.expires_at_ms = JsonI64(json, "expires_at_ms");
-	r.handle_gen = JsonInt(json, "handle_gen");
-	r.spec_yaml = JsonStr(json, "spec_yaml");
-	r.spec_dir = JsonStr(json, "spec_dir");
-	if (!r.spec_yaml.empty()) {
-		r.ParseSpec();
+	LoadCommon(r, j);
+	if (full) {
+		r.key = JsonRequireString(j, "key", kRecordWhat);
+		r.policy_class = JsonRequireString(j, "policy_class", kRecordWhat);
+		r.spec_dir = JsonRequireString(j, "spec_dir", kRecordWhat);
+		r.spec_yaml = JsonRequireString(j, "spec_yaml", kRecordWhat);
+		if (!r.spec_yaml.empty()) {
+			r.ParseSpec();
+		}
 	}
 	return r;
 }

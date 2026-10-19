@@ -2,69 +2,25 @@
 #include "duckbox/auth.hpp"
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/error.hpp"
+#include "duckbox/json.hpp"
 #include "duckbox/spec_validator.hpp"
 
 #include "httplib.h"
 
-#include <cctype>
-#include <filesystem>
 #include <iostream>
-#include <sstream>
 
 namespace duckbox {
 namespace {
 
 std::string JsonGetString(const std::string &body, const std::string &key) {
-	auto pat = "\"" + key + "\"";
-	auto pos = body.find(pat);
-	if (pos == std::string::npos) {
+	if (body.empty()) {
 		return "";
 	}
-	pos = body.find(':', pos + pat.size());
-	if (pos == std::string::npos) {
+	auto j = ParseJsonObject(body, "debug HTTP body");
+	if (!j.contains(key) || !j.at(key).is_string()) {
 		return "";
 	}
-	pos++;
-	while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) {
-		pos++;
-	}
-	if (pos >= body.size() || body[pos] != '"') {
-		return "";
-	}
-	pos++;
-	std::string out;
-	while (pos < body.size() && body[pos] != '"') {
-		if (body[pos] == '\\' && pos + 1 < body.size()) {
-			out.push_back(body[pos + 1] == 'n' ? '\n' : body[pos + 1]);
-			pos += 2;
-			continue;
-		}
-		out.push_back(body[pos++]);
-	}
-	return out;
-}
-
-std::string JsonEscape(const std::string &s) {
-	std::string out;
-	for (char c : s) {
-		if (c == '"' || c == '\\') {
-			out.push_back('\\');
-			out.push_back(c);
-		} else if (c == '\n') {
-			out += "\\n";
-		} else {
-			out.push_back(c);
-		}
-	}
-	return out;
-}
-
-std::pair<std::string, int> ParseListen(const std::string &listen) {
-	auto colon = listen.rfind(':');
-	if (colon == std::string::npos) {
-		return {listen, 4748};
-	}
-	return {listen.substr(0, colon), std::stoi(listen.substr(colon + 1))};
+	return j.at(key).get<std::string>();
 }
 
 } // namespace
@@ -115,10 +71,12 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
 				status = 403;
 			}
 			res.status = status;
-			res.set_content(std::string("{\"error\":\"") + JsonEscape(e.what()) + "\"}", "application/json");
+			Json err;
+			err["error"] = e.what();
+			res.set_content(err.dump(), "application/json");
 		}
 	});
-	auto [host, port] = ParseListen(opt.daemon.debug_http);
+	auto [host, port] = ParseListenAddress(opt.daemon.debug_http, 4748);
 	std::clog << "debug HTTP listening on " << host << ":" << port << "\n";
 	svr.listen(host, port);
 }

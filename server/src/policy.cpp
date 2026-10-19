@@ -9,6 +9,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <unordered_set>
@@ -545,12 +546,18 @@ bool ParseExpiresAtMs(const std::string &raw, int64_t *out_ms) {
 		s = s.substr(0, plus);
 	}
 	std::tm tm{};
-	const char *parsed = strptime(s.c_str(), "%Y-%m-%dT%H:%M:%S", &tm);
-	if (!parsed) {
-		parsed = strptime(s.c_str(), "%Y-%m-%d", &tm);
-	}
-	if (!parsed) {
-		return false;
+	{
+		std::istringstream in(s);
+		in >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+		if (in.fail()) {
+			in.clear();
+			in.str(s);
+			in.seekg(0);
+			in >> std::get_time(&tm, "%Y-%m-%d");
+			if (in.fail()) {
+				return false;
+			}
+		}
 	}
 	tm.tm_isdst = 0;
 	time_t utc = timegm(&tm);

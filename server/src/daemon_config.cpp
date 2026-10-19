@@ -3,25 +3,19 @@
 #include "duckbox/secrets.hpp"
 #include "duckbox/yaml.hpp"
 
+#include "arrow/result.h"
+#include "arrow/util/uri.h"
 #include "httplib.h"
 
 #include <cctype>
 #include <cstdlib>
-#include <functional>
+#include <fnmatch.h>
 #include <iostream>
 #include <sstream>
 #include <unordered_set>
 
 namespace duckbox {
 namespace {
-
-std::pair<std::string, int> ParseListen(const std::string &listen) {
-	auto colon = listen.rfind(':');
-	if (colon == std::string::npos) {
-		throw PolicyError("listen: expected HOST:PORT, got '" + listen + "'");
-	}
-	return {listen.substr(0, colon), std::stoi(listen.substr(colon + 1))};
-}
 
 std::vector<std::string> StringList(const YamlNode *n, const std::string &path) {
 	return YamlStringList(n, path);
@@ -32,20 +26,31 @@ std::vector<std::string> StringList(const YamlNode *n, const std::string &path) 
 const std::unordered_set<std::string> kDefaultAllowedInitSettings = {
     "memory_limit", "threads", "default_null_order", "default_order", "TimeZone", "calendar", "integer_division"};
 
+std::pair<std::string, int> ParseListenAddress(const std::string &listen, int default_port) {
+	if (listen.empty()) {
+		throw PolicyError("listen address is empty");
+	}
+	std::string spec = listen;
+	if (spec.find("://") == std::string::npos) {
+		spec = "http://" + spec;
+	}
+	auto uri = arrow::util::Uri::FromString(spec);
+	if (!uri.ok()) {
+		throw PolicyError("listen: expected HOST:PORT, got '" + listen + "'");
+	}
+	auto host = uri->host();
+	if (host.empty()) {
+		throw PolicyError("listen: expected HOST:PORT, got '" + listen + "'");
+	}
+	int port = uri->port();
+	if (port < 0) {
+		port = default_port;
+	}
+	return {host, port};
+}
+
 bool GlobMatch(const std::string &pattern, const std::string &value) {
-	std::function<bool(size_t, size_t)> rec = [&](size_t pi, size_t vi) -> bool {
-		if (pi == pattern.size()) {
-			return vi == value.size();
-		}
-		if (pattern[pi] == '*') {
-			if (rec(pi + 1, vi)) {
-				return true;
-			}
-			return vi < value.size() && rec(pi, vi + 1);
-		}
-		return vi < value.size() && pattern[pi] == value[vi] && rec(pi + 1, vi + 1);
-	};
-	return rec(0, 0);
+	return fnmatch(pattern.c_str(), value.c_str(), FNM_NOESCAPE) == 0;
 }
 
 void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity, const std::string &sandbox_key) {
@@ -233,7 +238,7 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 	std::vector<SpecIssue> issues;
 	auto add = [&](const std::string &path, const std::string &msg) { issues.push_back({path, msg}); };
 	try {
-		auto lp = ParseListen(cfg.listen);
+		auto lp = ParseListenAddress(cfg.listen, 4747);
 		if (lp.second <= 0 || lp.second > 65535) {
 			add("listen", "port out of range");
 		}
@@ -266,7 +271,7 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 	}
 	if (!cfg.metrics_listen.empty() && cfg.metrics_listen != "off" && cfg.metrics_listen != "false") {
 		try {
-			auto mp = ParseListen(cfg.metrics_listen);
+			auto mp = ParseListenAddress(cfg.metrics_listen, 9477);
 			if (mp.second <= 0 || mp.second > 65535) {
 				add("metrics.listen", "port out of range");
 			}

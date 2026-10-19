@@ -1,5 +1,7 @@
 #include "duckbox/metrics.hpp"
+#include "duckbox/daemon_config.hpp"
 #include "duckbox/error.hpp"
+#include "duckbox/json.hpp"
 
 #include "httplib.h"
 
@@ -61,28 +63,6 @@ std::string EscapeLabel(const std::string &s) {
 	return out;
 }
 
-std::string JsonEsc(const std::string &s) {
-	std::string out;
-	for (char c : s) {
-		if (c == '"' || c == '\\') {
-			out.push_back('\\');
-			out.push_back(c);
-		} else if (c == '\n') {
-			out += "\\n";
-		} else {
-			out.push_back(c);
-		}
-	}
-	return out;
-}
-
-std::pair<std::string, int> ParseListen(const std::string &listen) {
-	auto colon = listen.rfind(':');
-	if (colon == std::string::npos) {
-		return {listen, 9477};
-	}
-	return {listen.substr(0, colon), std::stoi(listen.substr(colon + 1))};
-}
 
 const char *Help(const std::string &name) {
 	if (name == "duckbox_query_duration_seconds") {
@@ -572,40 +552,44 @@ void WriteInitSqlAudit(const TenantKey &key, const Policy &policy, const std::st
 	if (sql.empty()) {
 		return;
 	}
-	std::ostringstream os;
-	os << "{\"event\":\"init_sql\",\"tenant\":\"" << JsonEsc(key.tenant_id) << "\",\"user\":\"" << JsonEsc(key.user)
-	   << "\",\"key\":\"" << JsonEsc(key.raw) << "\",\"policy\":\"" << JsonEsc(policy.name) << "\",\"sql\":\""
-	   << JsonEsc(RedactSecretsForAudit(sql)) << "\",\"outcome\":\"" << JsonEsc(outcome ? outcome : "ok") << "\"}\n";
-	std::clog << os.str();
+	Json j;
+	j["event"] = "init_sql";
+	j["tenant"] = key.tenant_id;
+	j["user"] = key.user;
+	j["key"] = key.raw;
+	j["policy"] = policy.name;
+	j["sql"] = RedactSecretsForAudit(sql);
+	j["outcome"] = outcome ? outcome : "ok";
+	std::clog << j.dump() << "\n";
 }
 
 void WriteSandboxAudit(const char *action, const std::string &id, const std::string &key,
                        const std::vector<std::string> &warnings) {
-	std::ostringstream os;
-	os << "{\"event\":\"sandbox\",\"action\":\"" << JsonEsc(action ? action : "") << "\",\"id\":\"" << JsonEsc(id)
-	   << "\",\"key\":\"" << JsonEsc(key) << "\",\"warnings\":[";
-	for (size_t i = 0; i < warnings.size(); i++) {
-		if (i) {
-			os << ',';
-		}
-		os << '"' << JsonEsc(warnings[i]) << '"';
-	}
-	os << "]}\n";
-	std::clog << os.str();
+	Json j;
+	j["event"] = "sandbox";
+	j["action"] = action ? action : "";
+	j["id"] = id;
+	j["key"] = key;
+	j["warnings"] = warnings;
+	std::clog << j.dump() << "\n";
 }
 
 void WriteAuditLog(const TenantKey &key, const Policy &policy, double seconds, int64_t rows, int64_t bytes,
                    const char *outcome, const char *reason) {
-	std::ostringstream os;
-	os << "{\"event\":\"query\",\"tenant\":\"" << JsonEsc(key.tenant_id) << "\",\"user\":\"" << JsonEsc(key.user)
-	   << "\",\"key\":\"" << JsonEsc(key.raw) << "\",\"policy\":\"" << JsonEsc(policy.name)
-	   << "\",\"duration_ms\":" << std::fixed << std::setprecision(3) << (seconds * 1000.0) << ",\"rows\":" << rows
-	   << ",\"bytes\":" << bytes << ",\"outcome\":\"" << JsonEsc(outcome ? outcome : "error") << "\"";
+	Json j;
+	j["event"] = "query";
+	j["tenant"] = key.tenant_id;
+	j["user"] = key.user;
+	j["key"] = key.raw;
+	j["policy"] = policy.name;
+	j["duration_ms"] = seconds * 1000.0;
+	j["rows"] = rows;
+	j["bytes"] = bytes;
+	j["outcome"] = outcome ? outcome : "error";
 	if (reason && *reason) {
-		os << ",\"reason\":\"" << JsonEsc(reason) << "\"";
+		j["reason"] = reason;
 	}
-	os << "}\n";
-	std::clog << os.str();
+	std::clog << j.dump() << "\n";
 }
 
 void ObserveFailure(IMetrics &m, const Policy *policy, const TenantKey *key, const std::exception &e, bool cold,
@@ -631,7 +615,7 @@ void StartMetricsHttp(const std::string &listen, std::shared_ptr<IMetrics> metri
 		return;
 	}
 	StopMetricsHttp();
-	auto [host, port] = ParseListen(listen);
+	auto [host, port] = ParseListenAddress(listen, 9477);
 	g_metrics_http = std::make_shared<httplib::Server>();
 	auto m = metrics;
 	g_metrics_http->Get("/metrics", [m](const httplib::Request &, httplib::Response &res) {

@@ -46,4 +46,7 @@ private:
 	std::string secret_key_;
 };
 
+// Parses ListObjectsV2 XML (tinyxml2). Unescapes entities; skips malformed docs.
+std::vector<std::string> ParseS3ListKeysXml(const std::string &xml);
+
 } // namespace duckbox

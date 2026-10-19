@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Download DuckDB 1.5.6 headers + static libs, cpp-httplib, and yaml-cpp.
+# Download DuckDB 1.5.6 headers + static libs, cpp-httplib, yaml-cpp,
+# nlohmann/json, and tinyxml2.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -47,11 +48,23 @@ if [[ -f /tmp/duckdb-dl/static-libs-linux-amd64.zip && "$lib_zip" == "static-lib
 fi
 
 YAML_CPP_VERSION="${YAML_CPP_VERSION:-0.8.0}"
+NLOHMANN_JSON_VERSION="${NLOHMANN_JSON_VERSION:-v3.11.3}"
+TINYXML2_VERSION="${TINYXML2_VERSION:-10.0.0}"
 yaml_tar="$DEPS/cache/yaml-cpp-${YAML_CPP_VERSION}.tar.gz"
+json_hdr="$DEPS/cache/nlohmann-json-${NLOHMANN_JSON_VERSION}.hpp"
+tinyxml2_h="$DEPS/cache/tinyxml2-${TINYXML2_VERSION}.h"
+tinyxml2_cc="$DEPS/cache/tinyxml2-${TINYXML2_VERSION}.cpp"
 download "https://github.com/duckdb/duckdb/archive/refs/tags/${DUCKDB_VERSION}.tar.gz" "$src_tar"
 download "$base/$lib_zip" "$lib_zip_path"
 download "https://raw.githubusercontent.com/yhirose/cpp-httplib/${HTTP_LIB_VERSION}/httplib.h" "$DEPS/httplib/httplib.h"
 download "https://github.com/jbeder/yaml-cpp/archive/refs/tags/${YAML_CPP_VERSION}.tar.gz" "$yaml_tar"
+download "https://github.com/nlohmann/json/releases/download/${NLOHMANN_JSON_VERSION}/json.hpp" "$json_hdr"
+download "https://raw.githubusercontent.com/leethomason/tinyxml2/${TINYXML2_VERSION}/tinyxml2.h" "$tinyxml2_h"
+download "https://raw.githubusercontent.com/leethomason/tinyxml2/${TINYXML2_VERSION}/tinyxml2.cpp" "$tinyxml2_cc"
+mkdir -p "$DEPS/nlohmann/nlohmann" "$DEPS/tinyxml2"
+cp -f "$json_hdr" "$DEPS/nlohmann/nlohmann/json.hpp"
+cp -f "$tinyxml2_h" "$DEPS/tinyxml2/tinyxml2.h"
+cp -f "$tinyxml2_cc" "$DEPS/tinyxml2/tinyxml2.cpp"
 if [[ ! -f "$DEPS/yaml-cpp-${YAML_CPP_VERSION}/CMakeLists.txt" ]]; then
   echo "Extracting yaml-cpp ${YAML_CPP_VERSION}"
   tar -xzf "$yaml_tar" -C "$DEPS"

@@ -1,6 +1,6 @@
 #include "duckbox/crypto.hpp"
 #include "duckbox/error.hpp"
-#include "duckbox/yaml.hpp"
+#include "duckbox/json.hpp"
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -11,36 +11,35 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <limits>
 
 namespace duckbox {
-namespace {
-
-const char kTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-} // namespace
 
 std::string Base64UrlEncode(const void *data, size_t len) {
-	const auto *p = static_cast<const unsigned char *>(data);
-	std::string out;
-	out.reserve((len + 2) / 3 * 4);
-	for (size_t i = 0; i < len; i += 3) {
-		unsigned n = p[i] << 16;
-		if (i + 1 < len) {
-			n |= p[i + 1] << 8;
-		}
-		if (i + 2 < len) {
-			n |= p[i + 2];
-		}
-		out.push_back(kTable[(n >> 18) & 63]);
-		out.push_back(kTable[(n >> 12) & 63]);
-		if (i + 1 < len) {
-			out.push_back(kTable[(n >> 6) & 63]);
-		}
-		if (i + 2 < len) {
-			out.push_back(kTable[n & 63]);
+	if (len == 0) {
+		return "";
+	}
+	if (len > static_cast<size_t>(std::numeric_limits<int>::max())) {
+		throw Error("base64url input too large");
+	}
+	std::string stdb64(static_cast<size_t>(((len + 2) / 3) * 4) + 1, '\0');
+	int n = EVP_EncodeBlock(reinterpret_cast<unsigned char *>(&stdb64[0]),
+	                        static_cast<const unsigned char *>(data), static_cast<int>(len));
+	if (n < 0) {
+		throw Error("base64url encode failed");
+	}
+	stdb64.resize(static_cast<size_t>(n));
+	for (char &c : stdb64) {
+		if (c == '+') {
+			c = '-';
+		} else if (c == '/') {
+			c = '_';
 		}
 	}
-	return out;
+	while (!stdb64.empty() && stdb64.back() == '=') {
+		stdb64.pop_back();
+	}
+	return stdb64;
 }
 
 std::string Base64UrlEncode(const std::string &s) {
@@ -48,32 +47,47 @@ std::string Base64UrlEncode(const std::string &s) {
 }
 
 std::vector<uint8_t> Base64UrlDecode(const std::string &s) {
-	int rev[256];
-	for (int &v : rev) {
-		v = -1;
-	}
-	for (int i = 0; kTable[i]; i++) {
-		rev[static_cast<unsigned char>(kTable[i])] = i;
-	}
-	rev[static_cast<unsigned char>('+')] = 62;
-	rev[static_cast<unsigned char>('/')] = 63;
-	std::vector<uint8_t> out;
-	int val = 0;
-	int bits = -8;
+	std::string stdb64;
+	stdb64.reserve(s.size() + 4);
 	for (unsigned char c : s) {
 		if (c == '=' || c == '\n' || c == '\r') {
 			continue;
 		}
-		if (rev[c] < 0) {
-			throw Error("invalid base64url");
-		}
-		val = (val << 6) + rev[c];
-		bits += 6;
-		if (bits >= 0) {
-			out.push_back(static_cast<uint8_t>((val >> bits) & 0xFF));
-			bits -= 8;
+		if (c == '-') {
+			stdb64.push_back('+');
+		} else if (c == '_') {
+			stdb64.push_back('/');
+		} else {
+			stdb64.push_back(static_cast<char>(c));
 		}
 	}
+	while (stdb64.size() % 4 != 0) {
+		stdb64.push_back('=');
+	}
+	if (stdb64.empty()) {
+		return {};
+	}
+	if (stdb64.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+		throw Error("invalid base64url");
+	}
+	std::vector<uint8_t> out((stdb64.size() / 4) * 3);
+	int n = EVP_DecodeBlock(out.data(), reinterpret_cast<const unsigned char *>(stdb64.data()),
+	                        static_cast<int>(stdb64.size()));
+	if (n < 0) {
+		throw Error("invalid base64url");
+	}
+	int pad = 0;
+	if (!stdb64.empty() && stdb64.back() == '=') {
+		pad++;
+	}
+	if (stdb64.size() >= 2 && stdb64[stdb64.size() - 2] == '=') {
+		pad++;
+	}
+	n -= pad;
+	if (n < 0) {
+		throw Error("invalid base64url");
+	}
+	out.resize(static_cast<size_t>(n));
 	return out;
 }
 
@@ -94,12 +108,23 @@ std::string Sha256Raw(const std::string &data) {
 }
 
 std::string HexEncode(const std::string &raw) {
-	static const char *hex = "0123456789abcdef";
-	std::string out(raw.size() * 2, '0');
-	for (size_t i = 0; i < raw.size(); i++) {
-		auto b = static_cast<unsigned char>(raw[i]);
-		out[i * 2] = hex[b >> 4];
-		out[i * 2 + 1] = hex[b & 0xF];
+	if (raw.empty()) {
+		return "";
+	}
+	std::string out(raw.size() * 2 + 1, '\0');
+	size_t len = 0;
+	if (OPENSSL_buf2hexstr_ex(out.data(), out.size(), &len, reinterpret_cast<const unsigned char *>(raw.data()),
+	                          raw.size(), '\0') != 1) {
+		throw Error("hex encode failed");
+	}
+	out.resize(len);
+	if (!out.empty() && out.back() == '\0') {
+		out.pop_back();
+	}
+	for (char &c : out) {
+		if (c >= 'A' && c <= 'F') {
+			c = static_cast<char>(c - 'A' + 'a');
+		}
 	}
 	return out;
 }
@@ -241,19 +266,18 @@ std::string VerifyJwtHs256(const std::string &token, const std::string &secret) 
 	auto payload_b64 = token.substr(d1 + 1, d2 - d1 - 1);
 	auto sig_b64 = token.substr(d2 + 1);
 	auto header_bytes = Base64UrlDecode(header_b64);
-	std::string header_json(header_bytes.begin(), header_bytes.end());
-	YamlNode header;
+	Json header;
 	try {
-		header = ParseYaml(header_json);
+		header = ParseJsonObject(std::string(header_bytes.begin(), header_bytes.end()), "JWT header");
 	} catch (const std::exception &) {
 		throw AuthError("JWT header is not JSON");
 	}
-	if (!header.IsMap()) {
-		throw AuthError("JWT header is not a JSON object");
+	if (!header.contains("alg") || !header["alg"].is_string()) {
+		throw AuthError("JWT alg must be HS256");
 	}
-	const YamlNode *alg_n = header.Get("alg");
-	if (!alg_n || !alg_n->IsScalar() || alg_n->scalar != "HS256") {
-		if (alg_n && alg_n->IsScalar() && alg_n->scalar == "none") {
+	auto alg = header["alg"].get<std::string>();
+	if (alg != "HS256") {
+		if (alg == "none") {
 			throw AuthError("unsigned JWT is not accepted");
 		}
 		throw AuthError("JWT alg must be HS256");
@@ -265,33 +289,35 @@ std::string VerifyJwtHs256(const std::string &token, const std::string &secret) 
 		throw AuthError("invalid JWT signature");
 	}
 	auto payload_b = Base64UrlDecode(payload_b64);
-	std::string payload_json(payload_b.begin(), payload_b.end());
-	YamlNode payload;
+	Json payload;
 	try {
-		payload = ParseYaml(payload_json);
+		payload = ParseJsonObject(std::string(payload_b.begin(), payload_b.end()), "JWT payload");
 	} catch (const std::exception &) {
 		throw AuthError("JWT payload is not JSON");
 	}
-	if (!payload.IsMap()) {
-		throw AuthError("JWT payload is not a JSON object");
-	}
-	const YamlNode *sub_n = payload.Get("sub");
-	if (!sub_n || !sub_n->IsScalar() || sub_n->scalar.empty()) {
+	if (!payload.contains("sub") || !payload["sub"].is_string() || payload["sub"].get<std::string>().empty()) {
 		throw AuthError("JWT missing sub");
 	}
-	const YamlNode *exp_n = payload.Get("exp");
-	if (!exp_n || exp_n->IsNull()) {
+	if (!payload.contains("exp") || payload["exp"].is_null()) {
 		throw AuthError("JWT missing exp");
 	}
 	int64_t exp = 0;
 	int64_t nbf = 0;
 	bool has_nbf = false;
 	try {
-		exp = payload.GetInt("exp");
-		if (payload.Get("nbf") && !payload.Get("nbf")->IsNull()) {
-			nbf = payload.GetInt("nbf");
+		if (!payload["exp"].is_number_integer()) {
+			throw AuthError("JWT exp/nbf must be numeric");
+		}
+		exp = payload["exp"].get<int64_t>();
+		if (payload.contains("nbf") && !payload["nbf"].is_null()) {
+			if (!payload["nbf"].is_number_integer()) {
+				throw AuthError("JWT exp/nbf must be numeric");
+			}
+			nbf = payload["nbf"].get<int64_t>();
 			has_nbf = true;
 		}
+	} catch (const AuthError &) {
+		throw;
 	} catch (const std::exception &) {
 		throw AuthError("JWT exp/nbf must be numeric");
 	}
@@ -303,7 +329,7 @@ std::string VerifyJwtHs256(const std::string &token, const std::string &secret) 
 	if (has_nbf && nbf > now + kLeeway) {
 		throw AuthError("JWT not yet valid");
 	}
-	return sub_n->scalar;
+	return payload["sub"].get<std::string>();
 }
 
 } // namespace duckbox

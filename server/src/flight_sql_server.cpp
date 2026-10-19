@@ -1,5 +1,6 @@
 #include "duckbox/flight_sql_server.hpp"
 #include "duckbox/auth.hpp"
+#include "duckbox/json.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/metrics.hpp"
 #include "duckbox/spec_validator.hpp"
@@ -161,43 +162,14 @@ arrow::Status ResultJson(const std::string &json, std::unique_ptr<arrow::flight:
 	return Status::OK();
 }
 
-std::string JsonEscAction(const std::string &s) {
-	std::string out;
-	out.reserve(s.size() + 8);
-	for (unsigned char c : s) {
-		if (c == '"' || c == '\\') {
-			out.push_back('\\');
-			out.push_back(static_cast<char>(c));
-		} else if (c == '\n') {
-			out += "\\n";
-		} else {
-			out.push_back(static_cast<char>(c));
-		}
-	}
-	return out;
-}
-
 std::string CreateUpdateResultJson(const SandboxRecord &rec, const char *action) {
 	auto warnings = AuthorizedViewWarnings(rec.spec);
 	WriteSandboxAudit(action, rec.id, rec.key, warnings);
-	auto json = rec.ToJson();
-	if (warnings.empty()) {
-		return json;
+	auto j = Json::parse(rec.ToJson());
+	if (!warnings.empty()) {
+		j["warnings"] = warnings;
 	}
-	if (!json.empty() && json.back() == '}') {
-		json.pop_back();
-	}
-	json += ",\"warnings\":[";
-	for (size_t i = 0; i < warnings.size(); i++) {
-		if (i) {
-			json += ',';
-		}
-		json += '"';
-		json += JsonEscAction(warnings[i]);
-		json += '"';
-	}
-	json += "]}";
-	return json;
+	return j.dump();
 }
 
 arrow::Result<std::unique_ptr<FlightInfo>> MakeInfo(const FlightDescriptor &desc, const std::string &token,
@@ -866,16 +838,15 @@ arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContex
 				}
 				page.assign(begin, end);
 			}
-			std::ostringstream os;
-			os << "{\"sandboxes\":[";
-			for (size_t i = 0; i < page.size(); i++) {
-				if (i) {
-					os << ",";
-				}
-				os << SandboxSummaryJson(page[i]);
+			Json j;
+			j["sandboxes"] = Json::array();
+			for (auto &item : page) {
+				j["sandboxes"].push_back(Json::parse(SandboxSummaryJson(item)));
 			}
-			os << "],\"total\":" << total << ",\"offset\":" << off << ",\"limit\":" << lim << "}";
-			return ResultJson(os.str(), result);
+			j["total"] = total;
+			j["offset"] = off;
+			j["limit"] = lim;
+			return ResultJson(j.dump(), result);
 		}
 		return Status::NotImplemented("unknown action " + action.type);
 	} catch (const std::exception &e) {

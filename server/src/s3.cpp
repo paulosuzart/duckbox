@@ -2,12 +2,17 @@
 #include "duckbox/crypto.hpp"
 #include "duckbox/secrets.hpp"
 
+#include "arrow/result.h"
+#include "arrow/util/uri.h"
 #include "httplib.h"
+#include "tinyxml2.h"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <ctime>
+#include <functional>
 #include <iomanip>
 #include <memory>
 #include <sstream>
@@ -41,20 +46,19 @@ S3ControlClient::S3ControlClient(LeaseSettings lease) {
 	if (!lease.endpoint_env.empty()) {
 		endpoint = ResolveSecret(lease.endpoint_env, endpoint, "lease.endpoint_env");
 	}
-	if (endpoint.rfind("https://", 0) == 0) {
-		https_ = true;
-		endpoint = endpoint.substr(8);
-		port_ = 443;
-	} else if (endpoint.rfind("http://", 0) == 0) {
-		endpoint = endpoint.substr(7);
-		port_ = 80;
+	std::string spec = endpoint;
+	if (spec.find("://") == std::string::npos) {
+		spec = "http://" + spec;
 	}
-	auto colon = endpoint.rfind(':');
-	if (colon != std::string::npos) {
-		port_ = std::stoi(endpoint.substr(colon + 1));
-		host_ = endpoint.substr(0, colon);
-	} else {
-		host_ = endpoint;
+	auto uri = arrow::util::Uri::FromString(spec);
+	if (!uri.ok() || uri->host().empty()) {
+		throw PolicyError("lease.endpoint: expected HOST:PORT or URL, got '" + endpoint + "'");
+	}
+	host_ = uri->host();
+	https_ = uri->scheme() == "https";
+	port_ = uri->port();
+	if (port_ < 0) {
+		port_ = https_ ? 443 : 80;
 	}
 	bucket_ = lease.bucket;
 	if (bucket_.empty()) {
@@ -207,22 +211,26 @@ std::vector<std::string> S3ControlClient::ListKeys(const std::string &prefix) co
 	if (obj.status != 200) {
 		return keys;
 	}
-	const std::string open = "<Key>";
-	const std::string close = "</Key>";
-	size_t i = 0;
-	while (true) {
-		auto a = obj.body.find(open, i);
-		if (a == std::string::npos) {
-			break;
-		}
-		a += open.size();
-		auto b = obj.body.find(close, a);
-		if (b == std::string::npos) {
-			break;
-		}
-		keys.push_back(obj.body.substr(a, b - a));
-		i = b + close.size();
+	return ParseS3ListKeysXml(obj.body);
+}
+
+std::vector<std::string> ParseS3ListKeysXml(const std::string &xml) {
+	std::vector<std::string> keys;
+	tinyxml2::XMLDocument doc;
+	if (doc.Parse(xml.c_str()) != tinyxml2::XML_SUCCESS) {
+		return keys;
 	}
+	std::function<void(tinyxml2::XMLElement *)> walk;
+	walk = [&](tinyxml2::XMLElement *n) {
+		while (n) {
+			if (n->Name() && std::strcmp(n->Name(), "Key") == 0 && n->GetText()) {
+				keys.emplace_back(n->GetText());
+			}
+			walk(n->FirstChildElement());
+			n = n->NextSiblingElement();
+		}
+	};
+	walk(doc.RootElement());
 	return keys;
 }
 

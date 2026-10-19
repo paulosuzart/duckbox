@@ -29,7 +29,7 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-tinyxml210-${{ runner.os }}-${{ runner.arch }}
       - name: Build
         run: make build CXX=g++
       - name: Unit tests
@@ -57,7 +57,7 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-tinyxml210-${{ runner.os }}-${{ runner.arch }}
       - name: Coverage (gcovr, server/src >= 75%)
         run: make coverage
 
@@ -75,7 +75,7 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-ducklake-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-tinyxml210-ducklake-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch deps and build
         run: |
           bash scripts/fetch_deps.sh

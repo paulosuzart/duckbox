@@ -16,7 +16,9 @@ endif()
 if(NOT EXISTS "${DUCKBOX_DEPS}/duckdb/include/duckdb/parser/parser.hpp" OR
    NOT EXISTS "${DUCKBOX_DEPS}/duckdb/lib/libduckdb_static.a" OR
    NOT EXISTS "${DUCKBOX_DEPS}/httplib/httplib.h" OR
-   NOT EXISTS "${DUCKBOX_DEPS}/yaml-cpp-0.8.0/CMakeLists.txt")
+   NOT EXISTS "${DUCKBOX_DEPS}/yaml-cpp-0.8.0/CMakeLists.txt" OR
+   NOT EXISTS "${DUCKBOX_DEPS}/nlohmann/nlohmann/json.hpp" OR
+   NOT EXISTS "${DUCKBOX_DEPS}/tinyxml2/tinyxml2.cpp")
   message(STATUS "Fetching DuckDB ${DUCKBOX_DUCKDB_VERSION} and httplib into ${DUCKBOX_DEPS}")
   execute_process(
     COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/fetch_deps.sh"
@@ -48,6 +50,38 @@ else()
   FetchContent_MakeAvailable(yaml-cpp)
 endif()
 
+# nlohmann/json: registry records, JWT payloads, audit/debug JSON. Never a homemade parser.
+if(NOT EXISTS "${DUCKBOX_DEPS}/nlohmann/nlohmann/json.hpp")
+  include(FetchContent)
+  FetchContent_Declare(
+    nlohmann_json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
+    URL_HASH SHA256=9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6
+    DOWNLOAD_NO_EXTRACT TRUE)
+  FetchContent_GetProperties(nlohmann_json)
+  if(NOT nlohmann_json_POPULATED)
+    FetchContent_Populate(nlohmann_json)
+    file(MAKE_DIRECTORY "${DUCKBOX_DEPS}/nlohmann/nlohmann")
+    file(COPY "${nlohmann_json_SOURCE_DIR}/json.hpp" DESTINATION "${DUCKBOX_DEPS}/nlohmann/nlohmann")
+  endif()
+endif()
+
+# tinyxml2: S3 ListObjectsV2 XML. AWS REST list is XML-only; no JSON alternative.
+if(NOT EXISTS "${DUCKBOX_DEPS}/tinyxml2/tinyxml2.cpp")
+  include(FetchContent)
+  FetchContent_Declare(
+    tinyxml2
+    URL https://github.com/leethomason/tinyxml2/archive/refs/tags/10.0.0.tar.gz
+    URL_HASH SHA256=3bdf15128ba16686e69bce256cc468e76c7b94ff2c7f391cc5ec09e40bff3839)
+  FetchContent_GetProperties(tinyxml2)
+  if(NOT tinyxml2_POPULATED)
+    FetchContent_Populate(tinyxml2)
+    file(MAKE_DIRECTORY "${DUCKBOX_DEPS}/tinyxml2")
+    file(COPY "${tinyxml2_SOURCE_DIR}/tinyxml2.h" "${tinyxml2_SOURCE_DIR}/tinyxml2.cpp"
+         DESTINATION "${DUCKBOX_DEPS}/tinyxml2")
+  endif()
+endif()
+
 set(DUCKBOX_SOURCES
   server/src/yaml.cpp
   server/src/error.cpp
@@ -66,6 +100,7 @@ set(DUCKBOX_SOURCES
   server/src/spec_validator.cpp
   server/src/sandbox.cpp
   server/src/s3.cpp
+  ${DUCKBOX_DEPS}/tinyxml2/tinyxml2.cpp
   server/src/sandbox_registry.cpp
   server/src/arrow_ipc.cpp
   server/src/auth.cpp
@@ -78,7 +113,9 @@ target_include_directories(duckbox_core
   PUBLIC
     ${CMAKE_SOURCE_DIR}/server/include
     ${DUCKBOX_DEPS}/duckdb/include
-    ${DUCKBOX_DEPS}/httplib)
+    ${DUCKBOX_DEPS}/httplib
+    ${DUCKBOX_DEPS}/nlohmann
+    ${DUCKBOX_DEPS}/tinyxml2)
 target_compile_definitions(duckbox_core PUBLIC DUCKBOX_DUCKDB_VERSION="${DUCKBOX_DUCKDB_VERSION}")
 if(NOT MSVC)
   target_compile_options(duckbox_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
