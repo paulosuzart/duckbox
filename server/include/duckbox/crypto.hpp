@@ -14,7 +14,10 @@ std::string Base64UrlEncode(const std::string &s);
 std::vector<uint8_t> Base64UrlDecode(const std::string &s);
 
 std::string HmacSha256(const std::string &key, const std::string &data);
+std::string Sha256Raw(const std::string &data);
 std::string Sha256Hex(const std::string &data);
+std::string HexEncode(const std::string &raw);
 bool ConstTimeEquals(const std::string &a, const std::string &b);
+std::string UriEncode(const std::string &s, bool encode_slash);
 
 } // namespace duckbox

@@ -1,11 +1,12 @@
 #pragma once
 
-// Per-connection sandbox spec. Deny-by-default contract delivered on each call
-// (Flight headers/handshake, or `duckbox run --spec`). Contains the lake attach,
-// attachments, and credential *references* (env/secret names). The daemon never
+// Named sandbox definition (spec). Deny-by-default contract stored in the
+// registry under a stable id (e.g. acme-analyst). Contains the lake attach,
+// attachments, and credential *references* (env:/file:). The daemon never
 // opens the lake; only a sandbox DuckDB instance does, at create/warmup.
 
 #include "duckbox/error.hpp"
+#include "duckbox/secrets.hpp"
 
 #include <map>
 #include <string>
@@ -21,8 +22,8 @@ struct S3Settings {
 	std::string endpoint_env;
 	std::string url_style = "path";
 	bool use_ssl = false;
-	std::string access_key_env;
-	std::string secret_key_env;
+	SecretRef access_key;
+	SecretRef secret_key;
 	std::string region = "us-east-1";
 	std::string region_env;
 };
@@ -31,7 +32,8 @@ struct LakeSettings {
 	LakeKind kind = LakeKind::Memory;
 	std::string alias = "lake";
 	std::string catalog;
-	std::string catalog_env; // env name; resolved at sandbox attach, never logged
+	SecretRef catalog_ref; // env:/file: for catalog DSN; never a value in the registry
+	std::string catalog_env; // shorthand env name
 	std::string data_path;
 	bool read_only = true;
 	std::string bootstrap_sql_path;
@@ -74,6 +76,8 @@ struct TablePolicy {
 };
 
 struct SandboxSpec {
+	std::string id;        // stable name, e.g. acme-analyst
+	std::string bound_key; // tenant key stored on the definition
 	std::string name;
 	std::string source_path;
 	KeySpec key;
@@ -84,11 +88,16 @@ struct SandboxSpec {
 	bool deny_table_functions = true;
 	bool require_prepared_statements = false;
 	std::string init_sql;
-	std::string version;
+	std::string version; // hash(policy + initSQL); monotonic registry version is separate
 	std::string yaml_body;
-	// Bounded Prometheus `policy` label. Operator-declared class, not a hash.
-	std::string metrics_class;
+	// Bounded Prometheus `policy` label. Never the sandbox id.
+	std::string policy_class;
+	std::string metrics_class; // YAML alias of policy_class
+	std::vector<std::string> attachments;
 
+	const std::string &PolicyClass() const {
+		return !policy_class.empty() ? policy_class : metrics_class;
+	}
 	const TablePolicy *FindTable(const std::string &name) const;
 	bool FunctionAllowed(const std::string &name) const;
 };
@@ -104,6 +113,7 @@ inline Policy LoadPolicyFile(const std::string &path) {
 }
 
 std::string FingerprintSpec(const SandboxSpec &spec);
-std::string SandboxInstanceId(const std::string &tenant_raw, const SandboxSpec &spec, const std::string &init_sql);
+std::string ContentHash(const SandboxSpec &spec);
+bool ValidSandboxId(const std::string &id);
 
 } // namespace duckbox

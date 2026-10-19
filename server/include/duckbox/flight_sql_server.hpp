@@ -1,13 +1,16 @@
 #pragma once
 
 // Arrow Flight SQL is the v1 interface. The daemon is the control plane
-// (routing, registry, leases). Each call carries key + spec + initSQL; the
-// sandbox attaches the lake and answers queries and metadata.
+// (named sandbox registry, routing, leases). Queries send sandbox id + SQL.
+// CRUD is Flight DoAction (CreateSandbox/GetSandbox/UpdateSandbox/DeleteSandbox/
+// ListSandboxes). FlightSqlServerBase::DoAction is final, so a thin
+// FlightServerBase wrapper intercepts those actions.
 
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/handle.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/sandbox.hpp"
+#include "duckbox/sandbox_registry.hpp"
 
 #include <arrow/flight/sql/server.h>
 #include <arrow/flight/server.h>
@@ -26,8 +29,9 @@ struct ServerOptions {
 
 class DuckboxFlightSqlServer : public arrow::flight::sql::FlightSqlServerBase {
 public:
-	DuckboxFlightSqlServer(DaemonConfig daemon, std::shared_ptr<ISandboxRegistry> sandboxes,
-	                       std::shared_ptr<IHandleSigner> signer, std::shared_ptr<ISqlRewriter> rewriter);
+	DuckboxFlightSqlServer(DaemonConfig daemon, std::shared_ptr<SandboxRegistry> defs,
+	                       std::shared_ptr<SandboxRuntime> runtime, std::shared_ptr<IHandleSigner> signer,
+	                       std::shared_ptr<ISqlRewriter> rewriter);
 
 	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> GetFlightInfoStatement(
 	    const arrow::flight::ServerCallContext &context, const arrow::flight::sql::StatementQuery &command,
@@ -70,15 +74,24 @@ public:
 	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> DoGetTableTypes(
 	    const arrow::flight::ServerCallContext &context) override;
 
+	arrow::Status HandleSandboxAction(const arrow::flight::ServerCallContext &context, const arrow::flight::Action &action,
+	                                  std::unique_ptr<arrow::flight::ResultStream> *result);
+
+	static const std::vector<arrow::flight::ActionType> &SandboxActionTypes();
+
 private:
 	struct CallCtx {
+		SandboxRecord rec;
 		Policy spec;
 		TenantKey key;
 		std::string init_sql;
 		std::string spec_dir;
+		std::string caller;
 	};
 	CallCtx Auth(const arrow::flight::ServerCallContext &context) const;
+	std::string CallerOf(const arrow::flight::ServerCallContext &context) const;
 	std::shared_ptr<TenantSandbox> Box(const CallCtx &c) const;
+	StatementHandle MakeHandle(const CallCtx &c, const std::string &rewritten, int user_params) const;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> Info(
 	    const arrow::flight::FlightDescriptor &descriptor, const std::string &token,
 	    const std::shared_ptr<arrow::Schema> &schema) const;
@@ -89,17 +102,45 @@ private:
 	    const std::shared_ptr<arrow::RecordBatch> &batch) const;
 
 	DaemonConfig daemon_;
-	std::shared_ptr<ISandboxRegistry> sandboxes_;
+	std::shared_ptr<SandboxRegistry> defs_;
+	std::shared_ptr<SandboxRuntime> runtime_;
 	std::shared_ptr<IHandleSigner> signer_;
 	std::shared_ptr<ISqlRewriter> rewriter_;
 	mutable std::mutex bind_mu_;
 	mutable std::unordered_map<std::string, std::string> bind_cache_;
 };
 
+class DuckboxFlightServer : public arrow::flight::FlightServerBase {
+public:
+	explicit DuckboxFlightServer(std::unique_ptr<DuckboxFlightSqlServer> sql);
+
+	arrow::Status GetFlightInfo(const arrow::flight::ServerCallContext &context,
+	                            const arrow::flight::FlightDescriptor &request,
+	                            std::unique_ptr<arrow::flight::FlightInfo> *info) override;
+	arrow::Status GetSchema(const arrow::flight::ServerCallContext &context,
+	                        const arrow::flight::FlightDescriptor &request,
+	                        std::unique_ptr<arrow::flight::SchemaResult> *schema) override;
+	arrow::Status DoGet(const arrow::flight::ServerCallContext &context, const arrow::flight::Ticket &request,
+	                    std::unique_ptr<arrow::flight::FlightDataStream> *stream) override;
+	arrow::Status DoPut(const arrow::flight::ServerCallContext &context,
+	                    std::unique_ptr<arrow::flight::FlightMessageReader> reader,
+	                    std::unique_ptr<arrow::flight::FlightMetadataWriter> writer) override;
+	arrow::Status ListActions(const arrow::flight::ServerCallContext &context,
+	                          std::vector<arrow::flight::ActionType> *actions) override;
+	arrow::Status DoAction(const arrow::flight::ServerCallContext &context, const arrow::flight::Action &action,
+	                       std::unique_ptr<arrow::flight::ResultStream> *result) override;
+
+private:
+	std::unique_ptr<DuckboxFlightSqlServer> sql_;
+};
+
 int RunServer(const ServerOptions &opt);
 int RunLocalQuery(const DaemonConfig &daemon, const std::string &spec_path, const std::string &key,
                   const std::string &sql, const std::string &init_sql);
-void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<ISandboxRegistry> sandboxes);
+int RunSandboxCli(const std::string &op, const std::string &url, const std::string &spec_path, const std::string &id,
+                  const std::string &key, const std::string &caller);
+void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
+                    std::shared_ptr<SandboxRuntime> runtime);
 
 class HandshakeAuthHandler : public arrow::flight::ServerAuthHandler {
 public:

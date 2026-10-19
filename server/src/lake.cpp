@@ -1,6 +1,5 @@
 #include "duckbox/lake.hpp"
 #include "duckbox/error.hpp"
-#include "duckbox/secrets.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -38,7 +37,8 @@ void ExecOrThrow(ddb::Connection &con, const std::string &sql) {
 	}
 }
 
-void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std::string &spec_dir) {
+void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std::string &spec_dir,
+                        const SecretResolver &secrets) {
 	ExecOrThrow(con, "INSTALL nanoarrow FROM community; LOAD nanoarrow;");
 
 	for (auto &ext : spec.lake.extensions) {
@@ -72,16 +72,19 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
 	auto &s3 = spec.lake.s3;
 	std::string endpoint = s3.endpoint;
 	if (!s3.endpoint_env.empty()) {
-		endpoint = ResolveSecret(s3.endpoint_env, "", "lake.s3.endpoint_env");
+		endpoint = secrets.Resolve(ParseSecretRef(s3.endpoint_env, "lake.s3.endpoint_env"), "lake.s3.endpoint_env");
 	}
-	std::string key_id = ResolveSecret(s3.access_key_env, "", "lake.s3.access_key_env");
-	std::string secret = ResolveSecret(s3.secret_key_env, "", "lake.s3.secret_key_env");
+	if (s3.access_key.Empty() || s3.secret_key.Empty()) {
+		throw PolicyError("lake.s3.access_key and lake.s3.secret_key references are required");
+	}
+	std::string key_id = secrets.Resolve(s3.access_key, "lake.s3.access_key");
+	std::string secret = secrets.Resolve(s3.secret_key, "lake.s3.secret_key");
 	std::string region = s3.region;
 	if (!s3.region_env.empty()) {
-		region = ResolveSecret(s3.region_env, s3.region, "lake.s3.region_env");
+		region = secrets.Resolve(ParseSecretRef(s3.region_env, "lake.s3.region_env"), "lake.s3.region_env");
 	}
-	std::clog << "sandbox: attaching ducklake catalog (s3 credentials from "
-	          << s3.access_key_env << "/" << s3.secret_key_env << ", values not logged)\n";
+	std::clog << "sandbox: attaching ducklake catalog (s3 credentials from " << s3.access_key.Spec() << "/"
+	          << s3.secret_key.Spec() << ", values not logged)\n";
 
 	std::ostringstream secret_sql;
 	secret_sql << "CREATE OR REPLACE SECRET duckbox_s3 (TYPE s3, PROVIDER config"
@@ -94,8 +97,10 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
 	ExecOrThrow(con, secret_sql.str());
 
 	std::string catalog = spec.lake.catalog;
-	if (!spec.lake.catalog_env.empty()) {
-		catalog = ResolveSecret(spec.lake.catalog_env, catalog, "lake.catalog_env");
+	if (!spec.lake.catalog_ref.Empty()) {
+		catalog = secrets.Resolve(spec.lake.catalog_ref, "lake.catalog");
+	} else if (!spec.lake.catalog_env.empty()) {
+		catalog = secrets.Resolve(ParseSecretRef(spec.lake.catalog_env, "lake.catalog_env"), "lake.catalog_env");
 	}
 	if (catalog.empty()) {
 		throw PolicyError("lake.catalog or lake.catalog_env is required for ducklake");

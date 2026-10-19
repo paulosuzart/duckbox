@@ -1,14 +1,15 @@
 #pragma once
 
-// Control-plane config only. The daemon has no lake access: registry, routing,
-// and S3 ownership leases. Its only credential is the lease prefix. Lake attach
-// lives on the per-connection sandbox spec.
+// Control-plane config only. The daemon has no lake access: named sandbox
+// registry, routing, and S3 ownership leases. Its only credential is the
+// lease/registry prefix. Lake attach lives on the sandbox definition.
 
 #include "duckbox/error.hpp"
 
 #include <cstdint>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace duckbox {
 
@@ -24,6 +25,12 @@ struct LeaseSettings {
 	bool skip_probe = false;
 };
 
+// Trusted caller → allowed tenant-key globs. Empty list = allow all (local/dev).
+struct CallerRule {
+	std::string identity; // exact or "*"
+	std::vector<std::string> key_patterns;
+};
+
 struct DaemonConfig {
 	std::string name = "duckbox";
 	std::string source_path;
@@ -33,10 +40,10 @@ struct DaemonConfig {
 	int64_t handle_ttl_seconds = 300;
 	int64_t idle_evict_ms = 300000;
 	size_t max_sandboxes = 600;
-	size_t max_sandboxes_per_key = 3;
 	int64_t init_sql_timeout_ms = 5000;
 	std::unordered_set<std::string> allowed_init_settings;
 	LeaseSettings lease;
+	std::vector<CallerRule> callers;
 	std::string debug_http;
 	std::string metrics_listen = "127.0.0.1:9477";
 	std::unordered_set<std::string> metrics_policy_classes;
@@ -45,5 +52,9 @@ struct DaemonConfig {
 DaemonConfig LoadDaemonFile(const std::string &path);
 DaemonConfig DefaultDaemonConfig();
 void ValidateDaemonOrThrow(const DaemonConfig &cfg);
+
+bool GlobMatch(const std::string &pattern, const std::string &value);
+// Throws AuthError if this identity may not use sandbox_key.
+void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity, const std::string &sandbox_key);
 
 } // namespace duckbox

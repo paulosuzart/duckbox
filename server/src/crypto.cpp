@@ -6,6 +6,8 @@
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 
+#include <cstdio>
+
 namespace duckbox {
 namespace {
 
@@ -81,14 +83,39 @@ std::string HmacSha256(const std::string &key, const std::string &data) {
 	return std::string(reinterpret_cast<char *>(md), md_len);
 }
 
-std::string Sha256Hex(const std::string &data) {
+std::string Sha256Raw(const std::string &data) {
 	unsigned char md[SHA256_DIGEST_LENGTH];
 	SHA256(reinterpret_cast<const unsigned char *>(data.data()), data.size(), md);
+	return std::string(reinterpret_cast<char *>(md), SHA256_DIGEST_LENGTH);
+}
+
+std::string HexEncode(const std::string &raw) {
 	static const char *hex = "0123456789abcdef";
-	std::string out(SHA256_DIGEST_LENGTH * 2, '0');
-	for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-		out[static_cast<size_t>(i) * 2] = hex[md[i] >> 4];
-		out[static_cast<size_t>(i) * 2 + 1] = hex[md[i] & 0xF];
+	std::string out(raw.size() * 2, '0');
+	for (size_t i = 0; i < raw.size(); i++) {
+		auto b = static_cast<unsigned char>(raw[i]);
+		out[i * 2] = hex[b >> 4];
+		out[i * 2 + 1] = hex[b & 0xF];
+	}
+	return out;
+}
+
+std::string Sha256Hex(const std::string &data) {
+	return HexEncode(Sha256Raw(data));
+}
+
+std::string UriEncode(const std::string &s, bool encode_slash) {
+	std::string out;
+	out.reserve(s.size() * 3);
+	for (unsigned char c : s) {
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+		    c == '.' || c == '~' || (c == '/' && !encode_slash)) {
+			out.push_back(static_cast<char>(c));
+		} else {
+			char buf[4];
+			std::snprintf(buf, sizeof(buf), "%%%02X", c);
+			out.append(buf);
+		}
 	}
 	return out;
 }

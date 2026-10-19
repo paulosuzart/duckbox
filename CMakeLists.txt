@@ -47,6 +47,8 @@ set(DUCKBOX_SOURCES
   server/src/init_sql.cpp
   server/src/spec_validator.cpp
   server/src/sandbox.cpp
+  server/src/s3.cpp
+  server/src/sandbox_registry.cpp
   server/src/arrow_ipc.cpp
   server/src/auth.cpp
   server/src/handle.cpp

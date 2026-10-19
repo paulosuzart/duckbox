@@ -1,5 +1,7 @@
+id: memory-analyst
+key: tenant_21:user_sergio
 name: analyst
-metrics_class: analyst
+policy_class: analyst
 auth:
   key:
     patterns:

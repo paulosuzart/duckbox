@@ -6,6 +6,7 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <sstream>
 
@@ -20,7 +21,67 @@ std::pair<std::string, int> ParseListen(const std::string &listen) {
 	return {listen.substr(0, colon), std::stoi(listen.substr(colon + 1))};
 }
 
+std::vector<std::string> StringList(const YamlNode *n) {
+	std::vector<std::string> out;
+	if (!n) {
+		return out;
+	}
+	if (n->IsSeq()) {
+		for (auto &item : n->seq) {
+			if (item.IsScalar() && !item.scalar.empty()) {
+				out.push_back(item.scalar);
+			}
+		}
+	} else if (n->IsScalar() && !n->scalar.empty() && n->scalar != "[]") {
+		out.push_back(n->scalar);
+	}
+	return out;
+}
+
 } // namespace
+
+bool GlobMatch(const std::string &pattern, const std::string &value) {
+	std::function<bool(size_t, size_t)> rec = [&](size_t pi, size_t vi) -> bool {
+		if (pi == pattern.size()) {
+			return vi == value.size();
+		}
+		if (pattern[pi] == '*') {
+			if (rec(pi + 1, vi)) {
+				return true;
+			}
+			return vi < value.size() && rec(pi, vi + 1);
+		}
+		return vi < value.size() && pattern[pi] == value[vi] && rec(pi + 1, vi + 1);
+	};
+	return rec(0, 0);
+}
+
+void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity, const std::string &sandbox_key) {
+	if (cfg.callers.empty()) {
+		return;
+	}
+	std::string id = identity.empty() ? "local" : identity;
+	std::vector<std::string> pats;
+	bool matched_identity = false;
+	for (auto &rule : cfg.callers) {
+		if (rule.identity == "*" || rule.identity == id) {
+			matched_identity = true;
+			pats.insert(pats.end(), rule.key_patterns.begin(), rule.key_patterns.end());
+		}
+	}
+	if (!matched_identity) {
+		throw AuthError("caller '" + id + "' is not a trusted identity");
+	}
+	if (pats.empty()) {
+		throw AuthError("caller '" + id + "' has no allowed key patterns");
+	}
+	for (auto &p : pats) {
+		if (GlobMatch(p, sandbox_key)) {
+			return;
+		}
+	}
+	throw AuthError("caller '" + id + "' is not authorized for sandbox key");
+}
 
 DaemonConfig DefaultDaemonConfig() {
 	DaemonConfig d;
@@ -72,13 +133,25 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 		} else {
 			throw PolicyError("unknown auth.mode '" + mode + "'");
 		}
+		if (auto *callers = auth->Get("callers")) {
+			if (!callers->IsSeq()) {
+				throw PolicyError("auth.callers must be a sequence");
+			}
+			for (auto &item : callers->seq) {
+				CallerRule rule;
+				rule.identity = item.GetString("identity");
+				rule.key_patterns = StringList(item.Get("keys"));
+				if (rule.identity.empty()) {
+					throw PolicyError("auth.callers[].identity is required");
+				}
+				d.callers.push_back(std::move(rule));
+			}
+		}
 	}
 	if (auto *lim = root.Get("limits")) {
 		d.handle_ttl_seconds = lim->GetInt("handle_ttl_seconds", d.handle_ttl_seconds);
 		d.idle_evict_ms = lim->GetInt("idle_evict_ms", d.idle_evict_ms);
 		d.max_sandboxes = static_cast<size_t>(lim->GetInt("max_sandboxes", static_cast<int64_t>(d.max_sandboxes)));
-		d.max_sandboxes_per_key =
-		    static_cast<size_t>(lim->GetInt("max_sandboxes_per_key", static_cast<int64_t>(d.max_sandboxes_per_key)));
 		d.init_sql_timeout_ms = lim->GetInt("init_sql_timeout_ms", d.init_sql_timeout_ms);
 	}
 	if (auto *lease = root.Get("lease")) {
@@ -92,7 +165,7 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 	}
 	if (root.Get("lake") || root.Get("tables") || root.Get("policy") || root.Get("spec")) {
 		throw PolicyError("daemon config is control-plane only (no lake, tables, or spec). "
-		                  "Lake attach and credentials belong on the per-connection sandbox spec.");
+		                  "Lake attach and credentials belong on the named sandbox definition.");
 	}
 	return d;
 }
@@ -110,9 +183,6 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 	}
 	if (cfg.max_sandboxes == 0) {
 		add("limits.max_sandboxes", "must be >= 1");
-	}
-	if (cfg.max_sandboxes_per_key == 0) {
-		add("limits.max_sandboxes_per_key", "must be >= 1");
 	}
 	if (cfg.handle_secret.empty()) {
 		add("handle_secret", "required (or handle_secret_env)");
@@ -161,7 +231,7 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 		cli.set_connection_timeout(2, 0);
 		auto res = cli.Get("/");
 		if (!res) {
-			add("lease.endpoint", "not reachable (daemon lease prefix only; no lake access)");
+			add("lease.endpoint", "not reachable (daemon lease/registry prefix only; no lake access)");
 		} else {
 			std::string probe = "/" + cfg.lease.bucket + "/" + cfg.lease.prefix + ".duckbox-cw-probe";
 			httplib::Headers h = {{"If-None-Match", "*"}};
@@ -169,7 +239,6 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 			if (!put) {
 				add("lease", "conditional PUT (If-None-Match) failed to reach " + probe);
 			}
-			// 200/204/403/412 all mean the S3 API responded.
 		}
 	}
 

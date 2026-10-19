@@ -29,49 +29,52 @@ The helper is three or four lines in your own code:
 ```python
 import sys
 sys.path.append("examples/python")
-from duckbox_client import connect
+from duckbox_client import connect, create_sandbox
 
-db = connect()  # tenant_21, localhost, bundled analyst spec
+create_sandbox()  # named sandbox acme-analyst from the bundled spec
+db = connect()    # queries send id + SQL
 print(db.query("SELECT id, title, amount FROM deals"))
 ```
 
-`DUCKBOX_URL` / `DUCKBOX_SPEC` override the defaults. Memory lake (no Docker): serve `daemons/memory.yaml` and set `DUCKBOX_SPEC=policies/memory/analyst.yaml`. A flag-oriented one-shot lives at `examples/python/query_cli.py`.
+`DUCKBOX_URL` / `DUCKBOX_SPEC` / `DUCKBOX_SANDBOX` override the defaults. Memory lake (no Docker): serve `daemons/memory.yaml` and set `DUCKBOX_SPEC=policies/memory/analyst.yaml`. A flag-oriented one-shot lives at `examples/python/query_cli.py`.
 
-## The sandbox spec is the contract
+## Named sandboxes
 
-A duckbox **daemon is a control plane**. It has **no data access**. It owns:
+A sandbox is a **named resource** with a stable id (`acme-analyst`), like a VM name. That replaces `(key, hash)` identity and the per-key sandbox cap.
 
-- the Flight SQL listener and instance registry
-- routing of calls to sandboxes
-- S3 **ownership leases** (its only credential is the lease prefix)
+The **daemon is a control plane**. It has **no data access**. It owns:
 
-**Lake attach, attachments, and their credentials belong on the per-connection spec** and are used only by that sandbox’s DuckDB instance, at create/warmup (before `lock_configuration`). Credentials are **env/secret names**, never logged.
+- the Flight SQL listener
+- the named-sandbox **registry** (S3 next to leases, or in-memory)
+- routing of calls to warm instances
+- S3 **ownership leases** (its only credential is the lease/registry prefix)
 
-Each connection (or `duckbox run`) supplies:
+**Lake attach, attachments, and credentials belong on the sandbox definition** and are used only by that sandbox’s DuckDB instance, at create/warmup (before `lock_configuration`). The registry stores **credential references only** (`env:DUCKBOX_S3_KEY`, `file:/run/secrets/x`) — never values. Values are resolved inside the sandbox at each warmup. Refs are checked syntactically at create; resolvability is checked at warmup. Values are never logged.
 
-| Input | Where |
-| --- | --- |
-| Tenant **key** | `x-duckbox-key` / handshake username / `--key` |
-| **Policy / spec** | `x-duckbox-spec` YAML (trusted) or inside the JWT (token mode) / `--spec` |
-| **initSQL** | `x-duckbox-init-sql` / `--init-sql` / spec `init_sql` |
+A definition is: **id**, **key**, **policy** (with a bounded `policy_class` name), lake, attachments, credential refs, initSQL, limits.
 
-The spec grants, explicitly:
+Trusted-caller CRUD (Flight SQL `DoAction`, mirrored as CLI):
 
-- lake attach (catalog, data path, S3 env names, extensions to LOAD)
-- whitelisted tables and columns
-- mandatory filters (bound from key variables, never string-interpolated)
-- key extraction (`auth.key` pattern / regex / split)
-- function allowlist and resource limits
+```bash
+duckbox sandbox create|get|update|delete|list --url grpc://127.0.0.1:4747 --spec FILE [--id ID] [--key KEY]
+```
 
-Nothing else is reachable: no implicit catalogs, no extension autoload, no table discovery, no user `ATTACH`/`COPY TO`.
+Create on an existing id with different content is rejected (409). `UpdateSandbox` explicitly bumps **version** (hash of policy+initSQL is the content identity; S3 keeps immutable `sandboxes/<id>/v<N>.json` plus `current.json` with If-None-Match / If-Match). Warm instances of the old version drain/passivate. Delete writes a tombstone. Any node can load a definition after failover.
+
+Queries send **id + SQL** (`x-duckbox-sandbox`). The bound key comes from the definition; send `x-duckbox-key` only when the spec’s `auth.key` extractor needs a per-query key. The caller must be authorized for the sandbox’s key (`auth.callers` maps identities to key globs; empty = allow all in local/dev).
+
+Prepared-statement handles carry **id + version**. A handle for a non-current version is rejected with a clear `re-prepare` error.
 
 ### CLI
 
 ```bash
-# Control plane (no lake). Specs arrive per connection.
+# Control plane (no lake). Definitions live in the registry.
 duckbox serve --daemon ./daemons/memory.yaml --listen 127.0.0.1:4747
 
-# One-shot sandbox (throws away the DuckDB instance at exit)
+duckbox sandbox create --spec ./policies/memory/analyst.yaml
+duckbox sandbox list
+
+# One-shot throwaway DuckDB (does not persist a named sandbox)
 duckbox run --daemon ./daemons/memory.yaml \
   --spec ./policies/memory/analyst.yaml \
   --key tenant_21:user_sergio \
@@ -83,24 +86,20 @@ duckbox validate --daemon ./daemons/memory.yaml --spec ./policies/memory/analyst
 
 `--debug-http HOST:PORT` enables the old `POST /v1/query` **debug** endpoint (off by default). v1 is **Arrow Flight SQL**.
 
-Each node also serves Prometheus **text** on `/metrics` (default `127.0.0.1:9477`, `metrics.listen` in the daemon YAML, `--metrics HOST:PORT` / `--no-metrics`). Separate from debug HTTP. Labels are only `node` plus a bounded `policy` class (`metrics_class` on the spec, allowlisted in `metrics.policy_classes`, else `other`). Never tenant/user/key — those go to the structured per-query audit log on stderr.
-
-Trusted callers may send inline spec YAML. In `auth.mode: token`, the spec must come from the signed JWT (inline YAML or hash). JWT verify is stubbed in this draft.
+Each node also serves Prometheus **text** on `/metrics` (default `127.0.0.1:9477`, `metrics.listen` in the daemon YAML, `--metrics HOST:PORT` / `--no-metrics`). Separate from debug HTTP. Labels are only `node` plus a bounded `policy` class (`policy_class` on the spec, allowlisted in `metrics.policy_classes`, else `other`). **Never the sandbox id** (id cardinality ≈ tenants), and never tenant/user/key — those go to the structured per-query audit log on stderr.
 
 ### Validation
 
-1. **Static** (every arrival): schema, types, key extractors compile, filters parse with DuckDB, referenced `:vars` exist, function names, initSQL allowlist. **All** errors, with field paths (`tables.deals.filters[0]: …`).
-2. **Lake** (inside the sandbox on first warmup for that **policy hash**): whitelisted tables/columns exist, filter columns exist. Cached in the daemon registry by hash so later sandboxes skip it. `duckbox validate` uses a throwaway sandbox.
+1. **Static** (create/update): schema, types, key extractors, filters, `:vars`, function names, initSQL allowlist, secret-ref syntax. **All** errors, with field paths (`tables.deals.filters[0]: …`).
+2. **Lake** (inside the sandbox on first warmup for that **(id, version)**): whitelisted tables/columns exist. Cached on the registry record so later warmups skip it. `duckbox validate` uses a throwaway sandbox.
 
 Daemon startup validates **only** daemon config (listen, limits, optional lease prefix reachability / If-None-Match probe). Not the lake.
 
 ### Sandbox lifecycle
 
-Sandboxes are keyed by `(tenant key, hash(policy + initSQL))`. A different policy for the same key is a **different** sandbox. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Cap live sandboxes per key (default 3).
+Runtime instances are keyed by **id** (current version). Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap.
 
-**initSQL** (header / CLI / spec): SET of permitted names, `CREATE [OR REPLACE] TEMP VIEW|MACRO|TABLE`, `USE`, `LOAD` of spec-listed extensions. Reject `ATTACH`/`DETACH`, `COPY`/`EXPORT`, `INSTALL`, external access, security settings. Objects it creates are visible to user SQL **only if the spec whitelists them**.
-
-Prepared-statement handles are HMAC-signed and include rewritten SQL, tenant key, **policy hash + YAML**, initSQL, expiry, and bound parameter IPC so any node can execute without session state.
+**initSQL**: SET of permitted names, `CREATE [OR REPLACE] TEMP VIEW|MACRO|TABLE`, `USE`, `LOAD` of spec-listed extensions. Reject `ATTACH`/`DETACH`, `COPY`/`EXPORT`, `INSTALL`, external access, security settings. Objects it creates are visible to user SQL **only if the spec whitelists them**.
 
 ### Metrics
 
@@ -110,15 +109,16 @@ Prepared-statement handles are HMAC-signed and include rewritten SQL, tenant key
 
 v1 wire protocol. JDBC and ADBC work. Headers:
 
-- `x-duckbox-key`
-- `x-duckbox-spec` (base64url of the spec YAML — gRPC headers cannot carry newlines)
-- `x-duckbox-spec-dir` (optional; resolves spec-relative paths such as `lake.bootstrap_sql`)
-- `x-duckbox-init-sql` (optional)
-- handshake: username=key (optional; spec still required in trusted mode)
+- `x-duckbox-sandbox` — named sandbox id (required for queries)
+- `x-duckbox-key` — optional; definition key is used otherwise
+- `x-duckbox-caller` — trusted caller identity (default `local`)
+- handshake: peer identity used as caller when the header is absent
+
+CRUD actions: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes` (body is spec YAML or id).
 
 `GetCatalogs` / `GetDbSchemas` / `GetTables` / `GetSqlInfo` are answered **by the sandbox** and filtered to spec-whitelisted tables/columns.
 
-Python is Arrow Flight SQL via ADBC. Use `examples/python/quickstart.ipynb` (or `quickstart.py`) after the daemon is up. `duckbox_client.connect()` sends the key and spec headers for you.
+Python is Arrow Flight SQL via ADBC. Use `examples/python/quickstart.ipynb` (or `quickstart.py`) after the daemon is up. `create_sandbox()` / `connect(sandbox=...)` send the id header for you.
 
 ## Build
 
@@ -148,7 +148,7 @@ export DUCKBOX_LAKE_CATALOG='ducklake:postgres:dbname=ducklake host=127.0.0.1 po
 
 CI job `ducklake-e2e` runs this on GitHub Actions (Docker available there). This VM has no Docker, so local compose is the laptop/CI path. **RustFS** is the emulator in `docker-compose.yml` to match the product S3 target; if the image is unusable, MinIO is the fallback (same path-style endpoint).
 
-Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases/writes**, not for these reads. `S3ConditionalLeaseManager` is the v1 interface; this draft uses `SingleNodeLeaseManager` and probes the lease endpoint when configured.
+Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads. The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl for tests). `S3ConditionalLeaseManager` is the v1 lease interface; this draft uses `SingleNodeLeaseManager` and probes the lease endpoint when configured.
 
 ## Layout
 
@@ -158,7 +158,7 @@ Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match)
 | `policies/` | Sandbox specs (lake + tables + key + functions) |
 | `server/` | C++ daemon + enforcement |
 | `examples/python/` | Quickstart notebook/script, `duckbox_client`, CLI utility |
-| `test/` | AST, isolation, handles, initSQL, policy-hash cache |
+| `test/` | AST, isolation, handles, named-sandbox CRUD, initSQL |
 
 ## Stubbed
 

@@ -7,16 +7,26 @@
 #include "duckbox/plan_check.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/rewriter.hpp"
+#include "duckbox/s3.hpp"
 #include "duckbox/sandbox.hpp"
+#include "duckbox/lease.hpp"
+#include "duckbox/sandbox_registry.hpp"
+#include "duckbox/secrets.hpp"
 #include "duckbox/spec_validator.hpp"
 #include "duckbox/tenant_key.hpp"
 #include "duckbox/validator.hpp"
 
+#include "httplib.h"
+
+#include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -94,7 +104,10 @@ void ExpectPlanOk(duckdb::LogicalGet &get, const duckbox::Policy &policy, const 
 
 duckbox::Policy TestPolicy() {
 	duckbox::Policy p;
+	p.id = "memory-analyst";
+	p.bound_key = "tenant_21:user_sergio";
 	p.name = "analyst";
+	p.policy_class = "analyst";
 	p.metrics_class = "analyst";
 	p.resources.max_result_rows = 100;
 	p.lake.kind = duckbox::LakeKind::Memory;
@@ -166,8 +179,11 @@ int main() {
 	auto ducklake_spec =
 	    LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/analyst.yaml");
 	Expect(ducklake_spec.lake.kind == LakeKind::Ducklake, "ducklake spec kind");
+	Expect(ducklake_spec.id == "acme-analyst", "ducklake spec id");
+	Expect(ducklake_spec.bound_key == "tenant_21:user_sergio", "ducklake spec bound key");
+	Expect(ducklake_spec.PolicyClass() == "analyst", "ducklake policy_class");
 	Expect(ducklake_spec.lake.catalog_env == "DUCKBOX_LAKE_CATALOG", "catalog via env name, not inline");
-	Expect(ducklake_spec.lake.s3.access_key_env == "DUCKBOX_S3_KEY", "s3 key is env name");
+	Expect(ducklake_spec.lake.s3.access_key.Spec() == "env:DUCKBOX_S3_KEY", "s3 key is a reference");
 	Expect(validator.ValidateStatic(ducklake_spec).empty(), "ducklake spec is statically valid");
 
 	ExpectThrowContains(
@@ -282,9 +298,9 @@ int main() {
 		StatementHandle h;
 		h.rewritten_sql = "SELECT 1";
 		h.tenant_raw = "tenant_21:user_sergio";
-		h.spec_name = "analyst";
-		h.spec_version = policy.version;
-		h.policy_yaml = "name: analyst";
+		h.sandbox_id = "memory-analyst";
+		h.version = 1;
+		h.content_hash = policy.version;
 		auto tok = signer.Sign(h);
 		auto ok = signer.Verify(tok);
 		Expect(ok.rewritten_sql == h.rewritten_sql, "handle roundtrip");
@@ -393,25 +409,191 @@ int main() {
 		}
 	}
 
-	// Per-connection policy hash: different policy => different sandbox; cache skips second lake check.
+	Expect(loaded.PolicyClass() == "analyst", "memory spec policy_class");
+	Expect(loaded.id == "memory-analyst", "memory spec id");
+	Expect(ducklake_spec.metrics_class == "analyst" || ducklake_spec.policy_class == "analyst",
+	       "ducklake spec policy_class");
+
+	// Named sandbox registry: create / conflict / update / version-reject / delete / authz.
 	{
-		auto leases = std::make_shared<SingleNodeLeaseManager>();
-		SandboxRegistry reg(daemon, leases);
-		auto a = reg.Get(policy, key_a, "", spec_dir);
-		Expect(reg.LakeValidated(policy.version), "lake validation cached by policy hash");
-		auto a2 = reg.Get(policy, key_a, "", spec_dir);
-		Expect(a.get() == a2.get(), "same key+policy+initSQL reuses sandbox");
-		auto p2 = policy;
-		p2.name = "analyst-tight";
-		p2.resources.max_result_rows = 10;
-		p2.version = FingerprintSpec(p2);
-		auto b = reg.Get(p2, key_a, "", spec_dir);
-		Expect(a.get() != b.get(), "different policy hash is a separate sandbox");
-		Expect(reg.Size() >= 2, "registry holds both policy hashes");
+		MemorySandboxRegistry defs;
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "acme-analyst";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		rec.content_hash = ContentHash(rec.spec);
+		auto created = defs.Create(rec);
+		Expect(created.version == 1, "create starts at version 1");
+		auto again = defs.Create(rec);
+		Expect(again.version == 1, "idempotent create same content");
+		auto got = defs.Get("acme-analyst");
+		Expect(got.key == key_a.raw, "get returns bound key");
+		auto other = rec;
+		other.spec.init_sql = "CREATE TEMP VIEW v AS SELECT 1 AS x";
+		other.spec.yaml_body += "\ninit_sql: CREATE TEMP VIEW v AS SELECT 1 AS x\n";
+		other.content_hash = ContentHash(other.spec);
+		ExpectThrowContains([&] { defs.Create(other); }, "already exists", "create conflict on different content");
+		auto updated = defs.Update(other);
+		Expect(updated.version == 2, "update bumps version");
+		ExpectThrowContains([&] { EnsureCurrentVersion(defs.Get("acme-analyst"), 1, "acme-analyst"); }, "re-prepare",
+		                    "stale handle version rejected");
+		EnsureCurrentVersion(defs.Get("acme-analyst"), 2, "acme-analyst");
+		defs.Delete("acme-analyst");
+		ExpectThrowContains([&] { defs.Get("acme-analyst"); }, "not found", "deleted sandbox is gone");
+		Expect(defs.List().empty(), "list skips tombstones");
+
+		DaemonConfig locked = daemon;
+		locked.callers.push_back(CallerRule{"analyst-svc", {"tenant_21:*"}});
+		AuthorizeCaller(locked, "analyst-svc", "tenant_21:user_sergio");
+		ExpectThrowContains([&] { AuthorizeCaller(locked, "analyst-svc", "tenant_22:user_kim"); }, "not authorized",
+		                    "caller key pattern denies other tenants");
+		ExpectThrowContains([&] { AuthorizeCaller(locked, "other-svc", "tenant_21:user_sergio"); }, "trusted identity",
+		                    "unknown caller denied");
+		AuthorizeCaller(daemon, "anyone", "tenant_99:x"); // empty callers = allow
+
+		ExpectThrowContains(
+		    [&] { ParseSecretRef("super-secret-value", "lake.s3.access_key"); }, "reference",
+		    "inline secret values rejected");
+		auto env_ref = ParseSecretRef("env:DUCKBOX_S3_KEY", "lake.s3.access_key");
+		Expect(env_ref.Spec() == "env:DUCKBOX_S3_KEY", "env ref canonical form");
+		auto file_ref = ParseSecretRef("file:/run/secrets/x", "lake.s3.secret_key");
+		Expect(file_ref.scheme == SecretRef::Scheme::File, "file ref parsed");
+		ExpectThrowContains([&] { ParseSecretRef("file:relative", "x"); }, "absolute", "relative file ref rejected");
+		setenv("DUCKBOX_TEST_SECRET", "value-must-not-appear-in-errors", 1);
+		EnvFileSecretResolver resolver;
+		auto resolved = resolver.Resolve(ParseSecretRef("env:DUCKBOX_TEST_SECRET", "t"), "t");
+		Expect(resolved == "value-must-not-appear-in-errors", "env resolver returns value");
+		try {
+			resolver.Resolve(ParseSecretRef("env:DUCKBOX_MISSING_SECRET_XYZ", "t"), "t");
+			g_failed++;
+			std::cerr << "FAIL: missing env should throw\n";
+		} catch (const std::exception &e) {
+			std::string w = e.what();
+			Expect(w.find("value-must-not-appear") == std::string::npos, "resolver errors never contain secret values");
+			Expect(w.find("DUCKBOX_MISSING_SECRET_XYZ") != std::string::npos, "missing env names the reference");
+		}
 	}
 
-	Expect(loaded.metrics_class == "analyst", "memory spec metrics_class");
-	Expect(ducklake_spec.metrics_class == "analyst", "ducklake spec metrics_class");
+	{
+		auto leases = std::make_shared<SingleNodeLeaseManager>();
+		auto defs = std::make_shared<MemorySandboxRegistry>();
+		SandboxRuntime rt(daemon, leases, defs);
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "rt-a";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		rec = defs->Create(rec);
+		auto a = rt.Get(rec);
+		Expect(defs->LakeValidated(rec.id, rec.version), "lake validation cached per id+version");
+		auto a2 = rt.Get(defs->Get(rec.id));
+		Expect(a.get() == a2.get(), "same named id reuses warm instance");
+		auto rec2 = rec;
+		rec2.spec.init_sql = "CREATE TEMP VIEW v AS SELECT 1 AS x";
+		rec2.spec.yaml_body += "\ninit_sql: CREATE TEMP VIEW v AS SELECT 1 AS x\n";
+		rec2 = defs->Update(rec2);
+		rt.PassivateId(rec2.id, "update");
+		auto b = rt.Get(rec2);
+		Expect(a.get() != b.get(), "update passivates and replaces the warm instance");
+		Expect(b->Version() == rec2.version, "runtime instance tracks current version");
+	}
+
+	{
+		std::map<std::string, std::pair<std::string, std::string>> objects; // key -> {body, etag}
+		httplib::Server svr;
+		auto unquote = [](std::string e) {
+			if (e.size() >= 2 && e.front() == '"' && e.back() == '"') {
+				return e.substr(1, e.size() - 2);
+			}
+			return e;
+		};
+		auto handle_get = [&](const httplib::Request &req, httplib::Response &res) {
+			if (req.has_param("list-type")) {
+				auto prefix = req.get_param_value("prefix");
+				std::string xml = "<ListBucketResult>";
+				for (auto &kv : objects) {
+					if (prefix.empty() || kv.first.rfind(prefix, 0) == 0) {
+						xml += "<Contents><Key>" + kv.first + "</Key></Contents>";
+					}
+				}
+				xml += "</ListBucketResult>";
+				res.status = 200;
+				res.set_content(xml, "application/xml");
+				return;
+			}
+			std::string key = req.matches.size() > 2 ? req.matches[2].str() : "";
+			auto it = objects.find(key);
+			if (it == objects.end()) {
+				res.status = 404;
+				res.set_content("not found", "text/plain");
+				return;
+			}
+			res.status = 200;
+			res.set_header("ETag", "\"" + it->second.second + "\"");
+			res.set_content(it->second.first, "application/json");
+		};
+		auto handle_put = [&](const httplib::Request &req, httplib::Response &res) {
+			std::string key = req.matches.size() > 2 ? req.matches[2].str() : "";
+			auto inm = req.get_header_value("If-None-Match");
+			auto im = unquote(req.get_header_value("If-Match"));
+			if (inm == "*" && objects.count(key)) {
+				res.status = 412;
+				return;
+			}
+			if (!im.empty()) {
+				auto it = objects.find(key);
+				if (it == objects.end() || it->second.second != im) {
+					res.status = 412;
+					return;
+				}
+			}
+			auto etag = Sha256Hex(req.body).substr(0, 16);
+			objects[key] = {req.body, etag};
+			res.status = 200;
+			res.set_header("ETag", "\"" + etag + "\"");
+			res.set_content("", "text/plain");
+		};
+		svr.Get(R"(/([^/]+)/?(.*))", handle_get);
+		svr.Put(R"(/([^/]+)/(.*))", handle_put);
+		int port = svr.bind_to_any_port("127.0.0.1");
+		std::thread th([&] { svr.listen_after_bind(); });
+		for (int i = 0; i < 50 && !svr.is_running(); i++) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		setenv("DUCKBOX_FAKE_KEY", "testkey", 1);
+		setenv("DUCKBOX_FAKE_SECRET", "testsecret", 1);
+		LeaseSettings lease;
+		lease.endpoint = "http://127.0.0.1:" + std::to_string(port);
+		lease.bucket = "control";
+		lease.access_key_env = "DUCKBOX_FAKE_KEY";
+		lease.secret_key_env = "DUCKBOX_FAKE_SECRET";
+		lease.skip_probe = true;
+		S3SandboxRegistry s3defs(lease);
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "s3-analyst";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		auto created = s3defs.Create(rec);
+		Expect(created.version == 1, "s3 create version 1");
+		auto got = s3defs.Get("s3-analyst");
+		Expect(got.id == "s3-analyst", "s3 get after create");
+		auto listed = s3defs.List();
+		Expect(!listed.empty(), "s3 list sees current.json");
+		auto rec2 = rec;
+		rec2.spec.resources.max_result_rows = 50;
+		rec2.spec.yaml_body += "\n# bump\n";
+		auto upd = s3defs.Update(rec2);
+		Expect(upd.version == 2, "s3 update bumps version");
+		ExpectThrowContains([&] { s3defs.Create(rec); }, "already exists", "s3 create conflict");
+		s3defs.Delete("s3-analyst");
+		ExpectThrowContains([&] { s3defs.Get("s3-analyst"); }, "not found", "s3 tombstone hides get");
+		svr.stop();
+		if (th.joinable()) {
+			th.join();
+		}
+	}
 
 	{
 		MetricsRegistry reg("node-a", {"analyst"});

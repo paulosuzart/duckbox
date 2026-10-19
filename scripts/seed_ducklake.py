@@ -63,6 +63,7 @@ def ensure_bucket(endpoint: str, key: str, secret: str, bucket: str) -> None:
 def seed(args: argparse.Namespace) -> None:
     wait_s3(args.s3_endpoint, args.s3_key, args.s3_secret)
     ensure_bucket(args.s3_endpoint, args.s3_key, args.s3_secret, args.bucket)
+    ensure_bucket(args.s3_endpoint, args.s3_key, args.s3_secret, args.control_bucket)
 
     host = args.s3_endpoint.replace("http://", "").replace("https://", "")
     use_ssl = args.s3_endpoint.startswith("https://")
@@ -117,6 +118,7 @@ def main() -> None:
     parser.add_argument("--s3-key", default="rustfsadmin")
     parser.add_argument("--s3-secret", default="rustfsadmin")
     parser.add_argument("--bucket", default="duckbox-lake")
+    parser.add_argument("--control-bucket", default="duckbox-control")
     parser.add_argument("--pg-host", default="127.0.0.1")
     parser.add_argument("--pg-port", default="5432")
     parser.add_argument("--pg-user", default="duckbox")

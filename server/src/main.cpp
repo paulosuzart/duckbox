@@ -10,16 +10,16 @@ namespace {
 
 void Usage() {
 	std::cerr
-	    << "duckbox — deny-by-default SQL sandbox (control plane + per-connection spec)\n"
+	    << "duckbox — deny-by-default SQL sandbox (named sandboxes + control plane)\n"
 	    << "\n"
-	    << "The daemon has no data access. Lake attach, credentials, tables, filters,\n"
-	    << "and initSQL arrive per connection (or via --spec on run/validate).\n"
+	    << "The daemon has no data access. Named sandbox definitions (id, key, policy,\n"
+	    << "lake, credential refs, initSQL) live in the registry. Queries send id + SQL.\n"
 	    << "\n"
 	    << "Usage:\n"
 	    << "  duckbox serve --daemon FILE [--listen HOST:PORT] [--metrics HOST:PORT] [--debug-http HOST:PORT]\n"
+	    << "  duckbox sandbox create|get|update|delete|list --url grpc://HOST:PORT [--spec FILE] [--id ID] [--key KEY]\n"
 	    << "  duckbox run --daemon FILE --spec FILE --key KEY --sql SQL [--init-sql SQL]\n"
 	    << "  duckbox validate --spec FILE [--daemon FILE]\n"
-	    << "  duckbox query --url grpc://HOST:PORT --key KEY --spec FILE --sql SQL\n"
 	    << "\n"
 	    << "DuckDB " << DUCKBOX_DUCKDB_VERSION << "\n";
 }
@@ -75,6 +75,19 @@ int main(int argc, char **argv) {
 				opt.daemon.handle_secret = secret;
 			}
 			return duckbox::RunServer(opt);
+		}
+		if (cmd == "sandbox") {
+			if (argc < 3) {
+				Usage();
+				return 1;
+			}
+			auto op = std::string(argv[2]);
+			auto url = Arg(argc, argv, "--url", "grpc://127.0.0.1:4747");
+			auto spec = Arg(argc, argv, "--spec");
+			auto id = Arg(argc, argv, "--id");
+			auto key = Arg(argc, argv, "--key");
+			auto caller = Arg(argc, argv, "--caller", "local");
+			return duckbox::RunSandboxCli(op, url, spec, id, key, caller);
 		}
 		if (cmd == "run") {
 			auto daemon_path = Arg(argc, argv, "--daemon");

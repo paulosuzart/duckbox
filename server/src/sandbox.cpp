@@ -16,9 +16,11 @@
 namespace duckbox {
 
 TenantSandbox::TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key, std::string init_sql,
-                             std::string spec_dir)
+                             std::string spec_dir, std::string sandbox_id, int version,
+                             std::shared_ptr<SecretResolver> secrets)
     : daemon_(std::move(daemon)), policy_(std::move(policy)), key_(std::move(key)), init_sql_(std::move(init_sql)),
-      spec_dir_(std::move(spec_dir)) {
+      spec_dir_(std::move(spec_dir)), sandbox_id_(std::move(sandbox_id)), version_(version),
+      secrets_(secrets ? std::move(secrets) : std::make_shared<EnvFileSecretResolver>()) {
 }
 
 TenantSandbox::~TenantSandbox() {
@@ -48,7 +50,7 @@ void TenantSandbox::Warmup(bool validate_lake) {
 	con_ = std::make_unique<ddb::Connection>(*db_);
 	ExecOrThrow(*con_, "SET autoinstall_known_extensions=false");
 	ExecOrThrow(*con_, "SET autoload_known_extensions=false");
-	AttachLakeFromSpec(*con_, policy_, spec_dir_);
+	AttachLakeFromSpec(*con_, policy_, spec_dir_, *secrets_);
 	if (validate_lake) {
 		auto v0 = std::chrono::steady_clock::now();
 		SpecValidator v;
@@ -162,7 +164,7 @@ struct QueryActive {
 };
 
 void FinishQuery(const Policy &policy, const TenantKey &key, bool cold, double seconds, const QueryOutput &out) {
-	auto cls = Metrics().PolicyLabel(policy.metrics_class);
+	auto cls = Metrics().PolicyLabel(policy.PolicyClass());
 	if (policy.resources.max_result_rows > 0 && out.row_count >= policy.resources.max_result_rows) {
 		Metrics().IncLimit(cls, "rows");
 	}
@@ -228,12 +230,14 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
 	return out;
 }
 
-SandboxRegistry::SandboxRegistry(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases,
-                                 std::shared_ptr<IRouter> router)
-    : daemon_(std::move(daemon)), leases_(std::move(leases)), router_(std::move(router)) {
+SandboxRuntime::SandboxRuntime(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases,
+                               std::shared_ptr<SandboxRegistry> defs, std::shared_ptr<IRouter> router,
+                               std::shared_ptr<SecretResolver> secrets)
+    : daemon_(std::move(daemon)), leases_(std::move(leases)), defs_(std::move(defs)), router_(std::move(router)),
+      secrets_(secrets ? std::move(secrets) : std::make_shared<EnvFileSecretResolver>()) {
 }
 
-void SandboxRegistry::PublishResidentLocked() {
+void SandboxRuntime::PublishResidentLocked() {
 	size_t warm = 0;
 	for (auto &kv : boxes_) {
 		if (kv.second->Warm()) {
@@ -243,42 +247,50 @@ void SandboxRegistry::PublishResidentLocked() {
 	Metrics().SetResident(warm, boxes_.size() - warm);
 }
 
-std::shared_ptr<TenantSandbox> SandboxRegistry::Get(Policy policy, const TenantKey &key, std::string init_sql,
-                                                    const std::string &spec_dir) {
-	if (init_sql.empty()) {
-		init_sql = policy.init_sql;
+void SandboxRuntime::PassivateId(const std::string &id, const char *reason) {
+	std::lock_guard<std::mutex> hold(mu_);
+	auto it = boxes_.find(id);
+	if (it != boxes_.end()) {
+		it->second->Passivate(reason);
+		boxes_.erase(it);
 	}
+	PublishResidentLocked();
+}
+
+std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
+	auto key = ParseTenantKey(rec.key, rec.spec.key);
 	if (router_) {
 		router_->Decide(key);
 	} else {
 		Metrics().IncRoute("local");
 	}
-	auto id = SandboxInstanceId(key.raw, policy, init_sql);
 	std::lock_guard<std::mutex> hold(mu_);
 	EvictIdleLocked();
-	auto cached = lake_ok_.find(policy.version);
-	if (cached != lake_ok_.end()) {
-		policy.tables = cached->second.tables;
+	bool lake_ok = defs_ && defs_->LakeValidated(rec.id, rec.version);
+	if (lake_ok) {
 		Metrics().IncValidationCache("hit");
 	} else {
 		Metrics().IncValidationCache("miss");
 	}
-	auto it = boxes_.find(id);
+	auto it = boxes_.find(rec.id);
 	if (it != boxes_.end()) {
-		bool need_lake = lake_ok_.count(policy.version) == 0;
-		if (!it->second->Warm()) {
-			it->second->Warmup(need_lake);
-			if (need_lake) {
-				lake_ok_[policy.version] = it->second->GetPolicy();
+		if (it->second->Version() != rec.version) {
+			it->second->Passivate("update");
+			boxes_.erase(it);
+		} else {
+			if (!it->second->Warm()) {
+				it->second->Warmup(!lake_ok);
+				if (!lake_ok && defs_) {
+					defs_->RememberLakeValidation(rec.id, rec.version, it->second->GetPolicy());
+				}
 			}
+			it->second->Touch();
+			PublishResidentLocked();
+			return it->second;
 		}
-		it->second->Touch();
-		PublishResidentLocked();
-		return it->second;
 	}
-	PassivateOverflowForKeyLocked(key.raw, id);
 	if (boxes_.size() >= daemon_.max_sandboxes) {
-		Metrics().IncLimit(Metrics().PolicyLabel(policy.metrics_class), "sandbox_cap");
+		Metrics().IncLimit(Metrics().PolicyLabel(rec.spec.PolicyClass()), "sandbox_cap");
 	}
 	while (boxes_.size() >= daemon_.max_sandboxes && !boxes_.empty()) {
 		auto oldest = boxes_.begin();
@@ -295,47 +307,20 @@ std::shared_ptr<TenantSandbox> SandboxRegistry::Get(Policy policy, const TenantK
 	}
 	leases_->Acquire(key);
 	auto t0 = std::chrono::steady_clock::now();
-	auto box = std::make_shared<TenantSandbox>(daemon_, policy, key, init_sql, spec_dir);
-	bool need_lake = lake_ok_.count(policy.version) == 0;
-	box->Warmup(need_lake);
-	if (need_lake) {
-		lake_ok_[policy.version] = box->GetPolicy();
+	auto init_sql = rec.spec.init_sql;
+	auto box = std::make_shared<TenantSandbox>(daemon_, rec.spec, key, init_sql, rec.spec_dir, rec.id, rec.version,
+	                                           secrets_);
+	box->Warmup(!lake_ok);
+	if (!lake_ok && defs_) {
+		defs_->RememberLakeValidation(rec.id, rec.version, box->GetPolicy());
 	}
-	boxes_.emplace(id, box);
+	boxes_.emplace(rec.id, box);
 	Metrics().ObserveInstantiate(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 	PublishResidentLocked();
 	return box;
 }
 
-void SandboxRegistry::PassivateOverflowForKeyLocked(const std::string &tenant_raw, const std::string &keep_id) {
-	std::vector<std::string> same;
-	for (auto &kv : boxes_) {
-		if (kv.second->GetKey().raw == tenant_raw) {
-			same.push_back(kv.first);
-		}
-	}
-	while (same.size() >= daemon_.max_sandboxes_per_key) {
-		std::string victim;
-		auto oldest = std::chrono::steady_clock::time_point::max();
-		for (auto &id : same) {
-			if (id == keep_id) {
-				continue;
-			}
-			auto &b = boxes_[id];
-			if (b.use_count() == 1 && b->last_used() <= oldest) {
-				oldest = b->last_used();
-				victim = id;
-			}
-		}
-		if (victim.empty()) {
-			break;
-		}
-		boxes_[victim]->Passivate("evict");
-		same.erase(std::remove(same.begin(), same.end(), victim), same.end());
-	}
-}
-
-void SandboxRegistry::EvictIdleLocked() {
+void SandboxRuntime::EvictIdleLocked() {
 	if (daemon_.idle_evict_ms <= 0) {
 		return;
 	}
@@ -348,22 +333,12 @@ void SandboxRegistry::EvictIdleLocked() {
 	}
 }
 
-bool SandboxRegistry::LakeValidated(const std::string &policy_hash) const {
-	std::lock_guard<std::mutex> hold(mu_);
-	return lake_ok_.count(policy_hash) > 0;
-}
-
-void SandboxRegistry::RememberLakeValidation(const std::string &policy_hash, Policy spec) {
-	std::lock_guard<std::mutex> hold(mu_);
-	lake_ok_[policy_hash] = std::move(spec);
-}
-
-size_t SandboxRegistry::Size() const {
+size_t SandboxRuntime::Size() const {
 	std::lock_guard<std::mutex> hold(mu_);
 	return boxes_.size();
 }
 
-size_t SandboxRegistry::WarmCount() const {
+size_t SandboxRuntime::WarmCount() const {
 	std::lock_guard<std::mutex> hold(mu_);
 	size_t n = 0;
 	for (auto &kv : boxes_) {
@@ -372,15 +347,6 @@ size_t SandboxRegistry::WarmCount() const {
 		}
 	}
 	return n;
-}
-
-Policy SandboxRegistry::CachedPolicy(const std::string &policy_hash) const {
-	std::lock_guard<std::mutex> hold(mu_);
-	auto it = lake_ok_.find(policy_hash);
-	if (it == lake_ok_.end()) {
-		throw PolicyError("policy hash not in registry cache");
-	}
-	return it->second;
 }
 
 } // namespace duckbox

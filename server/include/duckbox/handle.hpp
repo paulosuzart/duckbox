@@ -1,8 +1,8 @@
 #pragma once
 
-// Signed opaque prepared-statement handle. CreatePreparedStatement / ad-hoc
-// GetFlightInfo put rewritten SQL, tenant, spec version, and optional bound
-// parameter IPC in a HMAC token so any node can execute without session state.
+// Signed opaque prepared-statement handle. Carries rewritten SQL, tenant,
+// named sandbox id + version, and optional bound parameter IPC. A handle
+// whose version is not current is rejected with a re-prepare error.
 
 #include <cstdint>
 #include <string>
@@ -12,10 +12,9 @@ namespace duckbox {
 struct StatementHandle {
 	std::string rewritten_sql;
 	std::string tenant_raw;
-	std::string spec_name;
-	std::string spec_version; // policy hash
-	std::string policy_yaml;
-	std::string init_sql;
+	std::string sandbox_id;
+	int version = 0;
+	std::string content_hash;
 	int64_t expires_at_unix = 0;
 	int user_param_count = 0;
 	std::string params_ipc;

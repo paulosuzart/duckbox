@@ -1,13 +1,16 @@
 #pragma once
 
-// Per-(key, hash(policy+initSQL)) DuckDB instance. The daemon registry only
-// tracks identity, leases, and cached lake-validation hashes. DuckDB and the
-// lake attach live here. Passivate frees DuckDB; warmup recreates it, attaches
-// the spec's lake, reruns initSQL, then lock_configuration.
+// Warm DuckDB instance for a *named* sandbox id. The definition store is
+// SandboxRegistry (S3/memory). This runtime is keyed by id; an Update that
+// bumps version passivates the old instance. Passivate frees DuckDB; warmup
+// recreates it, resolves credential refs, attaches the spec's lake, reruns
+// initSQL, then lock_configuration.
 
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/lease.hpp"
 #include "duckbox/policy.hpp"
+#include "duckbox/sandbox_registry.hpp"
+#include "duckbox/secrets.hpp"
 #include "duckbox/tenant_key.hpp"
 #include "duckbox/duckdb_layer.hpp"
 
@@ -16,7 +19,6 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace duckbox {
@@ -34,7 +36,8 @@ struct ColumnSchema {
 
 class TenantSandbox {
 public:
-	TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key, std::string init_sql, std::string spec_dir);
+	TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key, std::string init_sql, std::string spec_dir,
+	              std::string sandbox_id = "", int version = 0, std::shared_ptr<SecretResolver> secrets = {});
 	~TenantSandbox();
 
 	void Warmup(bool validate_lake);
@@ -59,6 +62,12 @@ public:
 	const std::string &InitSql() const {
 		return init_sql_;
 	}
+	const std::string &SandboxId() const {
+		return sandbox_id_;
+	}
+	int Version() const {
+		return version_;
+	}
 	int warmup_count() const {
 		return warmup_count_;
 	}
@@ -78,6 +87,9 @@ private:
 	TenantKey key_;
 	std::string init_sql_;
 	std::string spec_dir_;
+	std::string sandbox_id_;
+	int version_ = 0;
+	std::shared_ptr<SecretResolver> secrets_;
 	std::unique_ptr<ddb::DuckDB> db_;
 	std::unique_ptr<ddb::Connection> con_;
 	std::mutex mu_;
@@ -85,40 +97,27 @@ private:
 	int warmup_count_ = 0;
 };
 
-class ISandboxRegistry {
+class SandboxRuntime {
 public:
-	virtual ~ISandboxRegistry() = default;
-	virtual std::shared_ptr<TenantSandbox> Get(Policy policy, const TenantKey &key, std::string init_sql,
-	                                           const std::string &spec_dir) = 0;
-	virtual bool LakeValidated(const std::string &policy_hash) const = 0;
-	virtual void RememberLakeValidation(const std::string &policy_hash, Policy spec) = 0;
-};
+	SandboxRuntime(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases, std::shared_ptr<SandboxRegistry> defs,
+	               std::shared_ptr<IRouter> router = nullptr, std::shared_ptr<SecretResolver> secrets = {});
 
-class SandboxRegistry : public ISandboxRegistry {
-public:
-	SandboxRegistry(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases,
-	                std::shared_ptr<IRouter> router = nullptr);
-
-	std::shared_ptr<TenantSandbox> Get(Policy policy, const TenantKey &key, std::string init_sql,
-	                                   const std::string &spec_dir) override;
-	bool LakeValidated(const std::string &policy_hash) const override;
-	void RememberLakeValidation(const std::string &policy_hash, Policy spec) override;
+	std::shared_ptr<TenantSandbox> Get(const SandboxRecord &rec);
+	void PassivateId(const std::string &id, const char *reason = "update");
 	size_t Size() const;
 	size_t WarmCount() const;
-	Policy CachedPolicy(const std::string &policy_hash) const;
 
 private:
 	void EvictIdleLocked();
-	void PassivateOverflowForKeyLocked(const std::string &tenant_raw, const std::string &keep_id);
-
 	void PublishResidentLocked();
 
 	DaemonConfig daemon_;
 	std::shared_ptr<ILeaseManager> leases_;
+	std::shared_ptr<SandboxRegistry> defs_;
 	std::shared_ptr<IRouter> router_;
+	std::shared_ptr<SecretResolver> secrets_;
 	mutable std::mutex mu_;
 	std::unordered_map<std::string, std::shared_ptr<TenantSandbox>> boxes_;
-	std::unordered_map<std::string, Policy> lake_ok_; // policy hash -> validated spec
 };
 
 } // namespace duckbox

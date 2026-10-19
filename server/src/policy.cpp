@@ -32,6 +32,20 @@ std::vector<std::string> StringList(const YamlNode *n) {
 	return out;
 }
 
+SecretRef OptionalRef(const YamlNode *parent, const char *ref_key, const char *env_key, const std::string &path) {
+	if (!parent) {
+		return {};
+	}
+	auto raw = parent->GetString(ref_key);
+	if (raw.empty()) {
+		raw = parent->GetString(env_key);
+	}
+	if (raw.empty()) {
+		return {};
+	}
+	return ParseSecretRef(raw, path);
+}
+
 KeySpec LoadKeySpec(const YamlNode *n) {
 	KeySpec k;
 	if (!n) {
@@ -65,13 +79,26 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	SandboxSpec p;
 	p.source_path = path;
 	p.yaml_body = body;
+	p.id = root.GetString("id");
+	p.bound_key = root.GetString("key");
 	p.name = root.GetString("name");
+	if (p.id.empty() && !p.name.empty()) {
+		p.id = p.name;
+	}
+	p.policy_class = root.GetString("policy_class");
 	p.metrics_class = root.GetString("metrics_class");
-	if (p.metrics_class.empty()) {
+	if (p.policy_class.empty()) {
+		p.policy_class = p.metrics_class;
+	}
+	if (p.policy_class.empty()) {
 		if (auto *m = root.Get("metrics")) {
-			p.metrics_class = m->GetString("class");
+			p.policy_class = m->GetString("class");
 		}
 	}
+	if (p.metrics_class.empty()) {
+		p.metrics_class = p.policy_class;
+	}
+	p.attachments = StringList(root.Get("attachments"));
 	if (auto *auth = root.Get("auth")) {
 		p.key = LoadKeySpec(auth->Get("key"));
 	}
@@ -93,6 +120,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 		p.lake.alias = lake->GetString("alias", p.lake.alias);
 		p.lake.catalog = lake->GetString("catalog");
 		p.lake.catalog_env = lake->GetString("catalog_env");
+		p.lake.catalog_ref = OptionalRef(lake, "catalog_ref", "catalog_env", "lake.catalog");
 		p.lake.data_path = lake->GetString("data_path");
 		p.lake.read_only = lake->GetBool("read_only", true);
 		p.lake.bootstrap_sql_path = lake->GetString("bootstrap_sql");
@@ -105,8 +133,8 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 			p.lake.s3.endpoint_env = s3->GetString("endpoint_env");
 			p.lake.s3.url_style = s3->GetString("url_style", "path");
 			p.lake.s3.use_ssl = s3->GetBool("use_ssl", false);
-			p.lake.s3.access_key_env = s3->GetString("access_key_env");
-			p.lake.s3.secret_key_env = s3->GetString("secret_key_env");
+			p.lake.s3.access_key = OptionalRef(s3, "access_key", "access_key_env", "lake.s3.access_key");
+			p.lake.s3.secret_key = OptionalRef(s3, "secret_key", "secret_key_env", "lake.s3.secret_key");
 			p.lake.s3.region = s3->GetString("region", "us-east-1");
 			p.lake.s3.region_env = s3->GetString("region_env");
 		}
@@ -131,7 +159,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	p.deny_table_functions = root.GetBool("deny_table_functions", true);
 	p.require_prepared_statements = root.GetBool("require_prepared_statements", false);
 	p.init_sql = root.GetString("init_sql");
-	p.version = FingerprintSpec(p);
+	p.version = ContentHash(p);
 	return p;
 }
 
@@ -149,14 +177,35 @@ bool SandboxSpec::FunctionAllowed(const std::string &name) const {
 	return functions.count(Lower(name)) > 0;
 }
 
+bool ValidSandboxId(const std::string &id) {
+	if (id.empty() || id.size() > 64) {
+		return false;
+	}
+	if (!(std::islower(static_cast<unsigned char>(id[0])) || std::isdigit(static_cast<unsigned char>(id[0])))) {
+		return false;
+	}
+	for (char c : id) {
+		if (!(std::islower(static_cast<unsigned char>(c)) || std::isdigit(static_cast<unsigned char>(c)) || c == '-' ||
+		      c == '_')) {
+			return false;
+		}
+	}
+	return true;
+}
+
 std::string FingerprintSpec(const SandboxSpec &spec) {
 	std::ostringstream os;
-	os << spec.name << '\n' << spec.require_prepared_statements << '\n';
+	os << spec.id << '\n' << spec.bound_key << '\n' << spec.name << '\n' << spec.require_prepared_statements << '\n';
+	os << spec.PolicyClass() << '\n';
 	os << static_cast<int>(spec.lake.kind) << '|' << spec.lake.alias << '|' << spec.lake.catalog << '|'
-	   << spec.lake.catalog_env << '|' << spec.lake.data_path << '|' << spec.lake.bootstrap_sql_path << '\n';
-	os << spec.lake.s3.endpoint_env << '|' << spec.lake.s3.access_key_env << '|' << spec.lake.s3.secret_key_env << '\n';
+	   << spec.lake.catalog_ref.Spec() << '|' << spec.lake.data_path << '|' << spec.lake.bootstrap_sql_path << '\n';
+	os << spec.lake.s3.endpoint_env << '|' << spec.lake.s3.access_key.Spec() << '|' << spec.lake.s3.secret_key.Spec()
+	   << '\n';
 	for (auto &e : spec.lake.extensions) {
 		os << "ext:" << e << '\n';
+	}
+	for (auto &a : spec.attachments) {
+		os << "att:" << a << '\n';
 	}
 	for (auto &pat : spec.key.patterns) {
 		os << "p:" << pat << '\n';
@@ -176,11 +225,14 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
 	for (auto &fn : spec.functions) {
 		os << fn << ',';
 	}
+	os << "\ninit:" << spec.init_sql << '\n';
+	os << spec.resources.memory_limit << '|' << spec.resources.threads << '|' << spec.resources.query_timeout_ms << '|'
+	   << spec.resources.max_result_rows << '\n';
 	return Sha256Hex(os.str());
 }
 
-std::string SandboxInstanceId(const std::string &tenant_raw, const SandboxSpec &spec, const std::string &init_sql) {
-	return tenant_raw + "|" + spec.version + "|" + Sha256Hex(init_sql);
+std::string ContentHash(const SandboxSpec &spec) {
+	return FingerprintSpec(spec);
 }
 
 std::string DecodeSpecPayload(const std::string &raw) {
@@ -188,13 +240,14 @@ std::string DecodeSpecPayload(const std::string &raw) {
 		return raw;
 	}
 	if (raw.find('\n') != std::string::npos || raw.find("name:") != std::string::npos ||
-	    raw.find("tables:") != std::string::npos) {
+	    raw.find("tables:") != std::string::npos || raw.find("id:") != std::string::npos) {
 		return raw;
 	}
 	try {
 		auto bytes = Base64UrlDecode(raw);
 		std::string decoded(bytes.begin(), bytes.end());
-		if (decoded.find("name:") != std::string::npos || decoded.find('\n') != std::string::npos) {
+		if (decoded.find("name:") != std::string::npos || decoded.find("id:") != std::string::npos ||
+		    decoded.find('\n') != std::string::npos) {
 			return decoded;
 		}
 	} catch (...) {

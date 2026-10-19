@@ -6,6 +6,7 @@
 
 namespace duckbox {
 
-void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<ISandboxRegistry> sandboxes);
+void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
+                    std::shared_ptr<SandboxRuntime> runtime);
 
 } // namespace duckbox

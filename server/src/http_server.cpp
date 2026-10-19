@@ -1,5 +1,7 @@
 #include "duckbox/http_server.hpp"
 #include "duckbox/auth.hpp"
+#include "duckbox/daemon_config.hpp"
+#include "duckbox/error.hpp"
 #include "duckbox/spec_validator.hpp"
 
 #include "httplib.h"
@@ -67,26 +69,27 @@ std::pair<std::string, int> ParseListen(const std::string &listen) {
 
 } // namespace
 
-void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<ISandboxRegistry> sandboxes) {
+void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
+                    std::shared_ptr<SandboxRuntime> runtime) {
 	httplib::Server svr;
 	svr.Get("/health", [](const httplib::Request &, httplib::Response &res) {
 		res.set_content("{\"ok\":true,\"debug\":true}", "application/json");
 	});
 	svr.Post("/v1/query", [&](const httplib::Request &req, httplib::Response &res) {
 		try {
-			auto spec_yaml = req.get_header_value("X-Duckbox-Spec");
-			if (spec_yaml.empty()) {
-				spec_yaml = req.get_header_value("X-Duckbox-Policy");
+			auto sandbox_id = req.get_header_value("X-Duckbox-Sandbox");
+			if (sandbox_id.empty()) {
+				sandbox_id = JsonGetString(req.body, "sandbox");
 			}
-			if (spec_yaml.empty()) {
-				spec_yaml = JsonGetString(req.body, "spec");
+			if (sandbox_id.empty()) {
+				throw PolicyError("debug HTTP requires X-Duckbox-Sandbox");
 			}
-			if (spec_yaml.empty()) {
-				throw PolicyError("debug HTTP requires X-Duckbox-Spec (inline YAML)");
+			auto rec = defs->Get(sandbox_id);
+			auto caller = req.get_header_value("X-Duckbox-Caller");
+			if (caller.empty()) {
+				caller = "local";
 			}
-			auto spec = LoadSpecString(DecodeSpecPayload(spec_yaml), "<http>");
-			SpecValidator v;
-			v.ThrowIf(v.ValidateStatic(spec));
+			AuthorizeCaller(opt.daemon, caller, rec.key);
 			AuthRequest auth;
 			auth.key_header = req.get_header_value("X-Duckbox-Key");
 			auto authz = req.get_header_value("Authorization");
@@ -94,18 +97,24 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<ISandboxRegistry> 
 			if (authz.size() > bearer.size() && authz.compare(0, bearer.size(), bearer) == 0) {
 				auth.bearer_token = authz.substr(bearer.size());
 			}
-			auto key = Authenticate(spec, auth);
+			auto key = AuthenticateSandbox(rec.spec, rec.key, auth);
+			(void)key;
 			auto sql = JsonGetString(req.body, "sql");
-			auto init_sql = req.get_header_value("X-Duckbox-Init-Sql");
-			auto dir = spec.source_path.find('<') == 0 ? std::filesystem::current_path().string()
-			                                           : std::filesystem::path(spec.source_path).parent_path().string();
-			auto box = sandboxes->Get(spec, key, init_sql, dir);
+			auto box = runtime->Get(rec);
 			auto out = box->Execute(sql);
 			res.status = 200;
 			res.set_content(std::string(reinterpret_cast<const char *>(out.arrow_ipc.data()), out.arrow_ipc.size()),
 			                "application/vnd.apache.arrow.stream");
 		} catch (const std::exception &e) {
-			res.status = 400;
+			int status = 400;
+			if (dynamic_cast<const ConflictError *>(&e)) {
+				status = 409;
+			} else if (dynamic_cast<const NotFoundError *>(&e)) {
+				status = 404;
+			} else if (dynamic_cast<const AuthError *>(&e)) {
+				status = 403;
+			}
+			res.status = status;
 			res.set_content(std::string("{\"error\":\"") + JsonEscape(e.what()) + "\"}", "application/json");
 		}
 	});

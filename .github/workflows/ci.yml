@@ -80,8 +80,8 @@ jobs:
           grep -q 'duckbox_queries_active' /tmp/duckbox-metrics.txt
           grep -q 'duckbox_sandboxes_resident' /tmp/duckbox-metrics.txt
           grep -q 'policy="analyst"' /tmp/duckbox-metrics.txt
-          if grep -E 'tenant="|user="|{key="|,key="' /tmp/duckbox-metrics.txt; then
-            echo "metrics must not label tenant/user/key" >&2
+          if grep -E 'tenant="|user="|{key="|,key="|sandbox="' /tmp/duckbox-metrics.txt; then
+            echo "metrics must not label tenant/user/key/sandbox id" >&2
             exit 1
           fi
           kill "$(cat /tmp/duckbox.pid)" || true

@@ -3,11 +3,12 @@ name: memory-dev
 listen: 127.0.0.1:4747
 auth:
   mode: trusted
+  # Empty callers = allow all (local/dev). Production should list identities
+  # and the tenant-key globs each may use.
 limits:
   handle_ttl_seconds: 300
   idle_evict_ms: 300000
   max_sandboxes: 600
-  max_sandboxes_per_key: 3
   init_sql_timeout_ms: 5000
 handle_secret: duckbox-dev-secret
 metrics:

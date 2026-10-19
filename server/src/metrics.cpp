@@ -514,7 +514,7 @@ void WriteAuditLog(const TenantKey &key, const Policy &policy, double seconds, i
 
 void ObserveFailure(IMetrics &m, const Policy *policy, const TenantKey *key, const std::exception &e, bool cold,
                     double seconds) {
-	auto cls = policy ? m.PolicyLabel(policy->metrics_class) : std::string("other");
+	auto cls = policy ? m.PolicyLabel(policy->PolicyClass()) : std::string("other");
 	auto *rej = ClassifyRejection(e);
 	auto *lim = ClassifyLimit(e);
 	const char *outcome = rej ? "rejected" : "error";

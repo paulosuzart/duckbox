@@ -7,6 +7,7 @@
 #include <arrow/array.h>
 #include <arrow/buffer.h>
 #include <arrow/builder.h>
+#include <arrow/flight/client.h>
 #include <arrow/io/memory.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
@@ -29,6 +30,7 @@ namespace duckbox {
 namespace {
 
 using arrow::Status;
+using arrow::flight::Action;
 using arrow::flight::FlightDataStream;
 using arrow::flight::FlightDescriptor;
 using arrow::flight::FlightEndpoint;
@@ -147,7 +149,24 @@ std::string EncodeDoPutHandle(const std::string &handle) {
 }
 
 Status FromEx(const std::exception &e) {
+	if (dynamic_cast<const ConflictError *>(&e)) {
+		return Status::AlreadyExists(e.what());
+	}
+	if (dynamic_cast<const NotFoundError *>(&e)) {
+		return Status::KeyError(e.what());
+	}
 	return Status::Invalid(e.what());
+}
+
+std::shared_ptr<arrow::Buffer> BufOf(const std::string &s) {
+	return arrow::Buffer::FromString(s);
+}
+
+arrow::Status ResultJson(const std::string &json, std::unique_ptr<arrow::flight::ResultStream> *result) {
+	std::vector<arrow::flight::Result> rows;
+	rows.emplace_back(BufOf(json));
+	*result = std::make_unique<arrow::flight::SimpleResultStream>(std::move(rows));
+	return Status::OK();
 }
 
 arrow::Result<std::unique_ptr<FlightInfo>> MakeInfo(const FlightDescriptor &desc, const std::string &token,
@@ -174,10 +193,11 @@ arrow::Status HandshakeAuthHandler::IsValid(const ServerCallContext &, const std
 	return Status::OK();
 }
 
-DuckboxFlightSqlServer::DuckboxFlightSqlServer(DaemonConfig daemon, std::shared_ptr<ISandboxRegistry> sandboxes,
+DuckboxFlightSqlServer::DuckboxFlightSqlServer(DaemonConfig daemon, std::shared_ptr<SandboxRegistry> defs,
+                                               std::shared_ptr<SandboxRuntime> runtime,
                                                std::shared_ptr<IHandleSigner> signer,
                                                std::shared_ptr<ISqlRewriter> rewriter)
-    : daemon_(std::move(daemon)), sandboxes_(std::move(sandboxes)), signer_(std::move(signer)),
+    : daemon_(std::move(daemon)), defs_(std::move(defs)), runtime_(std::move(runtime)), signer_(std::move(signer)),
       rewriter_(std::move(rewriter)) {
 	RegisterSqlInfo(sql::SqlInfoOptions::FLIGHT_SQL_SERVER_NAME, std::string("duckbox"));
 	RegisterSqlInfo(sql::SqlInfoOptions::FLIGHT_SQL_SERVER_VERSION, std::string("0.1.0"));
@@ -189,13 +209,23 @@ DuckboxFlightSqlServer::DuckboxFlightSqlServer(DaemonConfig daemon, std::shared_
 	                static_cast<int32_t>(sql::SqlInfoOptions::SQL_SUPPORTED_TRANSACTION_NONE));
 }
 
+std::string DuckboxFlightSqlServer::CallerOf(const ServerCallContext &context) const {
+	auto caller = Hdr(context, {"x-duckbox-caller", "X-Duckbox-Caller"});
+	if (caller.empty()) {
+		caller = context.peer_identity();
+	}
+	if (caller.empty()) {
+		caller = "local";
+	}
+	return caller;
+}
+
 DuckboxFlightSqlServer::CallCtx DuckboxFlightSqlServer::Auth(const ServerCallContext &context) const {
 	CallCtx c;
 	auto t0 = std::chrono::steady_clock::now();
+	c.caller = CallerOf(context);
+	auto sandbox_id = Hdr(context, {"x-duckbox-sandbox", "X-Duckbox-Sandbox"});
 	auto key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
-	auto spec_yaml = Hdr(context, {"x-duckbox-spec", "x-duckbox-policy", "X-Duckbox-Policy", "x-duckbox-spec-b64"});
-	c.init_sql = Hdr(context, {"x-duckbox-init-sql", "X-Duckbox-Init-Sql"});
-	auto spec_dir_hdr = Hdr(context, {"x-duckbox-spec-dir", "X-Duckbox-Spec-Dir"});
 	auto bearer = Hdr(context, {"authorization", "Authorization"});
 	const std::string prefix = "Bearer ";
 	std::string token;
@@ -203,41 +233,23 @@ DuckboxFlightSqlServer::CallCtx DuckboxFlightSqlServer::Auth(const ServerCallCon
 		token = bearer.substr(prefix.size());
 	}
 	try {
-		if (daemon_.auth_mode == AuthMode::Token) {
-			if (token.empty()) {
-				throw AuthError("token mode requires Authorization: Bearer (JWT stub)");
-			}
-			// STUB: treat bearer as JSON {"key":"...","policy":"...","init_sql":"..."}.
-			if (spec_yaml.empty()) {
-				spec_yaml = token;
-			}
-		} else if (spec_yaml.empty()) {
-			throw AuthError("trusted mode requires x-duckbox-spec / x-duckbox-policy (inline YAML)");
+		if (daemon_.auth_mode == AuthMode::Token && token.empty()) {
+			throw AuthError("token mode requires Authorization: Bearer (JWT stub)");
 		}
-		c.spec = LoadSpecString(spec_yaml, "<header>");
-		SpecValidator v;
-		auto v0 = std::chrono::steady_clock::now();
-		auto issues = v.ValidateStatic(c.spec);
-		try {
-			v.ThrowIf(issues);
-			Metrics().ObservePolicyValidation(
-			    std::chrono::duration<double>(std::chrono::steady_clock::now() - v0).count(), "ok");
-		} catch (...) {
-			Metrics().ObservePolicyValidation(
-			    std::chrono::duration<double>(std::chrono::steady_clock::now() - v0).count(), "error");
-			throw;
+		if (sandbox_id.empty()) {
+			throw AuthError("missing x-duckbox-sandbox (named sandbox id)");
 		}
+		c.rec = defs_->Get(sandbox_id);
+		c.spec = c.rec.spec;
+		AuthorizeCaller(daemon_, c.caller, c.rec.key);
 		AuthRequest req;
 		req.key_header = key;
 		req.bearer_token = token;
-		if (req.key_header.empty()) {
-			req.key_header = context.peer_identity();
-		}
-		c.key = Authenticate(c.spec, req);
-		if (c.init_sql.empty()) {
-			c.init_sql = c.spec.init_sql;
-		}
-		c.spec_dir = spec_dir_hdr.empty() ? SpecDirOf(c.spec) : spec_dir_hdr;
+		req.caller = c.caller;
+		req.sandbox_id = sandbox_id;
+		c.key = AuthenticateSandbox(c.spec, c.rec.key, req);
+		c.init_sql = c.spec.init_sql;
+		c.spec_dir = c.rec.spec_dir.empty() ? SpecDirOf(c.spec) : c.rec.spec_dir;
 		return c;
 	} catch (const std::exception &e) {
 		ObserveFailure(Metrics(), c.spec.name.empty() ? nullptr : &c.spec, c.key.raw.empty() ? nullptr : &c.key, e,
@@ -247,7 +259,19 @@ DuckboxFlightSqlServer::CallCtx DuckboxFlightSqlServer::Auth(const ServerCallCon
 }
 
 std::shared_ptr<TenantSandbox> DuckboxFlightSqlServer::Box(const CallCtx &c) const {
-	return sandboxes_->Get(c.spec, c.key, c.init_sql, c.spec_dir);
+	return runtime_->Get(c.rec);
+}
+
+StatementHandle DuckboxFlightSqlServer::MakeHandle(const CallCtx &c, const std::string &rewritten,
+                                                   int user_params) const {
+	StatementHandle h;
+	h.rewritten_sql = rewritten;
+	h.tenant_raw = c.key.raw;
+	h.sandbox_id = c.rec.id;
+	h.version = c.rec.version;
+	h.content_hash = c.rec.content_hash;
+	h.user_param_count = user_params;
+	return h;
 }
 
 arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::Info(const FlightDescriptor &descriptor,
@@ -300,14 +324,7 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 			               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 			throw;
 		}
-		StatementHandle h;
-		h.rewritten_sql = rw.sql;
-		h.tenant_raw = c.key.raw;
-		h.spec_name = c.spec.name;
-		h.spec_version = c.spec.version;
-		h.policy_yaml = c.spec.yaml_body;
-		h.init_sql = c.init_sql;
-		h.user_param_count = rw.user_param_count;
+		auto h = MakeHandle(c, rw.sql, rw.user_param_count);
 		auto token = signer_->Sign(h);
 		auto box = Box(c);
 		auto schema = SchemaFromCols(box->DescribeRewritten(rw.sql));
@@ -327,16 +344,15 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetSt
 			ObserveFailure(Metrics(), nullptr, nullptr, e, false, 0);
 			throw;
 		}
-		Policy spec = LoadSpecString(h.policy_yaml, "<handle>");
-		if (spec.version != h.spec_version && FingerprintSpec(spec) != h.spec_version) {
-			throw HandleError("policy hash mismatch");
-		}
-		auto key = ParseTenantKey(h.tenant_raw, spec.key);
+		auto rec = defs_->Get(h.sandbox_id);
+		EnsureCurrentVersion(rec, h.version, h.sandbox_id);
+		AuthorizeCaller(daemon_, CallerOf(context), rec.key);
+		(void)ParseTenantKey(h.tenant_raw, rec.spec.key);
 		auto hdr_key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
-		if (!hdr_key.empty() && hdr_key != h.tenant_raw) {
+		if (!hdr_key.empty() && hdr_key != h.tenant_raw && hdr_key != rec.key) {
 			throw AuthError("tenant key does not match statement handle");
 		}
-		auto box = sandboxes_->Get(spec, key, h.init_sql, SpecDirOf(spec));
+		auto box = runtime_->Get(rec);
 		std::vector<ddb::Value> params;
 		if (!h.params_ipc.empty()) {
 			auto buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t *>(h.params_ipc.data()),
@@ -381,14 +397,7 @@ arrow::Result<sql::ActionCreatePreparedStatementResult> DuckboxFlightSqlServer::
 			               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 			throw;
 		}
-		StatementHandle h;
-		h.rewritten_sql = rw.sql;
-		h.tenant_raw = c.key.raw;
-		h.spec_name = c.spec.name;
-		h.spec_version = c.spec.version;
-		h.policy_yaml = c.spec.yaml_body;
-		h.init_sql = c.init_sql;
-		h.user_param_count = rw.user_param_count;
+		auto h = MakeHandle(c, rw.sql, rw.user_param_count);
 		auto token = signer_->Sign(h);
 		auto box = Box(c);
 		sql::ActionCreatePreparedStatementResult res;
@@ -455,9 +464,9 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 			token = signer_->Sign(h);
 			bind_cache_[token] = h.params_ipc;
 		}
-		Policy spec = LoadSpecString(h.policy_yaml, "<handle>");
-		auto key = ParseTenantKey(h.tenant_raw, spec.key);
-		auto box = sandboxes_->Get(spec, key, h.init_sql, SpecDirOf(spec));
+		auto rec = defs_->Get(h.sandbox_id);
+		EnsureCurrentVersion(rec, h.version, h.sandbox_id);
+		auto box = runtime_->Get(rec);
 		auto schema = SchemaFromCols(box->DescribeRewritten(h.rewritten_sql));
 		return Info(descriptor, token, schema);
 	} catch (const std::exception &e) {
@@ -631,6 +640,135 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetTa
 	}
 }
 
+const std::vector<arrow::flight::ActionType> &DuckboxFlightSqlServer::SandboxActionTypes() {
+	static const std::vector<arrow::flight::ActionType> k = {
+	    {"CreateSandbox", "Create a named sandbox from a YAML spec. 409 if id exists with different content."},
+	    {"GetSandbox", "Fetch the current sandbox definition (id in the action body)."},
+	    {"UpdateSandbox", "Replace the definition and bump version; warm instances of the old version passivate."},
+	    {"DeleteSandbox", "Tombstone the sandbox id."},
+	    {"ListSandboxes", "List non-tombstoned sandbox ids."},
+	};
+	return k;
+}
+
+arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContext &context, const Action &action,
+                                                          std::unique_ptr<arrow::flight::ResultStream> *result) {
+	try {
+		auto caller = CallerOf(context);
+		std::string body;
+		if (action.body) {
+			body.assign(reinterpret_cast<const char *>(action.body->data()),
+			            static_cast<size_t>(action.body->size()));
+		}
+		auto load_spec = [&](SandboxRecord &rec) {
+			if (body.empty()) {
+				throw PolicyError("action body must be the sandbox spec YAML");
+			}
+			auto spec = LoadSpecString(body, "<action>");
+			if (!rec.id.empty()) {
+				spec.id = rec.id;
+			}
+			if (!rec.key.empty()) {
+				spec.bound_key = rec.key;
+			}
+			rec = RecordFromSpec(spec, SpecDirOf(spec));
+			if (!Hdr(context, {"x-duckbox-spec-dir"}).empty()) {
+				rec.spec_dir = Hdr(context, {"x-duckbox-spec-dir"});
+			}
+		};
+		if (action.type == "CreateSandbox" || action.type == "UpdateSandbox") {
+			SandboxRecord rec;
+			rec.id = Hdr(context, {"x-duckbox-sandbox", "X-Duckbox-Sandbox"});
+			rec.key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
+			load_spec(rec);
+			AuthorizeCaller(daemon_, caller, rec.key);
+			SandboxRecord out;
+			if (action.type == "CreateSandbox") {
+				out = defs_->Create(rec);
+			} else {
+				out = defs_->Update(rec);
+				runtime_->PassivateId(out.id, "update");
+			}
+			return ResultJson(out.ToJson(), result);
+		}
+		if (action.type == "GetSandbox") {
+			auto id = body.empty() ? Hdr(context, {"x-duckbox-sandbox"}) : body;
+			auto rec = defs_->Get(id);
+			AuthorizeCaller(daemon_, caller, rec.key);
+			return ResultJson(rec.ToJson(), result);
+		}
+		if (action.type == "DeleteSandbox") {
+			auto id = body.empty() ? Hdr(context, {"x-duckbox-sandbox"}) : body;
+			auto rec = defs_->Get(id);
+			AuthorizeCaller(daemon_, caller, rec.key);
+			auto out = defs_->Delete(id);
+			runtime_->PassivateId(id, "delete");
+			return ResultJson(out.ToJson(), result);
+		}
+		if (action.type == "ListSandboxes") {
+			auto all = defs_->List();
+			std::ostringstream os;
+			os << "{\"sandboxes\":[";
+			bool first = true;
+			for (auto &r : all) {
+				try {
+					AuthorizeCaller(daemon_, caller, r.key);
+				} catch (const AuthError &) {
+					continue;
+				}
+				if (!first) {
+					os << ",";
+				}
+				first = false;
+				os << r.ToJson();
+			}
+			os << "]}";
+			return ResultJson(os.str(), result);
+		}
+		return Status::NotImplemented("unknown action " + action.type);
+	} catch (const std::exception &e) {
+		return FromEx(e);
+	}
+}
+
+DuckboxFlightServer::DuckboxFlightServer(std::unique_ptr<DuckboxFlightSqlServer> sql) : sql_(std::move(sql)) {
+}
+
+arrow::Status DuckboxFlightServer::GetFlightInfo(const ServerCallContext &context, const FlightDescriptor &request,
+                                                 std::unique_ptr<FlightInfo> *info) {
+	return sql_->GetFlightInfo(context, request, info);
+}
+arrow::Status DuckboxFlightServer::GetSchema(const ServerCallContext &context, const FlightDescriptor &request,
+                                             std::unique_ptr<arrow::flight::SchemaResult> *schema) {
+	return sql_->GetSchema(context, request, schema);
+}
+arrow::Status DuckboxFlightServer::DoGet(const ServerCallContext &context, const Ticket &request,
+                                         std::unique_ptr<FlightDataStream> *stream) {
+	return sql_->DoGet(context, request, stream);
+}
+arrow::Status DuckboxFlightServer::DoPut(const ServerCallContext &context,
+                                         std::unique_ptr<arrow::flight::FlightMessageReader> reader,
+                                         std::unique_ptr<arrow::flight::FlightMetadataWriter> writer) {
+	return sql_->DoPut(context, std::move(reader), std::move(writer));
+}
+arrow::Status DuckboxFlightServer::ListActions(const ServerCallContext &context,
+                                               std::vector<arrow::flight::ActionType> *actions) {
+	ARROW_RETURN_NOT_OK(sql_->ListActions(context, actions));
+	for (auto &a : DuckboxFlightSqlServer::SandboxActionTypes()) {
+		actions->push_back(a);
+	}
+	return Status::OK();
+}
+arrow::Status DuckboxFlightServer::DoAction(const ServerCallContext &context, const Action &action,
+                                            std::unique_ptr<arrow::flight::ResultStream> *result) {
+	for (auto &a : DuckboxFlightSqlServer::SandboxActionTypes()) {
+		if (action.type == a.type) {
+			return sql_->HandleSandboxAction(context, action, result);
+		}
+	}
+	return sql_->DoAction(context, action, result);
+}
+
 int RunServer(const ServerOptions &opt) {
 	ValidateDaemonOrThrow(opt.daemon);
 	auto metrics = std::make_shared<MetricsRegistry>(opt.daemon.name, opt.daemon.metrics_policy_classes);
@@ -640,12 +778,15 @@ int RunServer(const ServerOptions &opt) {
 	auto router = std::make_shared<LocalRouter>(metrics);
 	if (!opt.daemon.lease.endpoint.empty() || !opt.daemon.lease.endpoint_env.empty()) {
 		std::clog << "daemon: lease endpoint configured; using SingleNodeLeaseManager in this draft "
-		             "(S3ConditionalLeaseManager TODO: If-None-Match / fencing epoch)\n";
+		             "(S3ConditionalLeaseManager TODO: If-None-Match / fencing epoch). "
+		             "Named sandbox registry uses the same S3 prefix credential.\n";
 	}
-	auto registry = std::make_shared<SandboxRegistry>(opt.daemon, leases, router);
+	auto defs = MakeSandboxRegistry(opt.daemon);
+	auto runtime = std::make_shared<SandboxRuntime>(opt.daemon, leases, defs, router);
 	auto signer = std::make_shared<HmacHandleSigner>(opt.daemon.handle_secret, opt.daemon.handle_ttl_seconds);
 	auto rewriter = std::make_shared<SqlRewriter>();
-	auto server = std::make_unique<DuckboxFlightSqlServer>(opt.daemon, registry, signer, rewriter);
+	auto sql = std::make_unique<DuckboxFlightSqlServer>(opt.daemon, defs, runtime, signer, rewriter);
+	auto server = std::make_unique<DuckboxFlightServer>(std::move(sql));
 	std::atomic<bool> running{true};
 	std::thread renew([&]() {
 		Lease node;
@@ -682,7 +823,7 @@ int RunServer(const ServerOptions &opt) {
 	          << DUCKBOX_DUCKDB_VERSION << ", control plane only)" << std::endl;
 	if (!opt.daemon.debug_http.empty()) {
 		ServerOptions dbg = opt;
-		std::thread([dbg, registry]() { StartDebugHttp(dbg, registry); }).detach();
+		std::thread([dbg, defs, runtime]() { StartDebugHttp(dbg, defs, runtime); }).detach();
 		std::cout << "debug HTTP /v1/query on " << opt.daemon.debug_http << "\n";
 	}
 	st = server->SetShutdownOnSignals({SIGINT, SIGTERM});
@@ -697,6 +838,105 @@ int RunServer(const ServerOptions &opt) {
 	if (!st.ok()) {
 		std::cerr << "serve failed: " << st.ToString() << "\n";
 		return 1;
+	}
+	return 0;
+}
+
+int RunSandboxCli(const std::string &op, const std::string &url, const std::string &spec_path, const std::string &id,
+                  const std::string &key, const std::string &caller) {
+	std::string host = "127.0.0.1";
+	int port = 4747;
+	auto u = url;
+	if (u.rfind("grpc://", 0) == 0) {
+		u = u.substr(7);
+	}
+	auto colon = u.rfind(':');
+	if (colon != std::string::npos) {
+		host = u.substr(0, colon);
+		port = std::stoi(u.substr(colon + 1));
+	} else if (!u.empty()) {
+		host = u;
+	}
+	auto loc_res = Location::ForGrpcTcp(host, port);
+	if (!loc_res.ok()) {
+		std::cerr << loc_res.status().ToString() << "\n";
+		return 1;
+	}
+	auto client_res = arrow::flight::FlightClient::Connect(*loc_res);
+	if (!client_res.ok()) {
+		std::cerr << client_res.status().ToString() << "\n";
+		return 1;
+	}
+	auto client = std::move(*client_res);
+	arrow::flight::FlightCallOptions opt;
+	opt.headers.emplace_back("x-duckbox-caller", caller.empty() ? "local" : caller);
+	if (!id.empty()) {
+		opt.headers.emplace_back("x-duckbox-sandbox", id);
+	}
+	if (!key.empty()) {
+		opt.headers.emplace_back("x-duckbox-key", key);
+	}
+	std::string body;
+	std::string action_type;
+	if (op == "create" || op == "update") {
+		if (spec_path.empty()) {
+			std::cerr << "duckbox sandbox " << op << ": --spec is required\n";
+			return 1;
+		}
+		auto spec = LoadSpecFile(spec_path);
+		if (!id.empty()) {
+			spec.id = id;
+		}
+		if (!key.empty()) {
+			spec.bound_key = key;
+		}
+		body = spec.yaml_body;
+		if (!id.empty() || !key.empty()) {
+			// Prefer live fields; YAML may omit id/key. Re-serialize via RecordFromSpec.
+			auto rec = RecordFromSpec(spec, std::filesystem::path(spec_path).parent_path().string());
+			body = rec.spec.yaml_body;
+			if (body.find("\nid:") == std::string::npos && body.rfind("id:", 0) != 0) {
+				body = "id: " + spec.id + "\nkey: " + spec.bound_key + "\n" + body;
+			}
+		}
+		opt.headers.emplace_back("x-duckbox-spec-dir", std::filesystem::path(spec_path).parent_path().string());
+		action_type = op == "create" ? "CreateSandbox" : "UpdateSandbox";
+	} else if (op == "get" || op == "delete") {
+		if (id.empty()) {
+			std::cerr << "duckbox sandbox " << op << ": --id is required\n";
+			return 1;
+		}
+		body = id;
+		action_type = op == "get" ? "GetSandbox" : "DeleteSandbox";
+	} else if (op == "list") {
+		action_type = "ListSandboxes";
+	} else {
+		std::cerr << "duckbox sandbox: unknown op " << op << "\n";
+		return 1;
+	}
+	arrow::flight::Action action;
+	action.type = action_type;
+	action.body = BufOf(body);
+	auto stream_res = client->DoAction(opt, action);
+	if (!stream_res.ok()) {
+		std::cerr << stream_res.status().ToString() << "\n";
+		return 1;
+	}
+	auto stream = std::move(*stream_res);
+	while (true) {
+		auto n = stream->Next();
+		if (!n.ok()) {
+			std::cerr << n.status().ToString() << "\n";
+			return 1;
+		}
+		if (!n.ValueOrDie()) {
+			break;
+		}
+		auto &r = *n.ValueOrDie();
+		if (r.body) {
+			std::cout.write(reinterpret_cast<const char *>(r.body->data()), static_cast<std::streamsize>(r.body->size()));
+			std::cout << "\n";
+		}
 	}
 	return 0;
 }

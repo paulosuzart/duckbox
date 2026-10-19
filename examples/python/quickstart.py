@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Walk through a duckbox session: query, bind a parameter, isolation, rejection.
 
-No flags. Defaults: grpc://127.0.0.1:4747 and policies/ducklake/analyst.yaml.
-Override with DUCKBOX_URL / DUCKBOX_SPEC (or connect(spec=..., url=...)).
+No flags. Defaults: grpc://127.0.0.1:4747. Creates named sandboxes acme-analyst
+and acme-kim from policies/ducklake/analyst.yaml (override DUCKBOX_URL / DUCKBOX_SPEC).
 
     python examples/python/quickstart.py
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from duckbox_client import connect, format_error  # noqa: E402
+from duckbox_client import connect, create_sandbox, default_spec_path, format_error  # noqa: E402
 
 SQL = "SELECT id, title, amount FROM deals ORDER BY id"
 
@@ -25,20 +25,24 @@ def show(title: str, df) -> None:
 
 
 def main() -> int:
-    # Same SQL, two keys — each sandbox only sees its tenant's live rows.
-    with connect(key="tenant_21:user_sergio") as sergio, connect(key="tenant_22:user_kim") as kim:
+    spec = default_spec_path()
+    print(f"creating named sandboxes from {spec}")
+    print(" ", create_sandbox(sandbox="acme-analyst", key="tenant_21:user_sergio", spec=spec))
+    print(" ", create_sandbox(sandbox="acme-kim", key="tenant_22:user_kim", spec=spec))
+
+    with connect(sandbox="acme-analyst") as sergio, connect(sandbox="acme-kim") as kim:
         deals = sergio.query(SQL)
-        show("Sergio (tenant 21) — live deals", deals)
+        show("Sergio (acme-analyst / tenant 21) — live deals", deals)
 
         one = sergio.query("SELECT id, title, amount FROM deals WHERE id = ?", [1])
         show("Prepared statement: id = ?", one)
 
         kim_deals = kim.query(SQL)
-        show("Kim (tenant 22) — same SQL", kim_deals)
+        show("Kim (acme-kim / tenant 22) — same SQL", kim_deals)
 
         sergio_ids = [int(v) for v in deals["id"].tolist()]
         kim_ids = [int(v) for v in kim_deals["id"].tolist()]
-        print(f"\nids  tenant_21={sergio_ids}  tenant_22={kim_ids}")
+        print(f"\nids  acme-analyst={sergio_ids}  acme-kim={kim_ids}")
         if sergio_ids != [1] or sorted(kim_ids) != [3, 4] or set(sergio_ids) & set(kim_ids):
             print("FAIL: tenant isolation", file=sys.stderr)
             return 1

@@ -44,6 +44,24 @@ public:
 	}
 };
 
+class ConflictError : public Error {
+public:
+	explicit ConflictError(const std::string &msg) : Error(msg) {
+	}
+};
+
+class NotFoundError : public Error {
+public:
+	explicit NotFoundError(const std::string &msg) : Error(msg) {
+	}
+};
+
+class StaleHandleError : public HandleError {
+public:
+	explicit StaleHandleError(const std::string &msg) : HandleError(msg) {
+	}
+};
+
 struct SpecIssue {
 	std::string path;
 	std::string message;

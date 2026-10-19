@@ -59,13 +59,12 @@ std::string GetStr(const std::string &s, size_t &i) {
 }
 
 std::string EncodePayload(const StatementHandle &h) {
-	std::string s = "DBX2";
+	std::string s = "DBX3";
 	PutStr(s, h.rewritten_sql);
 	PutStr(s, h.tenant_raw);
-	PutStr(s, h.spec_name);
-	PutStr(s, h.spec_version);
-	PutStr(s, h.policy_yaml);
-	PutStr(s, h.init_sql);
+	PutStr(s, h.sandbox_id);
+	PutI64(s, h.version);
+	PutStr(s, h.content_hash);
 	PutI64(s, h.expires_at_unix);
 	PutU32(s, static_cast<uint32_t>(h.user_param_count));
 	PutStr(s, h.params_ipc);
@@ -73,17 +72,16 @@ std::string EncodePayload(const StatementHandle &h) {
 }
 
 StatementHandle DecodePayload(const std::string &s) {
-	if (s.size() < 4 || s.compare(0, 4, "DBX2") != 0) {
+	if (s.size() < 4 || s.compare(0, 4, "DBX3") != 0) {
 		throw HandleError("unknown handle version");
 	}
 	size_t i = 4;
 	StatementHandle h;
 	h.rewritten_sql = GetStr(s, i);
 	h.tenant_raw = GetStr(s, i);
-	h.spec_name = GetStr(s, i);
-	h.spec_version = GetStr(s, i);
-	h.policy_yaml = GetStr(s, i);
-	h.init_sql = GetStr(s, i);
+	h.sandbox_id = GetStr(s, i);
+	h.version = static_cast<int>(GetI64(s, i));
+	h.content_hash = GetStr(s, i);
 	h.expires_at_unix = GetI64(s, i);
 	h.user_param_count = static_cast<int>(GetU32(s, i));
 	h.params_ipc = GetStr(s, i);

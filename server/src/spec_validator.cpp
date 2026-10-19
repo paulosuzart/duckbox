@@ -59,8 +59,16 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 	std::vector<SpecIssue> issues;
 	auto add = [&](std::string path, std::string msg) { issues.push_back({std::move(path), std::move(msg)}); };
 
-	if (spec.name.empty()) {
-		add("name", "required");
+	if (spec.name.empty() && spec.id.empty()) {
+		add("name", "required (or id)");
+	}
+	if (!spec.id.empty() && !ValidSandboxId(spec.id)) {
+		add("id", "must be a lowercase name like acme-analyst");
+	}
+	if (!spec.policy_class.empty()) {
+		if (!ValidSandboxId(spec.policy_class) && spec.policy_class != "other") {
+			add("policy_class", "must be a bounded class name (lowercase, not the sandbox id)");
+		}
 	}
 	if (spec.key.Empty()) {
 		add("auth.key", "required (pattern, patterns, regex, or split)");
@@ -107,14 +115,20 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 		add("lake.bootstrap_sql", "required when lake.kind=memory");
 	}
 	if (spec.lake.kind == LakeKind::Ducklake) {
-		if (spec.lake.catalog.empty() && spec.lake.catalog_env.empty()) {
-			add("lake.catalog", "required when lake.kind=ducklake (catalog or catalog_env)");
+		if (spec.lake.catalog.empty() && spec.lake.catalog_ref.Empty() && spec.lake.catalog_env.empty()) {
+			add("lake.catalog", "required when lake.kind=ducklake (catalog, catalog_env, or catalog_ref)");
 		}
 		if (spec.lake.data_path.empty()) {
 			add("lake.data_path", "required when lake.kind=ducklake");
 		}
-		if (spec.lake.s3.access_key_env.empty() || spec.lake.s3.secret_key_env.empty()) {
-			add("lake.s3", "access_key_env and secret_key_env are required (never log secret values)");
+		if (spec.lake.s3.access_key.Empty() || spec.lake.s3.secret_key.Empty()) {
+			add("lake.s3", "access_key and secret_key must be references (env:NAME or file:/path); never values");
+		} else {
+			ValidateSecretRefSyntax(spec.lake.s3.access_key, "lake.s3.access_key", issues);
+			ValidateSecretRefSyntax(spec.lake.s3.secret_key, "lake.s3.secret_key", issues);
+		}
+		if (!spec.lake.catalog_ref.Empty()) {
+			ValidateSecretRefSyntax(spec.lake.catalog_ref, "lake.catalog", issues);
 		}
 		std::unordered_set<std::string> need{"httpfs", "postgres", "ducklake"};
 		for (auto &e : spec.lake.extensions) {

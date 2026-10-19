@@ -1,13 +1,12 @@
 """Tiny ADBC Flight SQL helper. Typical use is three or four lines:
 
     from duckbox_client import connect
-    db = connect()  # tenant_21, localhost, bundled spec
+    db = connect()  # named sandbox acme-analyst, localhost
     print(db.query("SELECT id, title, amount FROM deals"))
 """
 
 from __future__ import annotations
 
-import base64
 import os
 import time
 from pathlib import Path
@@ -19,6 +18,7 @@ from adbc_driver_flightsql import dbapi
 PathLike = Union[str, Path]
 
 DEFAULT_URL = "grpc://127.0.0.1:4747"
+DEFAULT_SANDBOX = "acme-analyst"
 DEFAULT_KEY = "tenant_21:user_sergio"
 
 
@@ -34,15 +34,10 @@ def default_spec_path() -> Path:
     return repo_root() / "policies" / "ducklake" / "analyst.yaml"
 
 
-def encode_spec(yaml_text: str) -> str:
-    # gRPC metadata cannot contain newlines; send base64url(YAML).
-    return base64.urlsafe_b64encode(yaml_text.encode("utf-8")).decode("ascii")
-
-
 def format_error(exc: BaseException) -> str:
     """Strip ADBC/Flight wrapping so the sandbox reason is readable."""
     msg = str(exc)
-    for marker in ("Invalid Error: ", "[FlightSQL] ", "INVALID_ARGUMENT: "):
+    for marker in ("Invalid Error: ", "[FlightSQL] ", "INVALID_ARGUMENT: ", "Already Exists: ", "Key error: "):
         if marker in msg:
             msg = msg.split(marker)[-1]
     msg = msg.split("(InvalidArgument")[0].split("(IO:")[0].strip()
@@ -51,12 +46,12 @@ def format_error(exc: BaseException) -> str:
 
 
 class Duckbox:
-    """One tenant connection. `.query()` returns a pandas DataFrame."""
+    """One named-sandbox connection. `.query()` returns a pandas DataFrame."""
 
-    def __init__(self, conn: Any, key: str, spec_path: Path):
+    def __init__(self, conn: Any, sandbox: str, key: str):
         self._conn = conn
+        self.sandbox = sandbox
         self.key = key
-        self.spec_path = spec_path
 
     def query(self, sql: str, params: Optional[Sequence[Any]] = None) -> pd.DataFrame:
         with self._conn.cursor() as cur:
@@ -77,31 +72,64 @@ class Duckbox:
         self.close()
 
 
-def connect(
+def _flight_headers(sandbox: str, key: str = "", caller: str = "local") -> list[tuple[str, str]]:
+    headers = [
+        ("x-duckbox-sandbox", sandbox),
+        ("x-duckbox-caller", caller),
+    ]
+    if key:
+        headers.append(("x-duckbox-key", key))
+    return headers
+
+
+def create_sandbox(
+    sandbox: str = DEFAULT_SANDBOX,
     key: str = DEFAULT_KEY,
     spec: Optional[PathLike] = None,
     url: Optional[str] = None,
-    init_sql: str = "",
+    caller: str = "local",
+) -> str:
+    """Trusted-caller CreateSandbox (Flight DoAction). Idempotent if content matches."""
+    import pyarrow.flight as flight
+
+    url = url or os.environ.get("DUCKBOX_URL", DEFAULT_URL)
+    spec_path = Path(spec) if spec else default_spec_path()
+    yaml_text = spec_path.read_text()
+    if not yaml_text.startswith("id:"):
+        yaml_text = f"id: {sandbox}\nkey: {key}\n" + yaml_text
+    client = flight.FlightClient(url)
+    options = flight.FlightCallOptions(
+        headers=[
+            (k.encode(), v.encode())
+            for k, v in _flight_headers(sandbox, key, caller)
+            + [("x-duckbox-spec-dir", str(spec_path.resolve().parent))]
+        ]
+    )
+    action = flight.Action("CreateSandbox", yaml_text.encode("utf-8"))
+    chunks = list(client.do_action(action, options))
+    return chunks[0].body.to_pybytes().decode("utf-8") if chunks else "{}"
+
+
+def connect(
+    sandbox: str = DEFAULT_SANDBOX,
+    key: str = "",
+    url: Optional[str] = None,
     retries: int = 20,
 ) -> Duckbox:
     url = url or os.environ.get("DUCKBOX_URL", DEFAULT_URL)
-    spec_path = Path(spec) if spec else default_spec_path()
-    if not spec_path.is_file():
-        raise FileNotFoundError(f"sandbox spec not found: {spec_path}")
-    spec_yaml = spec_path.read_text()
+    sandbox = os.environ.get("DUCKBOX_SANDBOX", sandbox)
     kwargs = {
-        "adbc.flight.sql.rpc.call_header.x-duckbox-key": key,
-        "adbc.flight.sql.rpc.call_header.x-duckbox-spec": encode_spec(spec_yaml),
-        "adbc.flight.sql.rpc.call_header.x-duckbox-spec-dir": str(spec_path.resolve().parent),
+        "adbc.flight.sql.rpc.call_header.x-duckbox-sandbox": sandbox,
+        "adbc.flight.sql.rpc.call_header.x-duckbox-caller": "local",
     }
-    if init_sql:
-        kwargs["adbc.flight.sql.rpc.call_header.x-duckbox-init-sql"] = init_sql
+    if key:
+        kwargs["adbc.flight.sql.rpc.call_header.x-duckbox-key"] = key
 
     last: Optional[BaseException] = None
     for _ in range(max(retries, 1)):
         try:
             conn = dbapi.connect(url, db_kwargs=kwargs)
-            return Duckbox(conn, key, spec_path)
+            return Duckbox(conn, sandbox, key)
         except Exception as exc:  # noqa: BLE001
             text = str(exc).lower()
             if "connection refused" in text or "failed to connect" in text or "unavailable" in text:
@@ -116,9 +144,9 @@ def connect(
 def query(
     sql: str,
     params: Optional[Sequence[Any]] = None,
-    key: str = DEFAULT_KEY,
-    spec: Optional[PathLike] = None,
+    sandbox: str = DEFAULT_SANDBOX,
+    key: str = "",
     url: Optional[str] = None,
 ) -> pd.DataFrame:
-    with connect(key=key, spec=spec, url=url) as db:
+    with connect(sandbox=sandbox, key=key, url=url) as db:
         return db.query(sql, params)
