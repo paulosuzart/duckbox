@@ -1,0 +1,39 @@
+name: analyst
+auth:
+  mode: trusted
+resources:
+  memory_limit: 256MB
+  threads: 2
+  query_timeout_ms: 8000
+  max_result_rows: 1000
+lake:
+  kind: memory
+  alias: memory
+  read_only: true
+  init_sql: ../../examples/sql/memory_init.sql
+tables:
+  deals:
+    tenant_column: tenant_id
+    columns:
+      - tenant_id
+      - id
+      - title
+      - amount
+      - _deleted
+    filters:
+      - "tenant_id = :tenant_id"
+      - "_deleted = false"
+functions:
+  - count
+  - count_star
+  - sum
+  - avg
+  - min
+  - max
+  - lower
+  - upper
+  - length
+  - coalesce
+  - round
+  - abs
+deny_table_functions: true
