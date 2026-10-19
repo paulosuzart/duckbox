@@ -151,6 +151,8 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 		if (kv.second.filters.empty()) {
 			add(prefix + ".filters", "required (at least one mandatory filter)");
 		}
+		bool tenant_from_key = false;
+		auto tenant_col = ddb::StringUtil::Lower(kv.second.tenant_column);
 		for (size_t i = 0; i < kv.second.filters.size(); i++) {
 			auto path = prefix + ".filters[" + std::to_string(i) + "]";
 			try {
@@ -162,9 +164,40 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 						add(path, "references :" + pn + " which is not extracted by auth.key");
 					}
 				}
+				if (expr->GetExpressionClass() == ddb::ExpressionClass::COMPARISON) {
+					auto &cmp = expr->Cast<ddb::ComparisonExpression>();
+					auto is_tenant = [&](ddb::ParsedExpression &e) {
+						if (e.GetExpressionClass() != ddb::ExpressionClass::COLUMN_REF) {
+							return false;
+						}
+						auto &c = e.Cast<ddb::ColumnRefExpression>();
+						return !c.column_names.empty() &&
+						       ddb::StringUtil::Lower(c.column_names.back()) == tenant_col;
+					};
+					auto is_param = [&](ddb::ParsedExpression &e) -> std::string {
+						if (e.GetExpressionClass() != ddb::ExpressionClass::PARAMETER) {
+							return "";
+						}
+						return ddb::StringUtil::Lower(e.Cast<ddb::ParameterExpression>().identifier);
+					};
+					if (cmp.left && cmp.right && (is_tenant(*cmp.left) || is_tenant(*cmp.right))) {
+						auto other = is_tenant(*cmp.left) ? is_param(*cmp.right) : is_param(*cmp.left);
+						if (other.empty()) {
+							add(path, "tenant column '" + kv.second.tenant_column +
+							              "' must use a key variable (:" + kv.second.tenant_column +
+							              "), not a literal");
+						} else if (varset.count(other)) {
+							tenant_from_key = true;
+						}
+					}
+				}
 			} catch (const std::exception &e) {
 				add(path, std::string("failed to parse with DuckDB: ") + e.what());
 			}
+		}
+		if (!kv.second.filters.empty() && !tenant_from_key) {
+			add(prefix + ".filters", "tenant column '" + kv.second.tenant_column +
+			                             "' must be constrained by a key variable (e.g. tenant_id = :tenant_id)");
 		}
 	}
 	for (auto &fn : spec.functions) {

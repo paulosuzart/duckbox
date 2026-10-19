@@ -10,6 +10,7 @@ int main() {
 	RunPlanGuardTests();
 	RunInitSqlTests();
 	RunHandleTests();
+	RunCryptoTests();
 	RunRegistryTests();
 	RunMetricsTests();
 	return ReportAndExit("unit");

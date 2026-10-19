@@ -32,4 +32,13 @@ void duckbox::test::RunHandleTests() {
 	ExpectThrowContains([&] { signer.Verify(tok3); }, "expired", "expired handle rejected");
 	Expect(tok.rfind("DBX4.", 0) == 0, "handles are AEAD-wrapped");
 	Expect(tok.find("SELECT 1") == std::string::npos, "rewritten SQL is not plaintext in the token");
+	auto other_tok = signer.Sign(other);
+	Expect(tok != other_tok, "AAD binds tenant so tokens differ");
+	auto parts = tok;
+	auto p1 = parts.find('.', 5);
+	auto p2 = parts.find('.', p1 + 1);
+	auto q1 = other_tok.find('.', 5);
+	Expect(p1 != std::string::npos && p2 != std::string::npos && q1 != std::string::npos, "DBX4 has AAD.sealed.mac");
+	auto swapped = "DBX4." + other_tok.substr(5, q1 - 5) + tok.substr(p1);
+	ExpectThrowContains([&] { signer.Verify(swapped); }, "signature", "AAD from another tenant does not decrypt");
 }

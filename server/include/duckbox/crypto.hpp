@@ -23,11 +23,13 @@ bool ConstTimeEquals(const std::string &a, const std::string &b);
 std::string UriEncode(const std::string &s, bool encode_slash);
 
 // AES-256-GCM. The passphrase is SHA-256'd to the key. Blob is nonce||ciphertext||tag.
-std::string AesGcmEncrypt(const std::string &key, const std::string &plaintext);
-// HandleError on truncated input or tag mismatch (does not distinguish which).
-std::string AesGcmDecrypt(const std::string &key, const std::string &blob);
+// `aad` is authenticated but not encrypted (sandbox id / version / tenant).
+std::string AesGcmEncrypt(const std::string &key, const std::string &plaintext, const std::string &aad = {});
+// HandleError on truncated input, AAD/tag mismatch (does not distinguish which).
+std::string AesGcmDecrypt(const std::string &key, const std::string &blob, const std::string &aad = {});
 
-// HS256 only. Returns JWT `sub`. Rejects alg=none and bad signatures (AuthError).
+// HS256 only. Returns JWT `sub`. Requires alg == "HS256" exactly, a numeric
+// `exp` (60s leeway), and optional `nbf`. Rejects alg=none and bad signatures.
 std::string VerifyJwtHs256(const std::string &token, const std::string &secret);
 
 } // namespace duckbox

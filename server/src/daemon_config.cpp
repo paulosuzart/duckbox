@@ -50,6 +50,9 @@ bool GlobMatch(const std::string &pattern, const std::string &value) {
 
 void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity, const std::string &sandbox_key) {
 	if (cfg.callers.empty()) {
+		if (!cfg.allow_insecure_dev) {
+			throw AuthError("auth.callers is required unless auth.allow_insecure_dev");
+		}
 		return;
 	}
 	std::string id = identity.empty() ? "local" : identity;
@@ -245,6 +248,12 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 		add("handle_secret", "required (or handle_secret_env)");
 	} else if (!cfg.allow_insecure_dev && static_cast<int>(cfg.handle_secret.size()) < kMinHandleSecretLen) {
 		add("handle_secret", "must be at least 16 characters unless auth.allow_insecure_dev");
+	}
+	if (cfg.handle_secret == "duckbox-dev-secret" && !cfg.allow_insecure_dev) {
+		add("handle_secret", "well-known duckbox-dev-secret is refused unless auth.allow_insecure_dev");
+	}
+	if (!cfg.allow_insecure_dev && cfg.callers.empty()) {
+		add("auth.callers", "required unless auth.allow_insecure_dev");
 	}
 	if (!cfg.allow_insecure_dev && cfg.bearer_secrets.empty() && cfg.jwt_secret.empty() &&
 	    cfg.auth_mode != AuthMode::Token) {

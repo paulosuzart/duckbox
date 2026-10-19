@@ -18,6 +18,8 @@ void ExecOrThrow(ddb::Connection &con, const std::string &sql);
 
 void CheckBootstrapSql(const std::string &sql); // CREATE/INSERT only; used for memory lake seed
 void ConstrainLakeAgainstDaemon(const SandboxSpec &spec, const DaemonConfig &daemon); // lake_allow; PolicyError
+// Resolved catalog DSN for attach / plan-guard DSN matching. Never log the value.
+std::string ResolveLakeCatalog(const SandboxSpec &spec, const SecretResolver &secrets);
 // LOAD then INSTALL-on-miss. Disables enable_external_access after attach.
 void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std::string &spec_dir,
                         const SecretResolver &secrets, const DaemonConfig &daemon = {});

@@ -38,7 +38,8 @@ struct LeaseSettings {
 	bool skip_probe = false;
 };
 
-// Trusted caller → allowed tenant-key globs. Empty list = allow all (local/dev).
+// Trusted caller → allowed tenant-key globs. Empty list is allow-all only when
+// allow_insecure_dev is set; production ValidateDaemonOrThrow requires callers.
 struct CallerRule {
 	std::string identity; // exact or "*"
 	std::vector<std::string> key_patterns;

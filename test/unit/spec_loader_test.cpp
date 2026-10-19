@@ -3,6 +3,7 @@
 
 #include "duckbox/crypto.hpp"
 #include "duckbox/daemon_config.hpp"
+#include "duckbox/lake.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/secrets.hpp"
 #include "duckbox/spec_validator.hpp"
@@ -31,6 +32,9 @@ void duckbox::test::RunSpecLoaderTests() {
 		o << "name: bad\nlisten: 127.0.0.1:9\nhandle_secret: x\nlake:\n  kind: memory\n";
 	}
 	ExpectThrowContains([&] { LoadDaemonFile(bad_path); }, "control-plane", "daemon yaml with lake is rejected");
+	CheckBootstrapSql("CREATE TABLE t(i INT);\nINSERT INTO t VALUES (1);");
+	ExpectThrowContains([&] { CheckBootstrapSql("SELECT 1"); }, "CREATE", "memory bootstrap rejects SELECT");
+	Expect(EscapeSqlString("a'b") == "a''b", "SQL string escape doubles quotes");
 
 	auto yaml_path = MemoryAnalystPath();
 	auto loaded = LoadPolicyFile(yaml_path);
@@ -138,6 +142,55 @@ void duckbox::test::RunSpecLoaderTests() {
 	auto file_ref = ParseSecretRef("file:/run/secrets/x", "lake.s3.secret_key");
 	Expect(file_ref.scheme == SecretRef::Scheme::File, "file ref parsed");
 	ExpectThrowContains([&] { ParseSecretRef("file:relative", "x"); }, "absolute", "relative file ref rejected");
+	ExpectThrowContains([&] { ParseSecretRef("file:/tmp/../etc/passwd", "x"); }, "..", "file ref with .. is rejected");
+	Expect(ParseSecretRef("", "x").Empty(), "empty secret ref");
+	Expect(ParseSecretRef("DUCKBOX_S3_KEY", "x").Spec() == "env:DUCKBOX_S3_KEY", "bare env name is env: shorthand");
+	ExpectThrowContains([&] { ResolveSecret("", "", "field"); }, "reference", "ResolveSecret refuses empty inline");
+	Expect(ResolveSecret("", "inline-only", "field") == "inline-only", "ResolveSecret keeps an explicit inline");
+	{
+		auto path = "/tmp/duckbox-secret-file";
+		{
+			std::ofstream o(path);
+			o << "  file-secret-value  \n";
+		}
+		EnvFileSecretResolver r;
+		Expect(r.Resolve(ParseSecretRef("file:" + std::string(path), "t"), "t") == "file-secret-value",
+		       "file resolver trims");
+		{
+			std::ofstream o(path);
+		}
+		ExpectThrowContains([&] { r.Resolve(ParseSecretRef("file:" + std::string(path), "t"), "t"); }, "empty",
+		                    "empty secret file is rejected");
+		ExpectThrowContains([&] { r.Resolve(ParseSecretRef("file:/tmp/duckbox-no-such-secret", "t"), "t"); },
+		                    "cannot read", "missing secret file is rejected");
+		ExpectThrowContains([&] { r.Resolve(SecretRef{}, "t"); }, "missing", "empty ref does not resolve");
+	}
+	Expect(GlobMatch("tenant_21:*", "tenant_21:user") && !GlobMatch("tenant_21:*", "tenant_22:user"),
+	       "caller glob matches a tenant prefix");
+	Expect(GlobMatch("*", "anything") && GlobMatch("abc", "abc") && !GlobMatch("ab", "abc"),
+	       "caller glob * and exact");
+	{
+		auto path = "/tmp/duckbox-daemon-full.yaml";
+		{
+			std::ofstream o(path);
+			o << "name: full\nlisten: 127.0.0.1:4747\nhandle_secret_env: DUCKBOX_HANDLE_SECRET\n"
+			     "debug_http: 127.0.0.1:18480\n"
+			     "auth:\n  mode: trusted\n  allow_insecure_dev: true\n"
+			     "  callers:\n    - identity: analyst-svc\n      keys: [\"tenant_21:*\"]\n"
+			     "  bearer_secrets:\n    - identity: analyst-svc\n      secret: super-secret-token\n"
+			     "lake_allow:\n  s3_endpoints: [\"127.0.0.1:9000\"]\n  secret_refs: [\"env:DUCKBOX_S3_KEY\"]\n"
+			     "lease:\n  endpoint: http://127.0.0.1:9\n  bucket: b\n  prefix: leases/\n  skip_probe: true\n"
+			     "limits:\n  idle_timeout: 30s\n  max_idle_timeout: 5m\n  max_sandboxes: 10\n";
+		}
+		auto d = LoadDaemonFile(path);
+		Expect(d.debug_http.find("18480") != std::string::npos, "daemon yaml debug_http");
+		Expect(d.callers.size() == 1 && d.callers[0].identity == "analyst-svc", "daemon yaml callers");
+		Expect(d.bearer_secrets.size() == 1, "daemon yaml bearer_secrets");
+		Expect(d.lake_allow.s3_endpoints.size() == 1, "daemon yaml lake_allow");
+		Expect(d.lease.skip_probe, "daemon yaml lease skip_probe");
+		Expect(d.idle_evict_ms == 30000, "daemon yaml idle_timeout 30s");
+		ValidateDaemonOrThrow(d);
+	}
 	setenv("DUCKBOX_TEST_SECRET", "value-must-not-appear-in-errors", 1);
 	EnvFileSecretResolver resolver;
 	auto resolved = resolver.Resolve(ParseSecretRef("env:DUCKBOX_TEST_SECRET", "t"), "t");

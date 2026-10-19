@@ -18,6 +18,7 @@
 #include <arrow/table.h>
 
 #include <chrono>
+#include <ctime>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -27,9 +28,12 @@
 
 namespace {
 
-std::string MkJwt(const std::string &secret, const std::string &sub, const std::string &alg) {
+std::string MkJwt(const std::string &secret, const std::string &sub, const std::string &alg, int64_t exp = 0) {
+	if (exp == 0) {
+		exp = static_cast<int64_t>(std::time(nullptr)) + 3600;
+	}
 	auto header = duckbox::Base64UrlEncode(std::string("{\"alg\":\"") + alg + "\",\"typ\":\"JWT\"}");
-	auto payload = duckbox::Base64UrlEncode(std::string("{\"sub\":\"") + sub + "\"}");
+	auto payload = duckbox::Base64UrlEncode(std::string("{\"sub\":\"") + sub + "\",\"exp\":" + std::to_string(exp) + "}");
 	auto msg = header + "." + payload;
 	if (alg == "none") {
 		return msg + ".";
@@ -96,7 +100,13 @@ void duckbox::test::RunAuthFlightTests() {
 		ExpectThrowContains([&] { ValidateDaemonOrThrow(prod); }, "bearer_secrets",
 		                    "A2 production requires caller secrets");
 		prod.jwt_secret = "jwt-secret-value-here";
+		ExpectThrowContains([&] { ValidateDaemonOrThrow(prod); }, "callers",
+		                    "H4 production requires auth.callers");
+		prod.callers.push_back(duckbox::CallerRule{"analyst-svc", {"tenant_21:*"}});
 		ValidateDaemonOrThrow(prod);
+		prod.handle_secret = "duckbox-dev-secret";
+		ExpectThrowContains([&] { ValidateDaemonOrThrow(prod); }, "duckbox-dev-secret",
+		                    "H4 well-known handle secret is refused outside allow_insecure_dev");
 
 		DaemonConfig locked;
 		locked.allow_insecure_dev = false;
@@ -121,6 +131,29 @@ void duckbox::test::RunAuthFlightTests() {
 		                    "signature", "A1 JWT with wrong secret is rejected");
 		ExpectThrowContains([&] { AuthenticateCallerIdentity(tok, "", MkJwt(tok.jwt_secret, "x", "none"), ""); },
 		                    "unsigned JWT", "A1 unsigned JWT is not accepted");
+		auto now = static_cast<int64_t>(std::time(nullptr));
+		auto header_kid = duckbox::Base64UrlEncode(std::string("{\"alg\":\"none\",\"kid\":\"HS256\",\"typ\":\"JWT\"}"));
+		auto payload_kid = duckbox::Base64UrlEncode(std::string("{\"sub\":\"analyst-svc\",\"exp\":") +
+		                                            std::to_string(now + 3600) + "}");
+		auto msg_kid = header_kid + "." + payload_kid;
+		auto tok_kid = msg_kid + "." + duckbox::Base64UrlEncode(duckbox::HmacSha256(tok.jwt_secret, msg_kid));
+		ExpectThrowContains([&] { AuthenticateCallerIdentity(tok, "", tok_kid, ""); }, "unsigned JWT",
+		                    "H1 alg=none with kid=HS256 is rejected");
+		auto header_ok = duckbox::Base64UrlEncode(std::string("{\"alg\":\"HS256\",\"typ\":\"JWT\"}"));
+		auto payload_noexp = duckbox::Base64UrlEncode(std::string("{\"sub\":\"analyst-svc\"}"));
+		auto msg_noexp = header_ok + "." + payload_noexp;
+		auto tok_noexp = msg_noexp + "." + duckbox::Base64UrlEncode(duckbox::HmacSha256(tok.jwt_secret, msg_noexp));
+		ExpectThrowContains([&] { AuthenticateCallerIdentity(tok, "", tok_noexp, ""); }, "exp",
+		                    "H1 JWT without exp is rejected");
+		ExpectThrowContains([&] { AuthenticateCallerIdentity(tok, "", MkJwt(tok.jwt_secret, "analyst-svc", "HS256", now - 120), ""); },
+		                    "expired", "H1 expired JWT is rejected");
+		auto payload_nbf = duckbox::Base64UrlEncode(std::string("{\"sub\":\"analyst-svc\",\"exp\":") +
+		                                            std::to_string(now + 3600) + ",\"nbf\":" + std::to_string(now + 3600) +
+		                                            "}");
+		auto msg_nbf = header_ok + "." + payload_nbf;
+		auto tok_nbf = msg_nbf + "." + duckbox::Base64UrlEncode(duckbox::HmacSha256(tok.jwt_secret, msg_nbf));
+		ExpectThrowContains([&] { AuthenticateCallerIdentity(tok, "", tok_nbf, ""); }, "not yet valid",
+		                    "H1 nbf in the future is rejected");
 	}
 
 	{
@@ -136,6 +169,15 @@ void duckbox::test::RunAuthFlightTests() {
 		lake.lake.s3.endpoint = "evil.example:9000";
 		ExpectThrowContains([&] { ConstrainLakeAgainstDaemon(lake, prod); }, "s3_endpoints",
 		                    "A3 foreign S3 endpoint is denied");
+		lake.lake.s3.endpoint = "127.0.0.1:9000";
+		lake.lake.s3.endpoint_env = "DUCKBOX_S3_ENDPOINT";
+		ExpectThrowContains([&] { ConstrainLakeAgainstDaemon(lake, prod); }, "endpoint_env",
+		                    "H3 lake.s3.endpoint_env must be on secret_refs");
+		prod.lake_allow.secret_refs.push_back("env:DUCKBOX_S3_ENDPOINT");
+		ConstrainLakeAgainstDaemon(lake, prod);
+		lake.lake.s3.region_env = "DUCKBOX_S3_REGION";
+		ExpectThrowContains([&] { ConstrainLakeAgainstDaemon(lake, prod); }, "region_env",
+		                    "H3 lake.s3.region_env must be on secret_refs");
 	}
 
 	{
@@ -211,9 +253,85 @@ void duckbox::test::RunAuthFlightTests() {
 		auto expired = ActionBody(*raw_client, opt, "ExpireSandbox", "flight-a");
 		Expect(expired.find("flight-a") != std::string::npos, "ExpireSandbox returns the definition");
 
+		{
+			auto bob = RecordFromSpec(LoadPolicyFile(MemoryAnalystPath()), MemorySpecDir());
+			bob.id = "sb-22";
+			bob.key = "tenant_22:user_kim";
+			bob.spec.id = bob.id;
+			bob.spec.bound_key = bob.key;
+			defs->Create(bob);
+			auto steal = opt;
+			steal.headers.emplace_back("x-duckbox-sandbox", "sb-22");
+			steal.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+			try {
+				(void)ActionBody(*raw_client, steal, "UpdateSandbox", body);
+				g_failed++;
+				std::cerr << "FAIL: K1 Alice must not UpdateSandbox Bob's id\n";
+			} catch (const std::exception &e) {
+				Expect(std::string(e.what()).find("not authorized") != std::string::npos ||
+				           std::string(e.what()).find("Invalid") != std::string::npos,
+				       "K1 UpdateSandbox on another tenant's sandbox is denied");
+			}
+			try {
+				(void)ActionBody(*raw_client, steal, "ExpireSandbox", "sb-22");
+				g_failed++;
+				std::cerr << "FAIL: K1 Alice must not ExpireSandbox Bob's id\n";
+			} catch (const std::exception &e) {
+				Expect(std::string(e.what()).find("not authorized") != std::string::npos ||
+				           std::string(e.what()).find("Invalid") != std::string::npos,
+				       "K1 ExpireSandbox on another tenant's sandbox is denied");
+			}
+			try {
+				(void)ActionBody(*raw_client, steal, "GetSandbox", "sb-22");
+				g_failed++;
+				std::cerr << "FAIL: K1 Alice must not GetSandbox Bob's id\n";
+			} catch (const std::exception &e) {
+				Expect(std::string(e.what()).find("not authorized") != std::string::npos ||
+				           std::string(e.what()).find("Invalid") != std::string::npos,
+				       "K1 GetSandbox on another tenant's sandbox is denied");
+			}
+			try {
+				(void)ActionBody(*raw_client, steal, "DeleteSandbox", "sb-22");
+				g_failed++;
+				std::cerr << "FAIL: K1 Alice must not DeleteSandbox Bob's id\n";
+			} catch (const std::exception &e) {
+				Expect(std::string(e.what()).find("not authorized") != std::string::npos ||
+				           std::string(e.what()).find("Invalid") != std::string::npos,
+				       "K1 DeleteSandbox on another tenant's sandbox is denied");
+			}
+			auto listed_k1 = ActionBody(*raw_client, opt, "ListSandboxes", "id_prefix: sb-\n");
+			Expect(listed_k1.find("sb-22") == std::string::npos, "K1 ListSandboxes hides Bob's sandbox");
+			auto change = opt;
+			change.headers.emplace_back("x-duckbox-sandbox", "flight-c");
+			change.headers.emplace_back("x-duckbox-key", "tenant_22:user_kim");
+			try {
+				(void)ActionBody(*raw_client, change, "UpdateSandbox", body);
+				g_failed++;
+				std::cerr << "FAIL: K1 Alice must not change a sandbox key to a tenant she cannot use\n";
+			} catch (const std::exception &e) {
+				Expect(std::string(e.what()).find("not authorized") != std::string::npos ||
+				           std::string(e.what()).find("Invalid") != std::string::npos,
+				       "K1 key change requires authorization for both old and new keys");
+			}
+		}
+
 		arrow::flight::sql::FlightSqlClient sql_client(raw_client);
 		auto qopt = opt;
-		qopt.headers.emplace_back("x-duckbox-sandbox", "flight-a");
+		qopt.headers.emplace_back("x-duckbox-sandbox", "flight-c");
+		auto got = ActionBody(*raw_client, qopt, "GetSandbox", "flight-c");
+		Expect(got.find("flight-c") != std::string::npos, "GetSandbox returns the in-scope definition");
+		auto cats = sql_client.GetCatalogs(qopt);
+		Expect(cats.ok(), "Flight SQL GetCatalogs");
+		if (cats.ok()) {
+			auto info = std::move(cats).ValueOrDie();
+			Expect(!info->endpoints().empty(), "GetCatalogs returns an endpoint");
+			auto stream_res = raw_client->DoGet(qopt, info->endpoints()[0].ticket);
+			Expect(stream_res.ok(), "DoGet catalogs ticket");
+		}
+		auto schemas = sql_client.GetDbSchemas(qopt, nullptr, nullptr);
+		Expect(schemas.ok(), "Flight SQL GetDbSchemas");
+		auto tables = sql_client.GetTables(qopt, nullptr, nullptr, nullptr, false, nullptr);
+		Expect(tables.ok(), "Flight SQL GetTables");
 		auto info_res = sql_client.Execute(qopt, "SELECT id, title, amount FROM deals ORDER BY id");
 		Expect(info_res.ok(), "Flight SQL Execute");
 		if (info_res.ok()) {

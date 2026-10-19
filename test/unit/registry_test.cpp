@@ -54,6 +54,27 @@ void duckbox::test::RunRegistryTests() {
 	ExpectThrowContains([&] { AuthorizeCaller(locked, "other-svc", "tenant_21:user_sergio"); }, "trusted identity",
 	                    "unknown caller denied");
 	AuthorizeCaller(daemon, "anyone", "tenant_99:x");
+	{
+		DaemonConfig prod = daemon;
+		prod.allow_insecure_dev = false;
+		prod.callers.clear();
+		ExpectThrowContains([&] { AuthorizeCaller(prod, "anyone", "tenant_21:x"); }, "auth.callers",
+		                    "H4 empty callers is not allow-all outside dev");
+	}
+	{
+		AuthRequest req;
+		req.key_header = "tenant_21:admin";
+		ExpectThrowContains([&] { AuthenticateSandbox(loaded, "tenant_21:user_sergio", req); }, "does not match",
+		                    "H2 header role cannot replace the bound key");
+		req.key_header = "tenant_21:user_sergio";
+		auto bound = AuthenticateSandbox(loaded, "tenant_21:user_sergio", req);
+		Expect(bound.raw == "tenant_21:user_sergio" && bound.vars.count("user") && bound.vars.at("user") == "user_sergio",
+		       "H2 AuthenticateSandbox always returns the bound key");
+		req.key_header.clear();
+		auto implicit = AuthenticateSandbox(loaded, "tenant_21:user_sergio", req);
+		Expect(implicit.raw == "tenant_21:user_sergio" && implicit.vars.at("user") == "user_sergio",
+		       "H2 empty header still uses the bound key");
+	}
 
 	MemorySandboxRegistry grace_defs;
 	auto grace_rec = RecordFromSpec(loaded, spec_dir);

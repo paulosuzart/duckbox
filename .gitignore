@@ -1,4 +1,5 @@
 /build/
+/build-cov/
 /.deps/
 /.cache/
 CMakeCache.txt

@@ -23,8 +23,8 @@ struct AuthRequest {
 // Parses req.key_header with policy.key. AuthError if missing/unparseable.
 TenantKey Authenticate(const Policy &policy, const AuthRequest &req);
 
-// Prefer the definition's bound key. A per-query x-duckbox-key is used only
-// when it parses with auth.key and matches the bound tenant_id.
+// Always returns the definition's bound key. A per-query x-duckbox-key must
+// match the bound key exactly or is rejected (no tenant_id-only compare).
 TenantKey AuthenticateSandbox(const Policy &policy, const std::string &bound_key, const AuthRequest &req);
 
 } // namespace duckbox

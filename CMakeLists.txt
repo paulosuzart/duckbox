@@ -83,6 +83,13 @@ target_compile_definitions(duckbox_core PUBLIC DUCKBOX_DUCKDB_VERSION="${DUCKBOX
 if(NOT MSVC)
   target_compile_options(duckbox_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
+
+option(DUCKBOX_COVERAGE "Build duckbox_core with gcov (--coverage -O0)" OFF)
+if(DUCKBOX_COVERAGE AND NOT MSVC)
+  target_compile_options(duckbox_core PUBLIC --coverage -O0 -g)
+  target_link_options(duckbox_core PUBLIC --coverage)
+  target_link_libraries(duckbox_core PUBLIC gcov)
+endif()
 target_link_libraries(duckbox_core PUBLIC
   Arrow::arrow_shared
   ArrowFlight::arrow_flight_shared
@@ -156,6 +163,7 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/plan_guard_test.cpp
   test/unit/init_sql_test.cpp
   test/unit/handle_test.cpp
+  test/unit/crypto_test.cpp
   test/unit/registry_test.cpp
   test/unit/metrics_test.cpp)
 

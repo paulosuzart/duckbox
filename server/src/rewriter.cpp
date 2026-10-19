@@ -73,6 +73,43 @@ void RewriteExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr, RewriteCont
 	    *expr, [&](ddb::unique_ptr<ddb::ParsedExpression> &child) { RewriteExpression(child, ctx); });
 }
 
+bool IsTenantColumn(const ddb::ParsedExpression &e, const std::string &tenant_col) {
+	if (e.GetExpressionClass() != ddb::ExpressionClass::COLUMN_REF) {
+		return false;
+	}
+	auto &c = e.Cast<ddb::ColumnRefExpression>();
+	return !c.column_names.empty() && Lower(c.column_names.back()) == Lower(tenant_col);
+}
+
+ddb::unique_ptr<ddb::ParsedExpression> FilterBoundToKey(ddb::unique_ptr<ddb::ParsedExpression> expr,
+                                                        const TablePolicy &spec) {
+	if (!expr || expr->GetExpressionClass() != ddb::ExpressionClass::COMPARISON) {
+		return expr;
+	}
+	auto &cmp = expr->Cast<ddb::ComparisonExpression>();
+	if (!cmp.left || !cmp.right) {
+		return expr;
+	}
+	ddb::ParsedExpression *col = nullptr;
+	ddb::unique_ptr<ddb::ParsedExpression> *other = nullptr;
+	if (IsTenantColumn(*cmp.left, spec.tenant_column)) {
+		col = cmp.left.get();
+		other = &cmp.right;
+	} else if (IsTenantColumn(*cmp.right, spec.tenant_column)) {
+		col = cmp.right.get();
+		other = &cmp.left;
+	}
+	if (!col || !other) {
+		return expr;
+	}
+	(void)col;
+	// Always bind the tenant column to the key variable, never a spec literal.
+	auto param = ddb::make_uniq<ddb::ParameterExpression>();
+	param->identifier = "tenant_id";
+	*other = std::move(param);
+	return expr;
+}
+
 ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> base, const TablePolicy &spec,
                                                  const Policy &policy) {
 	auto inner_from = base->Copy();
@@ -101,7 +138,7 @@ ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> 
 
 	ddb::unique_ptr<ddb::ParsedExpression> where;
 	for (auto &filter : spec.filters) {
-		auto expr = ParsePolicyFilter(filter);
+		auto expr = FilterBoundToKey(ParsePolicyFilter(filter), spec);
 		if (!where) {
 			where = std::move(expr);
 		} else {

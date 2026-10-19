@@ -2,8 +2,9 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 BUILD_DIR ?= $(PROJ_DIR)build
 CMAKE ?= cmake
 CXX ?= g++
+export DUCKBOX_HANDLE_SECRET ?= duckbox-dev-secret
 
-.PHONY: deps arrow configure build test serve run-memory validate clean
+.PHONY: deps arrow configure build test serve run-memory validate clean coverage
 
 deps:
 	bash $(PROJ_DIR)scripts/fetch_deps.sh
@@ -32,6 +33,9 @@ run-memory: build
 validate: build
 	$(BUILD_DIR)/duckbox validate --daemon $(PROJ_DIR)daemons/memory.yaml \
 	  --spec $(PROJ_DIR)policies/memory/analyst.yaml
+
+coverage:
+	bash $(PROJ_DIR)scripts/coverage.sh
 
 clean:
 	rm -rf $(BUILD_DIR)

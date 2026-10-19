@@ -33,4 +33,11 @@ void duckbox::test::RunRewriterTests() {
 	auto c3 = RewriteUserSql("SELECT * FROM (VALUES ((SELECT max(title) FROM deals WHERE tenant_id = 22))) t(x)",
 	                         policy, key_a);
 	Expect(c3.find("21") != std::string::npos, "C3 VALUES subquery is tenant-filtered");
+
+	{
+		auto lit = policy;
+		lit.tables["deals"].filters = {"tenant_id = 22", "_deleted = false"};
+		auto rw = RewriteUserSql("SELECT id FROM deals", lit, key_a);
+		Expect(rw.find("21") != std::string::npos, "K2 rewrite binds the key tenant, not the spec literal");
+	}
 }

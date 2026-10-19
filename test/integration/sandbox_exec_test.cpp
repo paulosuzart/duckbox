@@ -1,11 +1,20 @@
 #include "suite.hpp"
 #include "check.hpp"
 
+#include "duckbox/arrow_ipc.hpp"
+#include "duckbox/http_server.hpp"
 #include "duckbox/init_sql.hpp"
 #include "duckbox/plan_check.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/sandbox.hpp"
+#include "duckbox/sandbox_registry.hpp"
 #include "duckbox/tenant_key.hpp"
+
+#include "httplib.h"
+
+#include <chrono>
+#include <filesystem>
+#include <thread>
 
 void duckbox::test::RunSandboxExecTests() {
 	using namespace duckbox;
@@ -49,6 +58,24 @@ void duckbox::test::RunSandboxExecTests() {
 	                    "table functions", "user postgres_scan is AST-denied");
 	auto after_tf = box_a.Execute("SELECT id FROM deals ORDER BY id");
 	Expect(after_tf.row_count == 1, "table-function rejection does not poison the next Execute");
+	ExpectThrowContains(
+	    [&] {
+		    box_a.ExecuteRewritten("SELECT * FROM postgres_scan('dbname=secret host=127.0.0.1', 'public', 'secrets')",
+		                           {});
+	    },
+	    "table functions", "K3 ExecuteRewritten re-runs full AST validation");
+	auto after_forged = box_a.Execute("SELECT id FROM deals ORDER BY id");
+	Expect(after_forged.row_count == 1, "forged-handle SQL rejection does not poison the sandbox");
+	{
+		auto stolen = policy;
+		stolen.tables["deals"].filters = {"tenant_id = 22", "_deleted = false"};
+		TenantSandbox box_stolen(daemon, stolen, key_a, "", spec_dir);
+		auto leak = box_stolen.Execute("SELECT id, title FROM deals ORDER BY id");
+		Expect(leak.text_table.find("bravo") == std::string::npos,
+		       "K2 literal tenant_id=22 cannot read tenant 22 for a tenant_21 key");
+		Expect(leak.row_count == 1 && leak.text_table.find("alpha deal") != std::string::npos,
+		       "K2 still returns the bound key's rows");
+	}
 	auto capped = box_a.Execute("SELECT id FROM deals LIMIT 99999");
 	Expect(capped.row_count <= 100, "user LIMIT is capped at rewrite (never starts a poisoned txn)");
 	auto after_limit = box_a.Execute("SELECT id FROM deals ORDER BY id");
@@ -98,6 +125,17 @@ void duckbox::test::RunSandboxExecTests() {
 	}
 
 	{
+		auto paths = policy;
+		paths.lake.data_path = "/tmp/duckbox-a4-allowed-paths";
+		std::filesystem::create_directories(paths.lake.data_path);
+		TenantSandbox box_paths(daemon, paths, key_a, "", spec_dir);
+		box_paths.Warmup(false);
+		Expect(box_paths.Warm(), "A4 allowed_paths applied before enable_external_access=false");
+		auto still = box_paths.Execute("SELECT id FROM deals ORDER BY id");
+		Expect(still.row_count == 1, "A4 lake still readable after allowed_paths + disable external access");
+	}
+
+	{
 		TenantSandbox box(daemon, policy, key_a, "CREATE TEMP VIEW v AS SELECT 1 AS x", spec_dir);
 		box.Warmup(true);
 		Expect(box.warmup_count() == 1, "first warmup");
@@ -108,5 +146,63 @@ void duckbox::test::RunSandboxExecTests() {
 		box.Warmup(false);
 		Expect(box.warmup_count() == 2, "warmup reruns after passivate");
 		Expect(box.Warm(), "warm after second warmup");
+	}
+
+	{
+		ddb::DuckDB db(nullptr);
+		ddb::Connection con(db);
+		std::vector<ddb::Value> none;
+		auto ipc = QueryToArrowIpc(con, "SELECT 1 AS x", none);
+		Expect(!ipc.empty(), "arrow ipc from SELECT");
+		std::vector<ddb::Value> p{ddb::Value::INTEGER(7)};
+		auto ipc2 = QueryToArrowIpc(con, "SELECT ?::INTEGER AS x", p);
+		Expect(!ipc2.empty(), "arrow ipc with bound params");
+	}
+
+	{
+		auto defs = std::make_shared<MemorySandboxRegistry>();
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "http-a";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		defs->Create(rec);
+		DaemonConfig cfg = daemon;
+		cfg.debug_http = "127.0.0.1:18481";
+		auto leases = std::make_shared<SingleNodeLeaseManager>();
+		auto runtime = std::make_shared<SandboxRuntime>(cfg, leases, defs);
+		ServerOptions opt;
+		opt.daemon = cfg;
+		std::thread th([&] { StartDebugHttp(opt, defs, runtime); });
+		th.detach();
+		httplib::Client cli("127.0.0.1", 18481);
+		cli.set_connection_timeout(1, 0);
+		httplib::Result health;
+		for (int i = 0; i < 50; i++) {
+			health = cli.Get("/health");
+			if (health) {
+				break;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		}
+		Expect(health && health->body.find("ok") != std::string::npos, "debug HTTP /health");
+		httplib::Headers hdr = {{"X-Duckbox-Sandbox", "http-a"}};
+		auto q = cli.Post("/v1/query", hdr, "{\"sql\":\"SELECT id FROM deals\"}", "application/json");
+		Expect(q && q->status == 200 && !q->body.empty(), "debug HTTP query returns Arrow");
+		auto miss = cli.Post("/v1/query", httplib::Headers{}, "{}", "application/json");
+		Expect(miss && miss->status == 400, "debug HTTP requires a sandbox id");
+		auto nf = cli.Post("/v1/query", httplib::Headers{{"X-Duckbox-Sandbox", "no-such"}},
+		                   "{\"sql\":\"SELECT 1\"}", "application/json");
+		Expect(nf && nf->status == 404, "debug HTTP missing sandbox is 404");
+		auto bad = cli.Post("/v1/query", hdr, "{\"sql\":\"COPY deals TO '/tmp/x'\"}", "application/json");
+		Expect(bad && bad->status == 400 && bad->body.find("error") != std::string::npos,
+		       "debug HTTP rejected SQL is a JSON error");
+		httplib::Headers authz = hdr;
+		authz.emplace("Authorization", "Bearer ignored");
+		auto note = cli.Post("/v1/query", authz, "{\"sql\":\"SELECT note FROM deals\"}", "application/json");
+		Expect(note && note->status == 400 && note->body.find('\\') != std::string::npos,
+		       "debug HTTP JSON-escapes binder quotes and newlines");
+		auto quoted = cli.Post("/v1/query", hdr, "{\"sql\":\"SELECT 1 AS \\\"x\\\"\"}", "application/json");
+		Expect(static_cast<bool>(quoted), "debug HTTP parses JSON string escapes in sql");
 	}
 }

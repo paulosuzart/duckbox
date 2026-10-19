@@ -3,6 +3,7 @@
 #include "duckbox/crypto.hpp"
 #include "duckbox/plan_check.hpp"
 
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -10,6 +11,16 @@
 
 namespace duckbox {
 namespace test {
+
+namespace {
+struct HandleSecretEnv {
+	HandleSecretEnv() {
+		if (!std::getenv("DUCKBOX_HANDLE_SECRET")) {
+			setenv("DUCKBOX_HANDLE_SECRET", "duckbox-dev-secret", 0);
+		}
+	}
+} kHandleSecretEnv;
+} // namespace
 
 int g_failed = 0;
 int g_passed = 0;

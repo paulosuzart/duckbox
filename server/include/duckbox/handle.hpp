@@ -27,8 +27,8 @@ struct StatementHandle {
 class IHandleSigner {
 public:
 	virtual ~IHandleSigner() = default;
-	// Token is DBX4.<b64 AEAD>.<b64 HMAC>. The AEAD exists because the payload
-	// includes rewritten SQL (HMAC-only left it readable).
+	// Token is DBX4.<b64 AAD>.<b64 AEAD>.<b64 HMAC>. AAD is sandbox id,
+	// version, and tenant. The AEAD exists because the payload includes rewritten SQL.
 	virtual std::string Sign(const StatementHandle &h) const = 0;
 	// Rejects non-DBX4, bad MAC, decrypt failure, and expired handles.
 	virtual StatementHandle Verify(const std::string &token) const = 0;

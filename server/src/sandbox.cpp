@@ -51,6 +51,13 @@ void TenantSandbox::Warmup(bool validate_lake) {
 		return;
 	}
 	auto t0 = std::chrono::steady_clock::now();
+	if (policy_.lake.kind == LakeKind::Ducklake && policy_.lake.catalog.empty()) {
+		try {
+			policy_.lake.catalog = ResolveLakeCatalog(policy_, *secrets_);
+		} catch (const std::exception &) {
+			// AttachLakeFromSpec reports a missing catalog; plan guard denies unbound DSNs.
+		}
+	}
 	ddb::DBConfig config;
 	RegisterPlanGuard(config, policy_, key_);
 	try {
@@ -59,17 +66,31 @@ void TenantSandbox::Warmup(bool validate_lake) {
 		ExecOrThrow(*con_, "SET autoinstall_known_extensions=false");
 		ExecOrThrow(*con_, "SET autoload_known_extensions=false");
 		AttachLakeFromSpec(*con_, policy_, spec_dir_, *secrets_, daemon_);
+		if (!policy_.lake.data_path.empty()) {
+			// SET must happen while enable_external_access is still true; after
+			// disable it is a silent no-op (DuckDB keeps the previous empty list).
+			auto try_set = [&](const char *setting) -> bool {
+				auto sql = std::string("SET ") + setting + "=['" + EscapeSqlString(policy_.lake.data_path) + "']";
+				auto r = con_->Query(sql);
+				if (r->HasError()) {
+					return false;
+				}
+				auto got = con_->Query(std::string("SELECT current_setting('") + setting + "')");
+				return got && !got->HasError() &&
+				       got->ToString().find(policy_.lake.data_path) != std::string::npos;
+			};
+			bool ok = try_set("allowed_directories");
+			ok = try_set("allowed_paths") || ok;
+			auto remote = ddb::StringUtil::Lower(policy_.lake.data_path).find("://") != std::string::npos;
+			if (!ok && !remote) {
+				throw Error("allowed_paths did not take effect for the lake data_path");
+			}
+		}
 		try {
 			// After attach the lake paths are already allowed; keep COPY/read_csv from reaching the host.
 			ExecOrThrow(*con_, "SET enable_external_access=false");
 		} catch (const std::exception &) {
 			// lock_configuration / older builds; still refuse COPY via validator + plan guard
-		}
-		if (!policy_.lake.data_path.empty()) {
-			try {
-				ExecOrThrow(*con_, "SET allowed_paths=['" + EscapeSqlString(policy_.lake.data_path) + "']");
-			} catch (const std::exception &) {
-			}
 		}
 		if (validate_lake) {
 			auto v0 = std::chrono::steady_clock::now();

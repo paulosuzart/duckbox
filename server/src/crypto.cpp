@@ -1,5 +1,6 @@
 #include "duckbox/crypto.hpp"
 #include "duckbox/error.hpp"
+#include "duckbox/yaml.hpp"
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -9,6 +10,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 
 namespace duckbox {
 namespace {
@@ -129,7 +131,7 @@ bool ConstTimeEquals(const std::string &a, const std::string &b) {
 	return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
 }
 
-std::string AesGcmEncrypt(const std::string &key, const std::string &plaintext) {
+std::string AesGcmEncrypt(const std::string &key, const std::string &plaintext, const std::string &aad) {
 	auto raw_key = Sha256Raw(key);
 	unsigned char nonce[12];
 	if (RAND_bytes(nonce, sizeof(nonce)) != 1) {
@@ -148,6 +150,14 @@ std::string AesGcmEncrypt(const std::string &key, const std::string &plaintext) 
 	                       nonce) != 1) {
 		EVP_CIPHER_CTX_free(ctx);
 		throw Error("AES-GCM init failed");
+	}
+	if (!aad.empty()) {
+		int aad_len = 0;
+		if (EVP_EncryptUpdate(ctx, nullptr, &aad_len, reinterpret_cast<const unsigned char *>(aad.data()),
+		                      static_cast<int>(aad.size())) != 1) {
+			EVP_CIPHER_CTX_free(ctx);
+			throw Error("AES-GCM AAD failed");
+		}
 	}
 	if (EVP_EncryptUpdate(ctx, reinterpret_cast<unsigned char *>(&out[12]), &len,
 	                      reinterpret_cast<const unsigned char *>(plaintext.data()),
@@ -172,7 +182,7 @@ std::string AesGcmEncrypt(const std::string &key, const std::string &plaintext) 
 	return out;
 }
 
-std::string AesGcmDecrypt(const std::string &key, const std::string &blob) {
+std::string AesGcmDecrypt(const std::string &key, const std::string &blob, const std::string &aad) {
 	if (blob.size() < 12 + 16) {
 		throw HandleError("truncated handle");
 	}
@@ -191,6 +201,14 @@ std::string AesGcmDecrypt(const std::string &key, const std::string &blob) {
 	                       nonce) != 1) {
 		EVP_CIPHER_CTX_free(ctx);
 		throw HandleError("AES-GCM decrypt init failed");
+	}
+	if (!aad.empty()) {
+		int aad_len = 0;
+		if (EVP_DecryptUpdate(ctx, nullptr, &aad_len, reinterpret_cast<const unsigned char *>(aad.data()),
+		                      static_cast<int>(aad.size())) != 1) {
+			EVP_CIPHER_CTX_free(ctx);
+			throw HandleError("invalid statement handle");
+		}
 	}
 	int len = 0;
 	if (ct_len > 0 &&
@@ -223,11 +241,21 @@ std::string VerifyJwtHs256(const std::string &token, const std::string &secret) 
 	auto payload_b64 = token.substr(d1 + 1, d2 - d1 - 1);
 	auto sig_b64 = token.substr(d2 + 1);
 	auto header_bytes = Base64UrlDecode(header_b64);
-	std::string header(header_bytes.begin(), header_bytes.end());
-	if (header.find("none") != std::string::npos && header.find("HS256") == std::string::npos) {
-		throw AuthError("unsigned JWT is not accepted");
+	std::string header_json(header_bytes.begin(), header_bytes.end());
+	YamlNode header;
+	try {
+		header = ParseYaml(header_json);
+	} catch (const std::exception &) {
+		throw AuthError("JWT header is not JSON");
 	}
-	if (header.find("HS256") == std::string::npos) {
+	if (!header.IsMap()) {
+		throw AuthError("JWT header is not a JSON object");
+	}
+	const YamlNode *alg_n = header.Get("alg");
+	if (!alg_n || !alg_n->IsScalar() || alg_n->scalar != "HS256") {
+		if (alg_n && alg_n->IsScalar() && alg_n->scalar == "none") {
+			throw AuthError("unsigned JWT is not accepted");
+		}
 		throw AuthError("JWT alg must be HS256");
 	}
 	auto mac = HmacSha256(secret, header_b64 + "." + payload_b64);
@@ -237,18 +265,45 @@ std::string VerifyJwtHs256(const std::string &token, const std::string &secret) 
 		throw AuthError("invalid JWT signature");
 	}
 	auto payload_b = Base64UrlDecode(payload_b64);
-	std::string payload(payload_b.begin(), payload_b.end());
-	auto sub = payload.find("\"sub\"");
-	if (sub == std::string::npos) {
+	std::string payload_json(payload_b.begin(), payload_b.end());
+	YamlNode payload;
+	try {
+		payload = ParseYaml(payload_json);
+	} catch (const std::exception &) {
+		throw AuthError("JWT payload is not JSON");
+	}
+	if (!payload.IsMap()) {
+		throw AuthError("JWT payload is not a JSON object");
+	}
+	const YamlNode *sub_n = payload.Get("sub");
+	if (!sub_n || !sub_n->IsScalar() || sub_n->scalar.empty()) {
 		throw AuthError("JWT missing sub");
 	}
-	auto colon = payload.find(':', sub);
-	auto q1 = payload.find('"', colon);
-	auto q2 = payload.find('"', q1 == std::string::npos ? 0 : q1 + 1);
-	if (q1 == std::string::npos || q2 == std::string::npos) {
-		throw AuthError("JWT sub is not a string");
+	const YamlNode *exp_n = payload.Get("exp");
+	if (!exp_n || exp_n->IsNull()) {
+		throw AuthError("JWT missing exp");
 	}
-	return payload.substr(q1 + 1, q2 - q1 - 1);
+	int64_t exp = 0;
+	int64_t nbf = 0;
+	bool has_nbf = false;
+	try {
+		exp = payload.GetInt("exp");
+		if (payload.Get("nbf") && !payload.Get("nbf")->IsNull()) {
+			nbf = payload.GetInt("nbf");
+			has_nbf = true;
+		}
+	} catch (const std::exception &) {
+		throw AuthError("JWT exp/nbf must be numeric");
+	}
+	constexpr int64_t kLeeway = 60;
+	auto now = static_cast<int64_t>(std::time(nullptr));
+	if (exp + kLeeway < now) {
+		throw AuthError("JWT expired");
+	}
+	if (has_nbf && nbf > now + kLeeway) {
+		throw AuthError("JWT not yet valid");
+	}
+	return sub_n->scalar;
 }
 
 } // namespace duckbox

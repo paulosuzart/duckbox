@@ -68,4 +68,12 @@ void duckbox::test::RunValidatorTests() {
 		    throw SpecError(iss);
 	    },
 	    "auth.key", "static validation reports field paths");
+
+	{
+		auto lit = loaded;
+		lit.tables["deals"].filters = {"tenant_id = 22", "_deleted = false"};
+		Expect(has_path(validator.ValidateStatic(lit), "tables.deals.filters[0]", "literal") ||
+		           has_path(validator.ValidateStatic(lit), "tables.deals.filters", "key variable"),
+		       "K2 spec tenant filter with a literal is rejected");
+	}
 }

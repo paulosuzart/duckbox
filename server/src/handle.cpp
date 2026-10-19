@@ -58,6 +58,10 @@ std::string GetStr(const std::string &s, size_t &i) {
 	return out;
 }
 
+std::string HandleAad(const StatementHandle &h) {
+	return h.sandbox_id + "\n" + std::to_string(h.version) + "\n" + h.tenant_raw;
+}
+
 std::string EncodePayload(const StatementHandle &h) {
 	std::string s = "DBX3";
 	PutStr(s, h.rewritten_sql);
@@ -112,11 +116,13 @@ std::string HmacHandleSigner::Sign(const StatementHandle &h) const {
 		                           .count() +
 		                       ttl_seconds_;
 	}
-	// AEAD: the token carries rewritten SQL; HMAC alone left it readable.
+	// AEAD: SQL is encrypted; sandbox id / version / tenant are GCM AAD so a
+	// token cannot be replayed against a different identity even with the secret.
 	auto payload = EncodePayload(copy);
-	auto sealed = AesGcmEncrypt(secret_, payload);
-	auto mac = HmacSha256(secret_, sealed);
-	return "DBX4." + Base64UrlEncode(sealed) + "." + Base64UrlEncode(mac);
+	auto aad = HandleAad(copy);
+	auto sealed = AesGcmEncrypt(secret_, payload, aad);
+	auto mac = HmacSha256(secret_, aad + sealed);
+	return "DBX4." + Base64UrlEncode(aad) + "." + Base64UrlEncode(sealed) + "." + Base64UrlEncode(mac);
 }
 
 StatementHandle HmacHandleSigner::Verify(const std::string &token) const {
@@ -124,20 +130,26 @@ StatementHandle HmacHandleSigner::Verify(const std::string &token) const {
 		throw HandleError("unknown handle version");
 	}
 	auto rest = token.substr(5);
-	auto dot = rest.find('.');
-	if (dot == std::string::npos || dot == 0 || dot + 1 >= rest.size()) {
+	auto d1 = rest.find('.');
+	auto d2 = d1 == std::string::npos ? std::string::npos : rest.find('.', d1 + 1);
+	if (d1 == std::string::npos || d2 == std::string::npos || d1 == 0 || d2 + 1 >= rest.size()) {
 		throw HandleError("malformed statement handle");
 	}
-	auto sealed_b = Base64UrlDecode(rest.substr(0, dot));
-	auto mac_b = Base64UrlDecode(rest.substr(dot + 1));
+	auto aad_b = Base64UrlDecode(rest.substr(0, d1));
+	auto sealed_b = Base64UrlDecode(rest.substr(d1 + 1, d2 - d1 - 1));
+	auto mac_b = Base64UrlDecode(rest.substr(d2 + 1));
+	std::string aad(aad_b.begin(), aad_b.end());
 	std::string sealed(sealed_b.begin(), sealed_b.end());
 	std::string mac(mac_b.begin(), mac_b.end());
-	auto expect = HmacSha256(secret_, sealed);
+	auto expect = HmacSha256(secret_, aad + sealed);
 	if (!ConstTimeEquals(mac, expect)) {
 		throw HandleError("invalid statement handle signature");
 	}
-	auto payload = AesGcmDecrypt(secret_, sealed);
+	auto payload = AesGcmDecrypt(secret_, sealed, aad);
 	auto h = DecodePayload(payload);
+	if (HandleAad(h) != aad) {
+		throw HandleError("statement handle identity mismatch");
+	}
 	auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
 	               .count();
 	if (h.expires_at_unix <= now) {

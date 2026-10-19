@@ -714,16 +714,22 @@ arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContex
 			SandboxRecord rec;
 			rec.id = Hdr(context, {"x-duckbox-sandbox", "X-Duckbox-Sandbox"});
 			rec.key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
-			load_spec(rec);
-			AuthorizeCaller(daemon_, caller, rec.key);
-			SandboxRecord out;
-			if (action.type == "CreateSandbox") {
-				out = defs_->Create(rec);
-			} else {
-				out = defs_->Update(rec);
+			if (action.type == "UpdateSandbox") {
+				auto current = defs_->Get(rec.id);
+				AuthorizeCaller(daemon_, caller, current.key);
+				if (rec.key.empty()) {
+					rec.key = current.key;
+				}
+				load_spec(rec);
+				AuthorizeCaller(daemon_, caller, rec.key);
+				auto out = defs_->Update(rec);
 				int keep = out.spec.handles.stale_version_grace_ms > 0 ? out.version - 1 : -1;
 				runtime_->PassivateId(out.id, "update", keep);
+				return ResultJson(out.ToJson(), result);
 			}
+			load_spec(rec);
+			AuthorizeCaller(daemon_, caller, rec.key);
+			auto out = defs_->Create(rec);
 			return ResultJson(out.ToJson(), result);
 		}
 		if (action.type == "GetSandbox") {

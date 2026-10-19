@@ -10,6 +10,7 @@ void RunRewriterTests();
 void RunPlanGuardTests();
 void RunInitSqlTests();
 void RunHandleTests();
+void RunCryptoTests();
 void RunRegistryTests();
 void RunMetricsTests();
 

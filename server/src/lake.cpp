@@ -60,9 +60,6 @@ void ConstrainLakeAgainstDaemon(const SandboxSpec &spec, const DaemonConfig &dae
 		return;
 	}
 	auto endpoint = spec.lake.s3.endpoint;
-	if (!spec.lake.s3.endpoint_env.empty()) {
-		endpoint = spec.lake.s3.endpoint_env;
-	}
 	if (!daemon.lake_allow.s3_endpoints.empty()) {
 		bool ok = false;
 		for (auto &a : daemon.lake_allow.s3_endpoints) {
@@ -97,6 +94,25 @@ void ConstrainLakeAgainstDaemon(const SandboxSpec &spec, const DaemonConfig &dae
 	check_ref(spec.lake.s3.access_key, "lake.s3.access_key");
 	check_ref(spec.lake.s3.secret_key, "lake.s3.secret_key");
 	check_ref(spec.lake.catalog_ref, "lake.catalog");
+	auto env_as_ref = [&](const std::string &env_name, const std::string &field) {
+		if (env_name.empty()) {
+			return;
+		}
+		check_ref(ParseSecretRef(env_name, field), field);
+	};
+	env_as_ref(spec.lake.catalog_env, "lake.catalog_env");
+	env_as_ref(spec.lake.s3.endpoint_env, "lake.s3.endpoint_env");
+	env_as_ref(spec.lake.s3.region_env, "lake.s3.region_env");
+}
+
+std::string ResolveLakeCatalog(const SandboxSpec &spec, const SecretResolver &secrets) {
+	if (!spec.lake.catalog_ref.Empty()) {
+		return secrets.Resolve(spec.lake.catalog_ref, "lake.catalog");
+	}
+	if (!spec.lake.catalog_env.empty()) {
+		return secrets.Resolve(ParseSecretRef(spec.lake.catalog_env, "lake.catalog_env"), "lake.catalog_env");
+	}
+	return spec.lake.catalog;
 }
 
 void LoadExtension(ddb::Connection &con, const std::string &name) {
@@ -169,12 +185,7 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
 	           << ", SCOPE 's3://')";
 	ExecOrThrow(con, secret_sql.str());
 
-	std::string catalog = spec.lake.catalog;
-	if (!spec.lake.catalog_ref.Empty()) {
-		catalog = secrets.Resolve(spec.lake.catalog_ref, "lake.catalog");
-	} else if (!spec.lake.catalog_env.empty()) {
-		catalog = secrets.Resolve(ParseSecretRef(spec.lake.catalog_env, "lake.catalog_env"), "lake.catalog_env");
-	}
+	std::string catalog = ResolveLakeCatalog(spec, secrets);
 	if (catalog.empty()) {
 		throw PolicyError("lake.catalog or lake.catalog_env is required for ducklake");
 	}

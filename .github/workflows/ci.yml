@@ -17,6 +17,8 @@ jobs:
     name: Build and tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
     steps:
       - uses: actions/checkout@v4
       - name: Install Arrow Flight SQL + build tools
@@ -68,6 +70,7 @@ jobs:
         env:
           DUCKBOX_S3_KEY: rustfsadmin
           DUCKBOX_S3_SECRET: rustfsadmin
+          DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
           DUCKBOX_LAKE_CATALOG: ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox
         run: |
           ./build/duckbox serve --daemon ./daemons/ducklake.yaml --listen 127.0.0.1:4747 &

@@ -4,11 +4,37 @@
 
 #include "duckdb/common/enum_util.hpp"
 
+#include <cctype>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <unordered_set>
 
 namespace duckbox {
+
+bool CatalogIsAttachedLake(const std::string &catalog, const Policy &policy) {
+	if (catalog.empty()) {
+		return false;
+	}
+	auto cat = ddb::StringUtil::Lower(catalog);
+	auto alias = ddb::StringUtil::Lower(policy.lake.alias);
+	if (alias.empty()) {
+		alias = policy.lake.kind == LakeKind::Memory ? "memory" : "lake";
+	}
+	if (cat == alias) {
+		return true;
+	}
+	if (policy.lake.kind == LakeKind::Memory && (cat == "memory" || cat == "main")) {
+		return true;
+	}
+	// Exact metadata catalog DuckLake creates for this alias. Never a substring
+	// match (`evil_ducklake` must not pass).
+	if (policy.lake.kind == LakeKind::Ducklake && cat == "__ducklake_metadata_" + alias) {
+		return true;
+	}
+	return false;
+}
+
 namespace {
 
 const char *kAllowedScans[] = {"seq_scan", "ducklake_scan", "postgres_scan", "postgres_scan_pushdown",
@@ -226,6 +252,13 @@ std::vector<MandatoryPred> PredicatesFor(const TablePolicy &spec, const TenantKe
 			                   cmp.right->ToString() + "/" +
 			                   std::to_string(static_cast<int>(cmp.right->GetExpressionClass())) + "]");
 		}
+		if (ddb::StringUtil::Lower(col) == ddb::StringUtil::Lower(spec.tenant_column)) {
+			auto it = params.find("tenant_id");
+			if (it == params.end()) {
+				throw PlanRejected("tenant filter must bind :tenant_id from the sandbox key");
+			}
+			constant = it->second;
+		}
 		out.push_back(MandatoryPred{std::move(col), std::move(constant)});
 	}
 	return out;
@@ -287,23 +320,146 @@ std::string BoundTableName(ddb::LogicalGet &get) {
 	return "";
 }
 
-bool CatalogIsAttachedLake(const std::string &catalog, const Policy &policy) {
-	if (catalog.empty()) {
+std::string StripQuotes(std::string s) {
+	if (s.size() >= 2 && ((s.front() == '\'' && s.back() == '\'') || (s.front() == '"' && s.back() == '"'))) {
+		return s.substr(1, s.size() - 2);
+	}
+	return s;
+}
+
+std::string PostgresAttachDsn(const Policy &policy) {
+	auto c = policy.lake.catalog;
+	auto lower = ddb::StringUtil::Lower(c);
+	const char *markers[] = {"ducklake:postgres:", "postgres:"};
+	for (auto *m : markers) {
+		auto pos = lower.find(m);
+		if (pos != std::string::npos) {
+			return c.substr(pos + std::char_traits<char>::length(m));
+		}
+	}
+	return c;
+}
+
+std::map<std::string, std::string> ParseConnKv(const std::string &dsn) {
+	std::map<std::string, std::string> out;
+	std::string cur;
+	auto flush = [&]() {
+		auto eq = cur.find('=');
+		if (eq != std::string::npos && eq > 0) {
+			out[ddb::StringUtil::Lower(cur.substr(0, eq))] = cur.substr(eq + 1);
+		}
+		cur.clear();
+	};
+	for (char ch : dsn) {
+		if (std::isspace(static_cast<unsigned char>(ch))) {
+			flush();
+		} else {
+			cur.push_back(ch);
+		}
+	}
+	flush();
+	return out;
+}
+
+bool LooksLikeDsn(const std::string &s) {
+	auto lower = ddb::StringUtil::Lower(s);
+	return lower.find("host=") != std::string::npos || lower.find("dbname=") != std::string::npos ||
+	       lower.find("port=") != std::string::npos || lower.find("postgres://") != std::string::npos ||
+	       lower.find("postgresql://") != std::string::npos;
+}
+
+void ParsePostgresUri(const std::string &raw, std::map<std::string, std::string> &out) {
+	auto s = StripQuotes(raw);
+	auto lower = ddb::StringUtil::Lower(s);
+	size_t start = std::string::npos;
+	for (auto *sc : {"postgresql://", "postgres://"}) {
+		auto pos = lower.find(sc);
+		if (pos != std::string::npos) {
+			start = pos + std::char_traits<char>::length(sc);
+			break;
+		}
+	}
+	if (start == std::string::npos) {
+		return;
+	}
+	auto rest = s.substr(start);
+	auto at = rest.rfind('@');
+	std::string hostpart = rest;
+	if (at != std::string::npos) {
+		auto userinfo = rest.substr(0, at);
+		hostpart = rest.substr(at + 1);
+		auto colon = userinfo.find(':');
+		out["user"] = colon == std::string::npos ? userinfo : userinfo.substr(0, colon);
+	}
+	auto slash = hostpart.find('/');
+	std::string hostport = slash == std::string::npos ? hostpart : hostpart.substr(0, slash);
+	if (slash != std::string::npos) {
+		auto db = hostpart.substr(slash + 1);
+		auto q = db.find('?');
+		if (q != std::string::npos) {
+			db = db.substr(0, q);
+		}
+		if (!db.empty()) {
+			out["dbname"] = db;
+		}
+	}
+	auto colon = hostport.rfind(':');
+	if (colon != std::string::npos && hostport.find(']') == std::string::npos) {
+		out["host"] = hostport.substr(0, colon);
+		out["port"] = hostport.substr(colon + 1);
+	} else if (!hostport.empty()) {
+		out["host"] = hostport;
+	}
+}
+
+std::map<std::string, std::string> ParsePostgresConn(const std::string &raw) {
+	auto s = StripQuotes(raw);
+	auto kv = ParseConnKv(s);
+	if (kv.empty() || (!kv.count("host") && !kv.count("dbname"))) {
+		ParsePostgresUri(s, kv);
+	}
+	return kv;
+}
+
+bool DsnMatchesAttach(const std::string &got_raw, const Policy &policy) {
+	auto want_dsn = PostgresAttachDsn(policy);
+	if (want_dsn.empty()) {
 		return false;
 	}
-	auto cat = ddb::StringUtil::Lower(catalog);
-	auto alias = ddb::StringUtil::Lower(policy.lake.alias);
-	if (!alias.empty() && cat == alias) {
-		return true;
+	auto got = ParsePostgresConn(got_raw);
+	auto want = ParsePostgresConn(want_dsn);
+	if (want.empty() || got.empty()) {
+		return false;
 	}
-	if (policy.lake.kind == LakeKind::Memory && (cat == "memory" || cat == "main")) {
-		return true;
+	for (auto *k : {"host", "dbname"}) {
+		auto it = want.find(k);
+		if (it == want.end()) {
+			continue;
+		}
+		auto git = got.find(k);
+		if (git == got.end() || git->second != it->second) {
+			return false;
+		}
 	}
-	// DuckLake's postgres metadata catalog is not always named the spec alias
-	// (__ducklake_metadata_<alias>, postgres, …).
-	if (policy.lake.kind == LakeKind::Ducklake &&
-	    (cat.find("ducklake") != std::string::npos || cat.find("postgres") != std::string::npos)) {
-		return true;
+	for (auto *k : {"port", "user"}) {
+		auto it = want.find(k);
+		auto git = got.find(k);
+		if (it != want.end() && git != got.end() && git->second != it->second) {
+			return false;
+		}
+	}
+	return want.count("host") || want.count("dbname");
+}
+
+bool UnboundPostgresDsnAllowed(ddb::LogicalGet &get, const Policy &policy) {
+	for (auto &p : get.parameters) {
+		if (p.IsNull()) {
+			continue;
+		}
+		auto s = StripQuotes(p.ToString());
+		if (LooksLikeDsn(s) && DsnMatchesAttach(s, policy)) {
+			return true;
+		}
 	}
 	return false;
 }
@@ -318,19 +474,26 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 		return;
 	}
 
-	// Residual risk: on a ducklake spec the plan guard cannot tell DuckLake catalog
-	// I/O (postgres_scan / postgres_scan_pushdown / postgres_query, duckdb_tables,
-	// seq_scan of information_schema or ducklake_inlined_data_*) from a smuggled
-	// scan of the same kind. Users still cannot name those in SQL (AST), hide them
-	// in initSQL VIEW/MACRO bodies, or reach them via replacement scans. A
-	// rewrite/AST skip would let a ducklake sandbox read postgres metadata or
-	// inlined rows. Keep deny_table_functions. Do not DSN-match. Throwing here
-	// aborts the postgres transaction; RecoverAfterFailure rolls it back.
+	// Residual risk: a rewrite/AST skip could still name postgres_scan in SQL.
+	// Users cannot: ExecuteRewritten re-runs the AST; initSQL VIEW/MACRO bodies
+	// and replacement scans are denied. Unbound postgres_* is allowed only when
+	// a parameter DSN matches the spec attach (host/port/dbname/user). Bound
+	// scans must use the spec alias or __ducklake_metadata_<alias> exactly.
+	// Throwing here aborts the postgres transaction; RecoverAfterFailure rolls it back.
 	if (IsPostgresCatalogScan(fname)) {
 		if (policy.lake.kind != LakeKind::Ducklake) {
 			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
 		}
-		return;
+		if (table) {
+			if (!CatalogIsAttachedLake(catalog, policy)) {
+				throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
+			}
+			return;
+		}
+		if (UnboundPostgresDsnAllowed(get, policy)) {
+			return;
+		}
+		throw PlanRejected("unbound " + get.function.name + " is denied (DSN is not the spec's attached catalog)");
 	}
 	if (policy.lake.kind == LakeKind::Ducklake && IsDuckdbCatalogScan(fname)) {
 		return;

@@ -18,15 +18,10 @@ TenantKey AuthenticateSandbox(const Policy &policy, const std::string &bound_key
 	if (bound_key.empty()) {
 		throw AuthError("sandbox definition has no bound key");
 	}
-	auto from_def = ParseTenantKey(bound_key, policy.key);
-	if (req.key_header.empty() || req.key_header == bound_key) {
-		return from_def;
-	}
-	auto from_hdr = ParseTenantKey(req.key_header, policy.key);
-	if (from_hdr.tenant_id != from_def.tenant_id) {
+	if (!req.key_header.empty() && req.key_header != bound_key) {
 		throw AuthError("x-duckbox-key does not match the sandbox key");
 	}
-	return from_hdr;
+	return ParseTenantKey(bound_key, policy.key);
 }
 
 std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::string &peer_identity,
