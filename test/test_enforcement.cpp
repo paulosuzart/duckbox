@@ -175,6 +175,46 @@ int main() {
 	SpecValidator validator;
 	auto static_issues = validator.ValidateStatic(loaded);
 	Expect(static_issues.empty(), "memory analyst spec is statically valid");
+	Expect(loaded.handles.stale_version_grace_ms == 0, "sample grace default 0s");
+
+	{
+		int64_t ms = -1;
+		Expect(ParseDurationMs("0s", &ms) && ms == 0, "parse 0s");
+		Expect(ParseDurationMs("30s", &ms) && ms == 30000, "parse 30s");
+		Expect(ParseDurationMs("5m", &ms) && ms == 5 * 60 * 1000, "parse 5m");
+		Expect(ParseDurationMs("1h", &ms) && ms == kMaxStaleVersionGraceMs, "parse 1h");
+		Expect(ParseDurationMs("500ms", &ms) && ms == 500, "parse 500ms");
+		Expect(ParseDurationMs("2", &ms) && ms == 2000, "bare integer is seconds");
+		Expect(ParseDurationMs("30S", &ms) && ms == 30000, "duration unit is case-insensitive");
+		Expect(!ParseDurationMs("-1s", &ms), "negative duration rejected");
+		Expect(!ParseDurationMs("1d", &ms), "unknown duration unit rejected");
+		Expect(!ParseDurationMs("nope", &ms), "unparseable duration rejected");
+
+		auto with_grace = LoadSpecString(loaded.yaml_body + "\nhandles:\n  stale_version_grace: 30s\n", "<grace>");
+		Expect(with_grace.handles.stale_version_grace_ms == 30000, "yaml 30s grace");
+		Expect(validator.ValidateStatic(with_grace).empty(), "30s grace is valid");
+		auto with_1h = LoadSpecString(loaded.yaml_body + "\nhandles:\n  stale_version_grace: 1h\n", "<grace>");
+		Expect(validator.ValidateStatic(with_1h).empty(), "1h grace is valid");
+		auto with_0 = LoadSpecString(loaded.yaml_body + "\nhandles:\n  stale_version_grace: 0s\n", "<grace>");
+		Expect(validator.ValidateStatic(with_0).empty(), "0s grace is valid");
+
+		auto has_path = [](const std::vector<SpecIssue> &iss, const std::string &path, const std::string &needle) {
+			for (auto &i : iss) {
+				if (i.path == path && i.message.find(needle) != std::string::npos) {
+					return true;
+				}
+			}
+			return false;
+		};
+		auto with_2h = LoadSpecString(loaded.yaml_body + "\nhandles:\n  stale_version_grace: 2h\n", "<grace>");
+		Expect(has_path(validator.ValidateStatic(with_2h), "handles.stale_version_grace", "cap"),
+		       "2h grace rejected at cap");
+		auto with_neg = LoadSpecString(loaded.yaml_body + "\nhandles:\n  stale_version_grace: -1s\n", "<grace>");
+		Expect(!validator.ValidateStatic(with_neg).empty(), "negative grace is a field-path error");
+		auto with_bad = LoadSpecString(loaded.yaml_body + "\nhandles:\n  stale_version_grace: banana\n", "<grace>");
+		Expect(has_path(validator.ValidateStatic(with_bad), "handles.stale_version_grace", "duration"),
+		       "unparseable grace is a field-path error");
+	}
 
 	auto ducklake_spec =
 	    LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/analyst.yaml");
@@ -439,6 +479,9 @@ int main() {
 		ExpectThrowContains([&] { EnsureCurrentVersion(defs.Get("acme-analyst"), 1, "acme-analyst"); }, "re-prepare",
 		                    "stale handle version rejected");
 		EnsureCurrentVersion(defs.Get("acme-analyst"), 2, "acme-analyst");
+		ExpectThrowContains([&] { ResolveHandleVersion(defs, defs.Get("acme-analyst"), 1); }, "re-prepare",
+		                    "default 0s grace rejects N-1 immediately");
+		Expect(ResolveHandleVersion(defs, defs.Get("acme-analyst"), 2).version == 2, "current version always accepted");
 		defs.Delete("acme-analyst");
 		ExpectThrowContains([&] { defs.Get("acme-analyst"); }, "not found", "deleted sandbox is gone");
 		Expect(defs.List().empty(), "list skips tombstones");
@@ -451,6 +494,48 @@ int main() {
 		ExpectThrowContains([&] { AuthorizeCaller(locked, "other-svc", "tenant_21:user_sergio"); }, "trusted identity",
 		                    "unknown caller denied");
 		AuthorizeCaller(daemon, "anyone", "tenant_99:x"); // empty callers = allow
+
+		MemorySandboxRegistry grace_defs;
+		auto grace_rec = RecordFromSpec(loaded, spec_dir);
+		grace_rec.id = "grace-analyst";
+		grace_rec.key = key_a.raw;
+		grace_rec.spec.id = grace_rec.id;
+		grace_rec.spec.bound_key = grace_rec.key;
+		auto g1 = grace_defs.Create(grace_rec);
+		auto g2spec = g1;
+		g2spec.spec.init_sql = "CREATE TEMP VIEW v AS SELECT 1 AS x";
+		g2spec.spec.yaml_body += "\nhandles:\n  stale_version_grace: 30s\n";
+		g2spec.spec.handles.stale_version_grace_ms = 30000;
+		g2spec.spec.handles.stale_version_grace_raw = "30s";
+		g2spec.content_hash = ContentHash(g2spec.spec);
+		auto g2 = grace_defs.Update(g2spec);
+		Expect(g2.version == 2, "grace sandbox at v2");
+		auto prev = ResolveHandleVersion(grace_defs, grace_defs.Get("grace-analyst"), 1, g2.updated_at_ms);
+		Expect(prev.version == 1, "grace window accepts immediately previous version");
+		Expect(prev.spec.init_sql.empty(), "N-1 handle executes previous version's spec");
+		ExpectThrowContains(
+		    [&] { ResolveHandleVersion(grace_defs, grace_defs.Get("grace-analyst"), 1, g2.updated_at_ms + 30001); },
+		    "re-prepare", "N-1 rejected after grace window");
+		auto g3spec = g2;
+		g3spec.spec.resources.max_result_rows = 42;
+		g3spec.spec.yaml_body += "\n# v3\n";
+		g3spec.content_hash = ContentHash(g3spec.spec);
+		auto g3 = grace_defs.Update(g3spec);
+		ExpectThrowContains(
+		    [&] { ResolveHandleVersion(grace_defs, grace_defs.Get("grace-analyst"), 1, g3.updated_at_ms); },
+		    "re-prepare", "N-2 always rejected even inside grace");
+		Expect(ResolveHandleVersion(grace_defs, grace_defs.Get("grace-analyst"), 2, g3.updated_at_ms).version == 2,
+		       "N-1 of v3 is v2");
+
+		auto capped = RecordFromSpec(loaded, spec_dir);
+		capped.id = "cap-analyst";
+		capped.key = key_a.raw;
+		capped.spec.id = capped.id;
+		capped.spec.bound_key = capped.key;
+		capped.spec.handles.stale_version_grace_raw = "2h";
+		capped.spec.handles.stale_version_grace_ms = 2 * kMaxStaleVersionGraceMs;
+		ExpectThrowContains([&] { grace_defs.Create(capped); }, "handles.stale_version_grace",
+		                    "create validates grace cap");
 
 		ExpectThrowContains(
 		    [&] { ParseSecretRef("super-secret-value", "lake.s3.access_key"); }, "reference",
@@ -497,6 +582,38 @@ int main() {
 		auto b = rt.Get(rec2);
 		Expect(a.get() != b.get(), "update passivates and replaces the warm instance");
 		Expect(b->Version() == rec2.version, "runtime instance tracks current version");
+	}
+
+	{
+		auto leases = std::make_shared<SingleNodeLeaseManager>();
+		auto defs = std::make_shared<MemorySandboxRegistry>();
+		SandboxRuntime rt(daemon, leases, defs);
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "grace-rt";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		rec = defs->Create(rec);
+		auto v1_box = rt.Get(rec);
+		auto abs_v1 = v1_box->Execute("SELECT abs(amount) FROM deals");
+		Expect(abs_v1.row_count > 0, "v1 allows abs");
+		auto rec2 = rec;
+		rec2.spec.functions.erase("abs");
+		rec2.spec.handles.stale_version_grace_ms = 30000;
+		rec2.spec.handles.stale_version_grace_raw = "30s";
+		rec2.spec.yaml_body += "\nhandles:\n  stale_version_grace: 30s\n";
+		rec2 = defs->Update(rec2);
+		rt.PassivateId(rec2.id, "update", rec2.version - 1);
+		auto current = defs->Get(rec2.id);
+		auto prev = ResolveHandleVersion(*defs, current, 1, current.updated_at_ms);
+		auto still = rt.Get(prev);
+		Expect(still.get() == v1_box.get(), "grace keeps previous version warm");
+		auto abs_prev = still->Execute("SELECT abs(amount) FROM deals");
+		Expect(abs_prev.row_count > 0, "N-1 handle runs previous version's rules");
+		auto v2_box = rt.Get(current);
+		Expect(v2_box.get() != v1_box.get(), "current version is a distinct instance");
+		ExpectThrowContains([&] { v2_box->Execute("SELECT abs(amount) FROM deals"); }, "allowlisted",
+		                    "current version dropped abs");
 	}
 
 	{
@@ -586,6 +703,8 @@ int main() {
 		rec2.spec.yaml_body += "\n# bump\n";
 		auto upd = s3defs.Update(rec2);
 		Expect(upd.version == 2, "s3 update bumps version");
+		auto v1 = s3defs.GetVersion("s3-analyst", 1);
+		Expect(v1.version == 1, "s3 GetVersion loads immutable vN.json");
 		ExpectThrowContains([&] { s3defs.Create(rec); }, "already exists", "s3 create conflict");
 		s3defs.Delete("s3-analyst");
 		ExpectThrowContains([&] { s3defs.Get("s3-analyst"); }, "not found", "s3 tombstone hides get");

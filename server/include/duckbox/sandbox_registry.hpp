@@ -29,6 +29,7 @@ struct SandboxRecord {
 	std::string spec_yaml;
 	std::string spec_dir;
 	std::string etag;
+	int64_t updated_at_ms = 0; // wall clock when this version became current
 	SandboxSpec spec;
 
 	std::string ToJson() const;
@@ -47,6 +48,7 @@ public:
 	virtual std::vector<SandboxRecord> List() = 0;
 	virtual void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) = 0;
 	virtual bool LakeValidated(const std::string &id, int version) const = 0;
+	virtual SandboxRecord GetVersion(const std::string &id, int version) = 0;
 };
 
 class MemorySandboxRegistry : public SandboxRegistry {
@@ -58,10 +60,12 @@ public:
 	std::vector<SandboxRecord> List() override;
 	void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) override;
 	bool LakeValidated(const std::string &id, int version) const override;
+	SandboxRecord GetVersion(const std::string &id, int version) override;
 
 private:
 	mutable std::mutex mu_;
 	std::unordered_map<std::string, SandboxRecord> recs_;
+	std::unordered_map<std::string, std::unordered_map<int, SandboxRecord>> versions_;
 	int etag_seq_ = 1;
 };
 
@@ -77,9 +81,11 @@ public:
 	std::vector<SandboxRecord> List() override;
 	void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) override;
 	bool LakeValidated(const std::string &id, int version) const override;
+	SandboxRecord GetVersion(const std::string &id, int version) override;
 
 private:
 	SandboxRecord LoadCurrent(const std::string &id) const;
+	SandboxRecord LoadVersionObject(const std::string &id, int version) const;
 	void PutVersion(const SandboxRecord &rec);
 	void PutCurrent(const SandboxRecord &rec, const std::string &if_match, const std::string &if_none_match);
 
@@ -90,6 +96,12 @@ private:
 
 std::shared_ptr<SandboxRegistry> MakeSandboxRegistry(const DaemonConfig &daemon);
 SandboxRecord RecordFromSpec(SandboxSpec spec, std::string spec_dir = "");
+int64_t WallNowMs();
+// Current version always wins. The immediately previous version is accepted
+// until current.updated_at_ms + current.spec.handles.stale_version_grace_ms
+// (default grace 0 = reject). Older versions always re-prepare.
+SandboxRecord ResolveHandleVersion(SandboxRegistry &defs, const SandboxRecord &current, int handle_version,
+                                   int64_t now_ms = 0);
 void EnsureCurrentVersion(const SandboxRecord &current, int handle_version, const std::string &sandbox_id);
 
 } // namespace duckbox

@@ -344,8 +344,8 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetSt
 			ObserveFailure(Metrics(), nullptr, nullptr, e, false, 0);
 			throw;
 		}
-		auto rec = defs_->Get(h.sandbox_id);
-		EnsureCurrentVersion(rec, h.version, h.sandbox_id);
+		auto current = defs_->Get(h.sandbox_id);
+		auto rec = ResolveHandleVersion(*defs_, current, h.version);
 		AuthorizeCaller(daemon_, CallerOf(context), rec.key);
 		(void)ParseTenantKey(h.tenant_raw, rec.spec.key);
 		auto hdr_key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
@@ -464,8 +464,7 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 			token = signer_->Sign(h);
 			bind_cache_[token] = h.params_ipc;
 		}
-		auto rec = defs_->Get(h.sandbox_id);
-		EnsureCurrentVersion(rec, h.version, h.sandbox_id);
+		auto rec = ResolveHandleVersion(*defs_, defs_->Get(h.sandbox_id), h.version);
 		auto box = runtime_->Get(rec);
 		auto schema = SchemaFromCols(box->DescribeRewritten(h.rewritten_sql));
 		return Info(descriptor, token, schema);
@@ -644,7 +643,8 @@ const std::vector<arrow::flight::ActionType> &DuckboxFlightSqlServer::SandboxAct
 	static const std::vector<arrow::flight::ActionType> k = {
 	    {"CreateSandbox", "Create a named sandbox from a YAML spec. 409 if id exists with different content."},
 	    {"GetSandbox", "Fetch the current sandbox definition (id in the action body)."},
-	    {"UpdateSandbox", "Replace the definition and bump version; warm instances of the old version passivate."},
+	    {"UpdateSandbox",
+	     "Replace the definition and bump version. N-1 stays warm for handles.stale_version_grace (default 0)."},
 	    {"DeleteSandbox", "Tombstone the sandbox id."},
 	    {"ListSandboxes", "List non-tombstoned sandbox ids."},
 	};
@@ -687,7 +687,8 @@ arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContex
 				out = defs_->Create(rec);
 			} else {
 				out = defs_->Update(rec);
-				runtime_->PassivateId(out.id, "update");
+				int keep = out.spec.handles.stale_version_grace_ms > 0 ? out.version - 1 : -1;
+				runtime_->PassivateId(out.id, "update", keep);
 			}
 			return ResultJson(out.ToJson(), result);
 		}

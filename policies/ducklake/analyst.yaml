@@ -57,3 +57,5 @@ functions:
   - round
   - abs
 deny_table_functions: true
+handles:
+  stale_version_grace: 0s

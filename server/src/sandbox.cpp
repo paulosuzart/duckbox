@@ -247,12 +247,26 @@ void SandboxRuntime::PublishResidentLocked() {
 	Metrics().SetResident(warm, boxes_.size() - warm);
 }
 
-void SandboxRuntime::PassivateId(const std::string &id, const char *reason) {
+void SandboxRuntime::PassivateId(const std::string &id, const char *reason, int keep_from_version) {
 	std::lock_guard<std::mutex> hold(mu_);
-	auto it = boxes_.find(id);
-	if (it != boxes_.end()) {
+	auto prefix = id + "@";
+	for (auto it = boxes_.begin(); it != boxes_.end();) {
+		if (it->first != id && it->first.rfind(prefix, 0) != 0) {
+			++it;
+			continue;
+		}
+		if (keep_from_version >= 0 && it->first.rfind(prefix, 0) == 0) {
+			try {
+				int v = std::stoi(it->first.substr(prefix.size()));
+				if (v >= keep_from_version) {
+					++it;
+					continue;
+				}
+			} catch (...) {
+			}
+		}
 		it->second->Passivate(reason);
-		boxes_.erase(it);
+		it = boxes_.erase(it);
 	}
 	PublishResidentLocked();
 }
@@ -272,22 +286,18 @@ std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
 	} else {
 		Metrics().IncValidationCache("miss");
 	}
-	auto it = boxes_.find(rec.id);
+	auto box_key = rec.id + "@" + std::to_string(rec.version);
+	auto it = boxes_.find(box_key);
 	if (it != boxes_.end()) {
-		if (it->second->Version() != rec.version) {
-			it->second->Passivate("update");
-			boxes_.erase(it);
-		} else {
-			if (!it->second->Warm()) {
-				it->second->Warmup(!lake_ok);
-				if (!lake_ok && defs_) {
-					defs_->RememberLakeValidation(rec.id, rec.version, it->second->GetPolicy());
-				}
+		if (!it->second->Warm()) {
+			it->second->Warmup(!lake_ok);
+			if (!lake_ok && defs_) {
+				defs_->RememberLakeValidation(rec.id, rec.version, it->second->GetPolicy());
 			}
-			it->second->Touch();
-			PublishResidentLocked();
-			return it->second;
 		}
+		it->second->Touch();
+		PublishResidentLocked();
+		return it->second;
 	}
 	if (boxes_.size() >= daemon_.max_sandboxes) {
 		Metrics().IncLimit(Metrics().PolicyLabel(rec.spec.PolicyClass()), "sandbox_cap");
@@ -314,7 +324,7 @@ std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
 	if (!lake_ok && defs_) {
 		defs_->RememberLakeValidation(rec.id, rec.version, box->GetPolicy());
 	}
-	boxes_.emplace(rec.id, box);
+	boxes_.emplace(box_key, box);
 	Metrics().ObserveInstantiate(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 	PublishResidentLocked();
 	return box;

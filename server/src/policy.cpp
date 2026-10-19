@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 namespace duckbox {
@@ -159,6 +160,17 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	p.deny_table_functions = root.GetBool("deny_table_functions", true);
 	p.require_prepared_statements = root.GetBool("require_prepared_statements", false);
 	p.init_sql = root.GetString("init_sql");
+	if (auto *h = root.Get("handles")) {
+		p.handles.stale_version_grace_raw = h->GetString("stale_version_grace");
+		if (!p.handles.stale_version_grace_raw.empty()) {
+			int64_t ms = 0;
+			if (ParseDurationMs(p.handles.stale_version_grace_raw, &ms)) {
+				p.handles.stale_version_grace_ms = ms;
+			} else {
+				p.handles.stale_version_grace_ms = -1;
+			}
+		}
+	}
 	p.version = ContentHash(p);
 	return p;
 }
@@ -228,7 +240,66 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
 	os << "\ninit:" << spec.init_sql << '\n';
 	os << spec.resources.memory_limit << '|' << spec.resources.threads << '|' << spec.resources.query_timeout_ms << '|'
 	   << spec.resources.max_result_rows << '\n';
+	os << "grace:" << spec.handles.stale_version_grace_ms << '\n';
 	return Sha256Hex(os.str());
+}
+
+bool ParseDurationMs(const std::string &raw, int64_t *out_ms) {
+	if (!out_ms) {
+		return false;
+	}
+	size_t a = 0;
+	while (a < raw.size() && std::isspace(static_cast<unsigned char>(raw[a]))) {
+		a++;
+	}
+	size_t b = raw.size();
+	while (b > a && std::isspace(static_cast<unsigned char>(raw[b - 1]))) {
+		b--;
+	}
+	if (a >= b) {
+		return false;
+	}
+	std::string s = raw.substr(a, b - a);
+	if (s[0] == '-') {
+		return false;
+	}
+	if (s[0] == '+') {
+		s = s.substr(1);
+	}
+	size_t i = 0;
+	if (i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i]))) {
+		return false;
+	}
+	while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) {
+		i++;
+	}
+	int64_t n = 0;
+	try {
+		n = std::stoll(s.substr(0, i));
+	} catch (...) {
+		return false;
+	}
+	auto unit = s.substr(i);
+	for (char &c : unit) {
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	}
+	int64_t mul = 1000; // bare integer = seconds
+	if (unit.empty() || unit == "s") {
+		mul = 1000;
+	} else if (unit == "ms") {
+		mul = 1;
+	} else if (unit == "m") {
+		mul = 60 * 1000;
+	} else if (unit == "h") {
+		mul = 3600 * 1000;
+	} else {
+		return false;
+	}
+	if (n > (std::numeric_limits<int64_t>::max() / mul)) {
+		return false;
+	}
+	*out_ms = n * mul;
+	return true;
 }
 
 std::string ContentHash(const SandboxSpec &spec) {

@@ -3,6 +3,7 @@
 #include "duckbox/spec_validator.hpp"
 
 #include <cctype>
+#include <chrono>
 #include <sstream>
 
 namespace duckbox {
@@ -115,6 +116,18 @@ int JsonInt(const std::string &json, const std::string &key, int def = 0) {
 	}
 }
 
+int64_t JsonI64(const std::string &json, const std::string &key, int64_t def = 0) {
+	auto v = JsonStr(json, key);
+	if (v.empty()) {
+		return def;
+	}
+	try {
+		return std::stoll(v);
+	} catch (...) {
+		return def;
+	}
+}
+
 std::string VersionKey(const std::string &id, int version) {
 	return "sandboxes/" + id + "/v" + std::to_string(version) + ".json";
 }
@@ -157,8 +170,8 @@ std::string SandboxRecord::ToJson() const {
 	os << "{\"id\":\"" << JsonEsc(id) << "\",\"key\":\"" << JsonEsc(key) << "\",\"policy_class\":\""
 	   << JsonEsc(policy_class) << "\",\"version\":" << version << ",\"content_hash\":\"" << JsonEsc(content_hash)
 	   << "\",\"lake_validated\":" << (lake_validated ? "true" : "false") << ",\"tombstone\":"
-	   << (tombstone ? "true" : "false") << ",\"spec_dir\":\"" << JsonEsc(spec_dir) << "\",\"spec_yaml\":\""
-	   << JsonEsc(spec_yaml) << "\"}";
+	   << (tombstone ? "true" : "false") << ",\"updated_at_ms\":" << updated_at_ms << ",\"spec_dir\":\""
+	   << JsonEsc(spec_dir) << "\",\"spec_yaml\":\"" << JsonEsc(spec_yaml) << "\"}";
 	return os.str();
 }
 
@@ -166,7 +179,7 @@ std::string SandboxRecord::PointerJson() const {
 	std::ostringstream os;
 	os << "{\"id\":\"" << JsonEsc(id) << "\",\"version\":" << version << ",\"content_hash\":\"" << JsonEsc(content_hash)
 	   << "\",\"lake_validated\":" << (lake_validated ? "true" : "false") << ",\"tombstone\":"
-	   << (tombstone ? "true" : "false") << "}";
+	   << (tombstone ? "true" : "false") << ",\"updated_at_ms\":" << updated_at_ms << "}";
 	return os.str();
 }
 
@@ -179,6 +192,7 @@ SandboxRecord SandboxRecord::FromJson(const std::string &json) {
 	r.content_hash = JsonStr(json, "content_hash");
 	r.lake_validated = JsonBool(json, "lake_validated");
 	r.tombstone = JsonBool(json, "tombstone");
+	r.updated_at_ms = JsonI64(json, "updated_at_ms");
 	r.spec_yaml = JsonStr(json, "spec_yaml");
 	r.spec_dir = JsonStr(json, "spec_dir");
 	if (!r.spec_yaml.empty()) {
@@ -212,6 +226,37 @@ SandboxRecord RecordFromSpec(SandboxSpec spec, std::string spec_dir) {
 	return r;
 }
 
+int64_t WallNowMs() {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+	    .count();
+}
+
+SandboxRecord ResolveHandleVersion(SandboxRegistry &defs, const SandboxRecord &current, int handle_version,
+                                   int64_t now_ms) {
+	if (current.tombstone) {
+		throw NotFoundError("sandbox '" + current.id + "' is deleted");
+	}
+	if (handle_version == current.version) {
+		return current;
+	}
+	auto grace = current.spec.handles.stale_version_grace_ms;
+	if (handle_version == current.version - 1 && grace > 0) {
+		if (now_ms <= 0) {
+			now_ms = WallNowMs();
+		}
+		if (now_ms <= current.updated_at_ms + grace) {
+			try {
+				return defs.GetVersion(current.id, handle_version);
+			} catch (const NotFoundError &) {
+				throw StaleHandleError("sandbox '" + current.id + "' version " + std::to_string(handle_version) +
+				                       " is not current (now " + std::to_string(current.version) + "); re-prepare");
+			}
+		}
+	}
+	throw StaleHandleError("sandbox '" + current.id + "' version " + std::to_string(handle_version) +
+	                       " is not current (now " + std::to_string(current.version) + "); re-prepare");
+}
+
 void EnsureCurrentVersion(const SandboxRecord &current, int handle_version, const std::string &sandbox_id) {
 	if (current.tombstone) {
 		throw NotFoundError("sandbox '" + sandbox_id + "' is deleted");
@@ -239,8 +284,10 @@ SandboxRecord MemorySandboxRegistry::Create(SandboxRecord rec) {
 	rec.version = version;
 	rec.tombstone = false;
 	rec.lake_validated = false;
+	rec.updated_at_ms = WallNowMs();
 	rec.etag = std::to_string(etag_seq_++);
 	recs_[rec.id] = rec;
+	versions_[rec.id][rec.version] = rec;
 	return rec;
 }
 
@@ -263,8 +310,10 @@ SandboxRecord MemorySandboxRegistry::Update(SandboxRecord rec) {
 	rec.version = it->second.version + 1;
 	rec.tombstone = false;
 	rec.lake_validated = false;
+	rec.updated_at_ms = WallNowMs();
 	rec.etag = std::to_string(etag_seq_++);
 	recs_[rec.id] = rec;
+	versions_[rec.id][rec.version] = rec;
 	return rec;
 }
 
@@ -293,17 +342,40 @@ std::vector<SandboxRecord> MemorySandboxRegistry::List() {
 void MemorySandboxRegistry::RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) {
 	std::lock_guard<std::mutex> hold(mu_);
 	auto it = recs_.find(id);
-	if (it == recs_.end() || it->second.version != version) {
-		return;
+	if (it != recs_.end() && it->second.version == version) {
+		it->second.lake_validated = true;
+		it->second.spec.tables = spec.tables;
 	}
-	it->second.lake_validated = true;
-	it->second.spec.tables = spec.tables;
+	auto &hist = versions_[id][version];
+	hist.lake_validated = true;
+	hist.spec.tables = spec.tables;
 }
 
 bool MemorySandboxRegistry::LakeValidated(const std::string &id, int version) const {
 	std::lock_guard<std::mutex> hold(mu_);
 	auto it = recs_.find(id);
-	return it != recs_.end() && it->second.version == version && it->second.lake_validated;
+	if (it != recs_.end() && it->second.version == version && it->second.lake_validated) {
+		return true;
+	}
+	auto hist = versions_.find(id);
+	if (hist == versions_.end()) {
+		return false;
+	}
+	auto v = hist->second.find(version);
+	return v != hist->second.end() && v->second.lake_validated;
+}
+
+SandboxRecord MemorySandboxRegistry::GetVersion(const std::string &id, int version) {
+	std::lock_guard<std::mutex> hold(mu_);
+	auto hist = versions_.find(id);
+	if (hist == versions_.end()) {
+		throw NotFoundError("sandbox '" + id + "' version " + std::to_string(version) + " not found");
+	}
+	auto it = hist->second.find(version);
+	if (it == hist->second.end()) {
+		throw NotFoundError("sandbox '" + id + "' version " + std::to_string(version) + " not found");
+	}
+	return it->second;
 }
 
 S3SandboxRegistry::S3SandboxRegistry(LeaseSettings lease)
@@ -336,6 +408,9 @@ SandboxRecord S3SandboxRegistry::LoadCurrent(const std::string &id) const {
 		full.lake_validated = rec.lake_validated;
 		full.tombstone = rec.tombstone;
 		full.etag = rec.etag;
+		if (rec.updated_at_ms > 0) {
+			full.updated_at_ms = rec.updated_at_ms;
+		}
 		if (full.id.empty()) {
 			full.id = id;
 		}
@@ -381,6 +456,7 @@ SandboxRecord S3SandboxRegistry::Create(SandboxRecord rec) {
 		rec.version = existing.version + 1;
 		rec.lake_validated = false;
 		rec.tombstone = false;
+		rec.updated_at_ms = WallNowMs();
 		PutVersion(rec);
 		PutCurrent(rec, existing.etag, "");
 		auto got = client_->Get(CurrentKey(rec.id));
@@ -395,6 +471,7 @@ SandboxRecord S3SandboxRegistry::Create(SandboxRecord rec) {
 	rec.version = 1;
 	rec.lake_validated = false;
 	rec.tombstone = false;
+	rec.updated_at_ms = WallNowMs();
 	PutVersion(rec);
 	PutCurrent(rec, "", "*");
 	auto got = client_->Get(CurrentKey(rec.id));
@@ -412,6 +489,7 @@ SandboxRecord S3SandboxRegistry::Update(SandboxRecord rec) {
 	rec.version = current.version + 1;
 	rec.lake_validated = false;
 	rec.tombstone = false;
+	rec.updated_at_ms = WallNowMs();
 	PutVersion(rec);
 	PutCurrent(rec, current.etag, "");
 	auto got = client_->Get(CurrentKey(rec.id));
@@ -476,10 +554,33 @@ bool S3SandboxRegistry::LakeValidated(const std::string &id, int version) const 
 	}
 	try {
 		auto current = LoadCurrent(id);
-		return current.version == version && current.lake_validated;
+		if (current.version == version && current.lake_validated) {
+			return true;
+		}
 	} catch (...) {
-		return false;
 	}
+	return false;
+}
+
+SandboxRecord S3SandboxRegistry::LoadVersionObject(const std::string &id, int version) const {
+	auto ver = client_->Get(VersionKey(id, version));
+	if (ver.status == 404) {
+		throw NotFoundError("sandbox '" + id + "' version " + std::to_string(version) + " not found");
+	}
+	if (ver.status != 200) {
+		throw Error(ver.error.empty() ? "s3 get version object failed" : ver.error);
+	}
+	auto rec = SandboxRecord::FromJson(ver.body);
+	rec.etag = ver.etag;
+	if (rec.id.empty()) {
+		rec.id = id;
+	}
+	rec.version = version;
+	return rec;
+}
+
+SandboxRecord S3SandboxRegistry::GetVersion(const std::string &id, int version) {
+	return LoadVersionObject(id, version);
 }
 
 std::shared_ptr<SandboxRegistry> MakeSandboxRegistry(const DaemonConfig &daemon) {

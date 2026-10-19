@@ -12,7 +12,7 @@ Per-RPC headers:
 
 CRUD `DoAction` types: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes`. Create/Update body is the spec YAML.
 
-Prepared statements are signed opaque handles (HMAC) carrying **id + version**, not server session state. A non-current version returns a `re-prepare` error.
+Prepared statements are signed opaque handles (HMAC) carrying **id + version**, not server session state. A non-current version returns a `re-prepare` error unless the current spec’s `handles.stale_version_grace` (default `0s`, cap `1h`) still covers the immediately previous version (`updated_at + grace`). That handle runs against the previous version’s rules.
 
 `GetCatalogs` / `GetTables` / … are served by the **sandbox** and filtered to spec-whitelisted objects.
 

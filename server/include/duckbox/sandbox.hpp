@@ -1,10 +1,9 @@
 #pragma once
 
-// Warm DuckDB instance for a *named* sandbox id. The definition store is
-// SandboxRegistry (S3/memory). This runtime is keyed by id; an Update that
-// bumps version passivates the old instance. Passivate frees DuckDB; warmup
-// recreates it, resolves credential refs, attaches the spec's lake, reruns
-// initSQL, then lock_configuration.
+// Warm DuckDB instance for a named sandbox. Runtime key is id@version so a
+// previous version can stay warm during handles.stale_version_grace.
+// Passivate frees DuckDB; warmup recreates it, resolves credential refs,
+// attaches the spec's lake, reruns initSQL, then lock_configuration.
 
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/lease.hpp"
@@ -103,7 +102,8 @@ public:
 	               std::shared_ptr<IRouter> router = nullptr, std::shared_ptr<SecretResolver> secrets = {});
 
 	std::shared_ptr<TenantSandbox> Get(const SandboxRecord &rec);
-	void PassivateId(const std::string &id, const char *reason = "update");
+	// keep_from_version >= 0 keeps id@v for v >= that (N-1 during stale-handle grace).
+	void PassivateId(const std::string &id, const char *reason = "update", int keep_from_version = -1);
 	size_t Size() const;
 	size_t WarmCount() const;
 

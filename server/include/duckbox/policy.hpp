@@ -8,6 +8,7 @@
 #include "duckbox/error.hpp"
 #include "duckbox/secrets.hpp"
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <unordered_set>
@@ -46,6 +47,14 @@ struct Resources {
 	int64_t threads = 2;
 	int64_t query_timeout_ms = 8000;
 	int64_t max_result_rows = 1000;
+};
+
+// Prepared-handle stale-version window. Default 0 = reject immediately.
+constexpr int64_t kMaxStaleVersionGraceMs = 3600 * 1000;
+
+struct HandleSettings {
+	int64_t stale_version_grace_ms = 0;
+	std::string stale_version_grace_raw; // original YAML, for validation errors
 };
 
 struct KeySpec {
@@ -94,6 +103,7 @@ struct SandboxSpec {
 	std::string policy_class;
 	std::string metrics_class; // YAML alias of policy_class
 	std::vector<std::string> attachments;
+	HandleSettings handles;
 
 	const std::string &PolicyClass() const {
 		return !policy_class.empty() ? policy_class : metrics_class;
@@ -115,5 +125,7 @@ inline Policy LoadPolicyFile(const std::string &path) {
 std::string FingerprintSpec(const SandboxSpec &spec);
 std::string ContentHash(const SandboxSpec &spec);
 bool ValidSandboxId(const std::string &id);
+// 0s, 30s, 5m, 1h, 500ms; bare integer is seconds. Returns false if unparseable.
+bool ParseDurationMs(const std::string &raw, int64_t *out_ms);
 
 } // namespace duckbox

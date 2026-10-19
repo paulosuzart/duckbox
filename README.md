@@ -59,11 +59,11 @@ Trusted-caller CRUD (Flight SQL `DoAction`, mirrored as CLI):
 duckbox sandbox create|get|update|delete|list --url grpc://127.0.0.1:4747 --spec FILE [--id ID] [--key KEY]
 ```
 
-Create on an existing id with different content is rejected (409). `UpdateSandbox` explicitly bumps **version** (hash of policy+initSQL is the content identity; S3 keeps immutable `sandboxes/<id>/v<N>.json` plus `current.json` with If-None-Match / If-Match). Warm instances of the old version drain/passivate. Delete writes a tombstone. Any node can load a definition after failover.
+Create on an existing id with different content is rejected (409). `UpdateSandbox` explicitly bumps **version** (hash of policy+initSQL is the content identity; S3 keeps immutable `sandboxes/<id>/v<N>.json` plus `current.json` with If-None-Match / If-Match). Warm instances of versions older than N-1 drain/passivate; N-1 stays warm when `handles.stale_version_grace` is >0. Delete writes a tombstone. Any node can load a definition after failover.
 
 Queries send **id + SQL** (`x-duckbox-sandbox`). The bound key comes from the definition; send `x-duckbox-key` only when the spec’s `auth.key` extractor needs a per-query key. The caller must be authorized for the sandbox’s key (`auth.callers` maps identities to key globs; empty = allow all in local/dev).
 
-Prepared-statement handles carry **id + version**. A handle for a non-current version is rejected with a clear `re-prepare` error.
+Prepared-statement handles carry **id + version**. `handles.stale_version_grace` (default `0s`, cap `1h`) governs a non-current handle: `0s` rejects immediately with `re-prepare`. If >0, a handle for the **immediately previous** version is accepted until `updated_at + grace` and executes against that previous version’s rules. Older versions, and N-1 after the window, always `re-prepare`.
 
 ### CLI
 
@@ -90,14 +90,14 @@ Each node also serves Prometheus **text** on `/metrics` (default `127.0.0.1:9477
 
 ### Validation
 
-1. **Static** (create/update): schema, types, key extractors, filters, `:vars`, function names, initSQL allowlist, secret-ref syntax. **All** errors, with field paths (`tables.deals.filters[0]: …`).
+1. **Static** (create/update): schema, types, key extractors, filters, `:vars`, function names, initSQL allowlist, secret-ref syntax, `handles.stale_version_grace` (duration, cap 1h). **All** errors, with field paths (`tables.deals.filters[0]: …`).
 2. **Lake** (inside the sandbox on first warmup for that **(id, version)**): whitelisted tables/columns exist. Cached on the registry record so later warmups skip it. `duckbox validate` uses a throwaway sandbox.
 
 Daemon startup validates **only** daemon config (listen, limits, optional lease prefix reachability / If-None-Match probe). Not the lake.
 
 ### Sandbox lifecycle
 
-Runtime instances are keyed by **id** (current version). Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap.
+Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap.
 
 **initSQL**: SET of permitted names, `CREATE [OR REPLACE] TEMP VIEW|MACRO|TABLE`, `USE`, `LOAD` of spec-listed extensions. Reject `ATTACH`/`DETACH`, `COPY`/`EXPORT`, `INSTALL`, external access, security settings. Objects it creates are visible to user SQL **only if the spec whitelists them**.
 

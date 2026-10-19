@@ -47,3 +47,5 @@ functions:
   - abs
 deny_table_functions: true
 require_prepared_statements: false
+handles:
+  stale_version_grace: 0s

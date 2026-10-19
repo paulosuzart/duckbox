@@ -179,6 +179,13 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 			add("init_sql", e.what());
 		}
 	}
+	if (!spec.handles.stale_version_grace_raw.empty() && spec.handles.stale_version_grace_ms < 0) {
+		add("handles.stale_version_grace", "expected duration like 0s, 30s, 5m, 1h (cap 1h)");
+	} else if (spec.handles.stale_version_grace_ms < 0) {
+		add("handles.stale_version_grace", "must be >= 0");
+	} else if (spec.handles.stale_version_grace_ms > kMaxStaleVersionGraceMs) {
+		add("handles.stale_version_grace", "cap is 1h");
+	}
 	return issues;
 }
 
