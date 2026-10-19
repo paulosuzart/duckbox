@@ -9,8 +9,8 @@
 #include "duckbox/spec_validator.hpp"
 #include "duckbox/yaml.hpp"
 
+#include <algorithm>
 #include <cstdlib>
-
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -118,14 +118,18 @@ void duckbox::test::RunSpecLoaderTests() {
 	Expect(ducklake_spec.lake.catalog_env == "DUCKBOX_LAKE_CATALOG", "catalog via env name, not inline");
 	Expect(ducklake_spec.lake.s3.access_key.Spec() == "env:DUCKBOX_S3_KEY", "s3 key is a reference");
 	auto authz_spec = LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/authz.yaml");
-	Expect(authz_spec.authorized_paths.size() == 1 &&
-	           authz_spec.authorized_paths[0] == "s3://duckbox-lake/authorized/",
-	       "authz spec authorized_paths");
+	Expect(authz_spec.attachments.count("authorized_parquet") == 1 &&
+	           authz_spec.attachments.at("authorized_parquet").location == "s3://duckbox-lake/authorized/",
+	       "authz spec attachment location");
+	auto authz_paths = DeclaredAllowedPaths(authz_spec);
+	Expect(std::find(authz_paths.begin(), authz_paths.end(), "s3://duckbox-lake/authorized/") != authz_paths.end() &&
+	           std::find(authz_paths.begin(), authz_paths.end(), "s3://duckbox-lake/data/") != authz_paths.end(),
+	       "declared paths include lake data_path and attachment prefix");
 	Expect(authz_spec.FindTable("parquet_ok") && authz_spec.FindTable("parquet_ok")->authorized_view,
 	       "authz spec marks parquet_ok as authorized_view");
 	Expect(authz_spec.init_sql.find("read_parquet") != std::string::npos, "authz spec initSQL creates parquet views");
 	Expect(FingerprintSpec(authz_spec) != FingerprintSpec(ducklake_spec),
-	       "authorized_paths/initSQL change the spec fingerprint");
+	       "attachments/initSQL change the spec fingerprint");
 
 	ExpectThrowContains(
 	    [&] {
@@ -171,15 +175,58 @@ void duckbox::test::RunSpecLoaderTests() {
 	p2.lake.s3.endpoint = "evil:9";
 	Expect(FingerprintSpec(p2) != FingerprintSpec(policy), "fingerprint includes S3 endpoint");
 	p2 = policy;
-	p2.authorized_paths = {"s3://duckbox-lake/authorized/"};
-	Expect(FingerprintSpec(p2) != FingerprintSpec(policy), "fingerprint includes authorized_paths");
+	p2.extra_paths = {"s3://duckbox-lake/authorized/"};
+	Expect(FingerprintSpec(p2) != FingerprintSpec(policy), "fingerprint includes extra_paths");
+	p2 = policy;
+	Attachment feed;
+	feed.name = "feed";
+	feed.location = "s3://duckbox-lake/authorized/";
+	p2.attachments["feed"] = feed;
+	Expect(FingerprintSpec(p2) != FingerprintSpec(policy), "fingerprint includes attachments");
 	{
 		std::string s = mini;
-		s += "authorized_paths:\n  - \"s3://duckbox-lake/authorized/\"\n";
+		s += "extra_paths:\n  - /tmp/escape\n";
+		s += "attachments:\n  feed:\n    location: \"s3://duckbox-lake/authorized/\"\n"
+		     "    credential: env:DUCKBOX_S3_KEY\n";
 		auto loaded_ap = LoadSpecString(s, "<ap>");
-		Expect(loaded_ap.authorized_paths.size() == 1 &&
-		           loaded_ap.authorized_paths[0] == "s3://duckbox-lake/authorized/",
-		       "authorized_paths YAML list loads");
+		Expect(loaded_ap.extra_paths.size() == 1 && loaded_ap.extra_paths[0] == "/tmp/escape",
+		       "extra_paths YAML list loads");
+		Expect(loaded_ap.attachments.count("feed") == 1 &&
+		           loaded_ap.attachments.at("feed").location == "s3://duckbox-lake/authorized/" &&
+		           loaded_ap.attachments.at("feed").credential.Spec() == "env:DUCKBOX_S3_KEY",
+		       "attachments YAML mapping loads");
+		auto derived = DeclaredAllowedPaths(loaded_ap);
+		Expect(std::find(derived.begin(), derived.end(), "s3://duckbox-lake/authorized/") != derived.end() &&
+		           std::find(derived.begin(), derived.end(), "/tmp/escape") != derived.end(),
+		       "DeclaredAllowedPaths unions attachment location and extra_paths");
+	}
+	ExpectThrowContains([&] { LoadSpecString(std::string(mini) + "authorized_paths:\n  - x\n", "<old>"); },
+	                    "unknown key", "authorized_paths was removed; use attachments or extra_paths");
+	ExpectThrowContains([&] { LoadSpecString(std::string(mini) + "attachments:\n  - just-a-string\n", "<attlist>"); },
+	                    "expected mapping", "attachments as a string list is rejected");
+	{
+		auto p = policy;
+		p.lake.data_path = "s3://lake/data/";
+		Attachment s3a;
+		s3a.name = "feed";
+		s3a.location = "s3://lake/authorized/";
+		p.attachments["feed"] = s3a;
+		Attachment pg;
+		pg.name = "crm";
+		pg.location = "postgres://example/db";
+		p.attachments["crm"] = pg;
+		p.extra_paths = {"/tmp/extra"};
+		auto paths = DeclaredAllowedPaths(p);
+		Expect(std::find(paths.begin(), paths.end(), "s3://lake/data/") != paths.end(), "lake data_path is derived");
+		Expect(std::find(paths.begin(), paths.end(), "s3://lake/authorized/") != paths.end(),
+		       "attachment S3 prefix is derived");
+		Expect(std::find(paths.begin(), paths.end(), "/tmp/extra") != paths.end(), "extra_paths is an escape hatch");
+		Expect(std::find(paths.begin(), paths.end(), "postgres://example/db") == paths.end(),
+		       "Postgres DSN is not a DuckDB allowed path");
+		Expect(!LocationContributesAllowedPath("postgresql://x") && LocationContributesAllowedPath("/tmp/x") &&
+		           LocationContributesAllowedPath("s3://b/p") &&
+		           !LocationContributesAllowedPath("host=x dbname=y"),
+		       "path-like locations contribute; DSNs do not");
 	}
 
 	ExpectThrowContains([&] { ParseSecretRef("super-secret-value", "lake.s3.access_key"); }, "reference",

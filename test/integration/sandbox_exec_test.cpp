@@ -167,7 +167,10 @@ void duckbox::test::RunSandboxExecTests() {
 			ExecOrThrow(con, "COPY (SELECT 2 AS id, 'authz_bad' AS title) TO '" + bad_path + "' (FORMAT PARQUET)");
 		}
 		auto path_pol = policy;
-		path_pol.authorized_paths = {ok_dir};
+		Attachment ok_att;
+		ok_att.name = "ok_parquet";
+		ok_att.location = ok_dir;
+		path_pol.attachments["ok_parquet"] = ok_att;
 		TablePolicy okv;
 		okv.name = "parquet_ok";
 		okv.columns = {"id", "title"};
@@ -181,17 +184,17 @@ void duckbox::test::RunSandboxExecTests() {
 		TenantSandbox box_p(daemon, path_pol, key_a, init, spec_dir);
 		auto from_ok = box_p.Execute("SELECT * FROM parquet_ok");
 		Expect(from_ok.text_table.find("authz_ok") != std::string::npos,
-		       "authorized view over read_parquet on an authorized_paths prefix works");
+		       "authorized view over read_parquet on an attachment prefix works");
 		try {
 			box_p.Execute("SELECT * FROM parquet_no");
-			Expect(false, "view over read_parquet outside authorized_paths must fail");
+			Expect(false, "view over read_parquet on an undeclared prefix must fail");
 		} catch (const std::exception &e) {
 			std::string w = e.what();
 			Expect(w.find("authz_ok") == std::string::npos,
-			       "non-authorized prefix view must not return authorized rows");
+			       "undeclared prefix view must not return authorized rows");
 		}
 		ExpectThrowContains([&] { box_p.Execute("SELECT * FROM read_parquet('" + ok_path + "')"); }, "table functions",
-		                    "agent cannot call read_parquet directly even on an authorized prefix");
+		                    "agent cannot call read_parquet directly even on an attachment prefix");
 	}
 
 	{

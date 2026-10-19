@@ -77,7 +77,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	}
 	YamlRejectUnknownKeys(root, {"id", "key", "name", "policy_class", "metrics_class", "auth", "resources", "lake",
 	                             "tables", "functions", "deny_table_functions", "require_prepared_statements",
-	                             "init_sql", "authorized_paths", "bootstrap_sql_inline", "handles", "attachments",
+	                             "init_sql", "extra_paths", "bootstrap_sql_inline", "handles", "attachments",
 	                             "metrics", "lifecycle"});
 	SandboxSpec p;
 	p.source_path = path;
@@ -102,7 +102,29 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	if (p.metrics_class.empty()) {
 		p.metrics_class = p.policy_class;
 	}
-	p.attachments = StringList(root.Get("attachments"), "attachments");
+	if (auto *atts = root.Get("attachments")) {
+		if (atts->IsSeq()) {
+			throw PolicyError("attachments: expected mapping of name to {location, credential}");
+		}
+		if (!atts->IsMap()) {
+			throw PolicyError("attachments: expected mapping");
+		}
+		for (auto &kv : atts->map) {
+			if (!kv.second.IsMap()) {
+				throw PolicyError("attachments." + kv.first + ": expected mapping");
+			}
+			YamlRejectUnknownKeys(kv.second, {"location", "uri", "credential", "credential_ref"});
+			Attachment a;
+			a.name = kv.first;
+			a.location = kv.second.GetString("location");
+			if (a.location.empty()) {
+				a.location = kv.second.GetString("uri");
+			}
+			a.credential = OptionalRef(&kv.second, "credential", "credential_ref",
+			                           ChildPath("attachments." + kv.first, "credential"));
+			p.attachments.emplace(Lower(a.name), std::move(a));
+		}
+	}
 	if (auto *auth = root.Get("auth")) {
 		YamlRejectUnknownKeys(*auth, {"key"});
 		p.key = LoadKeySpec(auth->Get("key"));
@@ -189,7 +211,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	p.deny_table_functions = true;
 	p.require_prepared_statements = root.GetBool("require_prepared_statements", false);
 	p.init_sql = root.GetString("init_sql");
-	p.authorized_paths = StringList(root.Get("authorized_paths"), "authorized_paths");
+	p.extra_paths = StringList(root.Get("extra_paths"), "extra_paths");
 	auto inline_boot = root.GetString("bootstrap_sql_inline");
 	if (!inline_boot.empty()) {
 		p.lake.bootstrap_sql = inline_boot;
@@ -254,6 +276,46 @@ bool SandboxSpec::FunctionAllowed(const std::string &name) const {
 	return functions.count(Lower(name)) > 0;
 }
 
+bool LocationContributesAllowedPath(const std::string &location) {
+	if (location.empty()) {
+		return false;
+	}
+	auto lower = Lower(location);
+	if (lower.rfind("postgres://", 0) == 0 || lower.rfind("postgresql://", 0) == 0 ||
+	    lower.rfind("mysql://", 0) == 0 || lower.rfind("sqlite://", 0) == 0) {
+		return false;
+	}
+	if (location.find("://") != std::string::npos) {
+		return true;
+	}
+	if (lower.find("host=") != std::string::npos && lower.find("dbname=") != std::string::npos) {
+		return false;
+	}
+	return true;
+}
+
+std::vector<std::string> DeclaredAllowedPaths(const SandboxSpec &spec) {
+	std::vector<std::string> paths;
+	auto add = [&](const std::string &p) {
+		if (p.empty()) {
+			return;
+		}
+		if (std::find(paths.begin(), paths.end(), p) == paths.end()) {
+			paths.push_back(p);
+		}
+	};
+	add(spec.lake.data_path);
+	for (auto &kv : spec.attachments) {
+		if (LocationContributesAllowedPath(kv.second.location)) {
+			add(kv.second.location);
+		}
+	}
+	for (auto &p : spec.extra_paths) {
+		add(p);
+	}
+	return paths;
+}
+
 bool IsAlwaysDeniedTableFunction(const std::string &name) {
 	// Keep in lockstep with CheckGet in plan_check.cpp (user plan uses this
 	// after allowing bound seq_scan / ducklake_scan of spec tables).
@@ -301,8 +363,8 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
 	for (auto &e : spec.lake.extensions) {
 		os << "ext:" << e << '\n';
 	}
-	for (auto &a : spec.attachments) {
-		os << "att:" << a << '\n';
+	for (auto &kv : spec.attachments) {
+		os << "att:" << kv.first << '|' << kv.second.location << '|' << kv.second.credential.Spec() << '\n';
 	}
 	for (auto &pat : spec.key.patterns) {
 		os << "p:" << pat << '\n';
@@ -333,8 +395,8 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
 		os << fn << ',';
 	}
 	os << "\ninit:" << spec.init_sql << '\n';
-	for (auto &p : spec.authorized_paths) {
-		os << "ap:" << p << '\n';
+	for (auto &p : spec.extra_paths) {
+		os << "xp:" << p << '\n';
 	}
 	os << spec.resources.memory_limit << '|' << spec.resources.threads << '|' << spec.resources.query_timeout_ms << '|'
 	   << spec.resources.max_result_rows << '\n';

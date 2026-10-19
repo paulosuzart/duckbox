@@ -93,6 +93,15 @@ struct ColumnMeta {
 	std::string lake_type;
 };
 
+// External store the sandbox may use from trusted initSQL (authorized views).
+// location is an S3 prefix, file URI, or Postgres DSN. credential is a ref
+// (env:/file:), never a value. Path-like locations feed DuckDB allowed_paths.
+struct Attachment {
+	std::string name;
+	std::string location;
+	SecretRef credential;
+};
+
 // Allowlisted table or authorized view. filters are typed equalities (tenant_id,
 // _deleted, …) verified on the bound plan for direct table access. authorized_view
 // may be set in YAML (skips mandatory tenant filters) and is confirmed at warmup
@@ -119,16 +128,15 @@ struct SandboxSpec {
 	bool deny_table_functions = true;
 	bool require_prepared_statements = false;
 	std::string init_sql;
-	// Prefixes the SaaS authorizes for initSQL views (read_parquet, COPY, …).
-	// Applied to DuckDB allowed_paths / allowed_directories before
-	// enable_external_access=false. Never parsed from initSQL.
-	std::vector<std::string> authorized_paths;
+	// Escape hatch: path prefixes with no attachment (rarely needed).
+	// lake.data_path and path-like attachment locations are derived automatically.
+	std::vector<std::string> extra_paths;
 	std::string version; // hash(policy + initSQL); monotonic registry version is separate
 	std::string yaml_body;
 	// Bounded Prometheus `policy` label. Never the sandbox id.
 	std::string policy_class;
 	std::string metrics_class; // YAML alias of policy_class
-	std::vector<std::string> attachments;
+	std::map<std::string, Attachment> attachments;
 	HandleSettings handles;
 	LifecycleSettings lifecycle;
 
@@ -139,6 +147,11 @@ struct SandboxSpec {
 	const TablePolicy *FindTable(const std::string &name) const; // case-insensitive; nullptr if not allowlisted
 	bool FunctionAllowed(const std::string &name) const;
 };
+
+// True for s3://, file paths, http(s)://. False for postgres/mysql DSNs (not DuckDB file paths).
+bool LocationContributesAllowedPath(const std::string &location);
+// lake.data_path + path-like attachment locations + extra_paths. Never parsed from initSQL.
+std::vector<std::string> DeclaredAllowedPaths(const SandboxSpec &spec);
 
 // Shared denylist for spec `functions` (load + ValidateStatic) and the user-plan
 // guard. postgres_*/duckdb_*/ducklake_*/read_*/ *_scan, query, query_table, glob,

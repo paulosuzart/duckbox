@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""RustFS e2e: authorized_paths + authorized views over read_parquet.
+"""RustFS e2e: authorized views over an attachment prefix.
 
 Creates named sandbox acme-authz from policies/ducklake/authz.yaml:
-- view over s3://duckbox-lake/authorized/ works
-- view over s3://duckbox-lake/forbidden/ fails
+- view over the declared attachment s3://duckbox-lake/authorized/ works
+- view over undeclared s3://duckbox-lake/forbidden/ fails
 - agent read_parquet() directly is denied
 """
 

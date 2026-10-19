@@ -31,8 +31,9 @@ lake:
     access_key_env: DUCKBOX_S3_KEY
     secret_key_env: DUCKBOX_S3_SECRET
     region: us-east-1
-authorized_paths:
-  - "s3://duckbox-lake/authorized/"
+attachments:
+  authorized_parquet:
+    location: "s3://duckbox-lake/authorized/"
 init_sql: |
   CREATE TEMP VIEW parquet_ok AS SELECT * FROM read_parquet('s3://duckbox-lake/authorized/ok.parquet');
   CREATE TEMP VIEW parquet_no AS SELECT * FROM read_parquet('s3://duckbox-lake/forbidden/no.parquet');

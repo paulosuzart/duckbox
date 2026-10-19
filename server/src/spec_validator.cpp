@@ -199,9 +199,21 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 			                             "' must be constrained by a key variable (e.g. tenant_id = :tenant_id)");
 		}
 	}
-	for (size_t i = 0; i < spec.authorized_paths.size(); i++) {
-		if (spec.authorized_paths[i].empty()) {
-			add("authorized_paths[" + std::to_string(i) + "]", "must be a non-empty path prefix");
+	for (auto &kv : spec.attachments) {
+		auto prefix = "attachments." + kv.second.name;
+		if (kv.second.name.empty()) {
+			add("attachments", "each attachment needs a name");
+		}
+		if (kv.second.location.empty()) {
+			add(prefix + ".location", "required (S3 prefix, file URI, or DSN)");
+		}
+		if (!kv.second.credential.Empty()) {
+			ValidateSecretRefSyntax(kv.second.credential, prefix + ".credential", issues);
+		}
+	}
+	for (size_t i = 0; i < spec.extra_paths.size(); i++) {
+		if (spec.extra_paths[i].empty()) {
+			add("extra_paths[" + std::to_string(i) + "]", "must be a non-empty path prefix");
 		}
 	}
 	if (!spec.deny_table_functions) {

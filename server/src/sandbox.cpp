@@ -67,25 +67,18 @@ void TenantSandbox::Warmup(bool validate_lake) {
 		ExecOrThrow(*con_, "SET autoinstall_known_extensions=false");
 		ExecOrThrow(*con_, "SET autoload_known_extensions=false");
 		AttachLakeFromSpec(*con_, policy_, spec_dir_, *secrets_, daemon_);
+		for (auto &kv : policy_.attachments) {
+			if (!kv.second.credential.Empty()) {
+				secrets_->Resolve(kv.second.credential, "attachments." + kv.second.name + ".credential");
+			}
+		}
 		{
 			// SET must happen while enable_external_access is still true; after
 			// disable it is a silent no-op (DuckDB keeps the previous empty list).
-			// lake.data_path + spec.authorized_paths (declared by the SaaS, never
-			// parsed from initSQL). Remote prefixes are not ignored: inlined
-			// read_parquet in an authorized view needs these after disable.
-			std::vector<std::string> paths;
-			auto add_path = [&](const std::string &p) {
-				if (p.empty()) {
-					return;
-				}
-				if (std::find(paths.begin(), paths.end(), p) == paths.end()) {
-					paths.push_back(p);
-				}
-			};
-			add_path(policy_.lake.data_path);
-			for (auto &p : policy_.authorized_paths) {
-				add_path(p);
-			}
+			// Derived from lake.data_path, path-like attachments, and extra_paths
+			// (never parsed from initSQL). Inlined read_parquet in an authorized
+			// view needs these after disable.
+			auto paths = DeclaredAllowedPaths(policy_);
 			if (!paths.empty()) {
 				std::ostringstream list;
 				list << '[';
@@ -141,8 +134,8 @@ void TenantSandbox::Warmup(bool validate_lake) {
 					}
 				}
 				if (!set_ok && !cfg_ok) {
-					throw Error("allowed_paths/allowed_directories did not take effect for lake data_path and "
-					            "authorized_paths");
+					throw Error("allowed_paths/allowed_directories did not take effect for lake data_path, "
+					            "attachments, and extra_paths");
 				}
 			}
 		}

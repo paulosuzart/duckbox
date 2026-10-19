@@ -110,9 +110,15 @@ void duckbox::test::RunValidatorTests() {
 		av.tables["qv"].filters.clear();
 		av.tables["qv"].authorized_view = true;
 		Expect(validator.ValidateStatic(av).empty(), "authorized_view with no tenant filters is statically valid");
-		av.authorized_paths = {""};
-		Expect(has_path(validator.ValidateStatic(av), "authorized_paths[0]", "non-empty"),
-		       "empty authorized_paths entry is a field-path error");
+		av.extra_paths = {""};
+		Expect(has_path(validator.ValidateStatic(av), "extra_paths[0]", "non-empty"),
+		       "empty extra_paths entry is a field-path error");
+		av.extra_paths.clear();
+		Attachment missing;
+		missing.name = "feed";
+		av.attachments["feed"] = missing;
+		Expect(has_path(validator.ValidateStatic(av), "attachments.feed.location", "required"),
+		       "attachment without location is a field-path error");
 	}
 
 	Expect(RunValidateCommand(TestDaemon(), "") == 1, "validate without --spec fails");

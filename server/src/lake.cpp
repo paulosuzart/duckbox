@@ -103,6 +103,11 @@ void ConstrainLakeAgainstDaemon(const SandboxSpec &spec, const DaemonConfig &dae
 	env_as_ref(spec.lake.catalog_env, "lake.catalog_env");
 	env_as_ref(spec.lake.s3.endpoint_env, "lake.s3.endpoint_env");
 	env_as_ref(spec.lake.s3.region_env, "lake.s3.region_env");
+	for (auto &kv : spec.attachments) {
+		if (!kv.second.credential.Empty()) {
+			check_ref(kv.second.credential, "attachments." + kv.second.name + ".credential");
+		}
+	}
 }
 
 std::string ResolveLakeCatalog(const SandboxSpec &spec, const SecretResolver &secrets) {
