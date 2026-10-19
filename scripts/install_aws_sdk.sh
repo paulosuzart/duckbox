@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # AWS SDK for C++ — S3 component only, via vcpkg (manifest: vcpkg.json).
+# Linux only. macOS uses Homebrew aws-sdk-cpp + openssl@4 (Arrow/gRPC already
+# load openssl@4; a second vcpkg OpenSSL 3.5 in the same binary aborts).
 # Arrow S3FileSystem has no If-Match / If-None-Match; registry/leases need those.
 set -euo pipefail
 
@@ -9,19 +11,20 @@ VCPKG_ROOT="${VCPKG_ROOT:-$DEPS/vcpkg}"
 INSTALL_ROOT="${DUCKBOX_VCPKG_INSTALLED:-$DEPS/vcpkg_installed}"
 # Pin for CI cache stability. Newer tags are fine if this clone fails.
 VCPKG_TAG="${VCPKG_TAG:-2025.09.17}"
-OVERLAY_TRIPLETS="$ROOT/cmake/vcpkg-triplets"
-# Bump when Darwin overlay flags change so a prior vcpkg install is rebuilt.
-DARWIN_OVERLAY_ID="osx-unguarded-nopipe2"
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+if [[ "$os" == "darwin" ]]; then
+  echo "macOS uses Homebrew aws-sdk-cpp, not vcpkg:" >&2
+  echo "  brew install aws-sdk-cpp openssl@4" >&2
+  exit 1
+fi
+
 arch="$(uname -m)"
 case "$os-$arch" in
   linux-x86_64|linux-amd64) TRIPLET="${VCPKG_DEFAULT_TRIPLET:-x64-linux}" ;;
   linux-aarch64|linux-arm64) TRIPLET="${VCPKG_DEFAULT_TRIPLET:-arm64-linux}" ;;
-  darwin-arm64) TRIPLET="${VCPKG_DEFAULT_TRIPLET:-arm64-osx}" ;;
-  darwin-x86_64) TRIPLET="${VCPKG_DEFAULT_TRIPLET:-x64-osx}" ;;
   *)
-    echo "No vcpkg triplet for $os-$arch" >&2
+    echo "No vcpkg triplet for $os-$arch (Linux only)" >&2
     exit 1
     ;;
 esac
@@ -35,33 +38,20 @@ aws_config() {
     [[ -f "$root/$TRIPLET/share/AWSSDK/AWSSDKConfig.cmake" ]]
 }
 
-darwin_overlay_stamp() {
-  echo "$1/$TRIPLET/.duckbox-darwin-overlay"
-}
-
-darwin_overlay_current() {
-  [[ "$os" != "darwin" ]] && return 0
-  local stamp
-  stamp="$(darwin_overlay_stamp "$INSTALL_ROOT")"
-  [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "$DARWIN_OVERLAY_ID" ]]
-}
-
-if { aws_config "$INSTALL_ROOT" || aws_config "$VCPKG_ROOT/installed"; } && darwin_overlay_current; then
+if aws_config "$INSTALL_ROOT" || aws_config "$VCPKG_ROOT/installed"; then
   echo "aws-sdk-cpp[s3] already installed ($TRIPLET)"
   exit 0
 fi
 
-if [[ "$os" == "linux" ]]; then
-  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    SUDO="sudo"
-  else
-    SUDO=""
-  fi
-  $SUDO apt-get update -qq
-  $SUDO apt-get install -y --no-install-recommends \
-    git curl zip unzip tar pkg-config ninja-build ca-certificates \
-    libssl-dev libcurl4-openssl-dev zlib1g-dev
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  SUDO="sudo"
+else
+  SUDO=""
 fi
+$SUDO apt-get update -qq
+$SUDO apt-get install -y --no-install-recommends \
+  git curl zip unzip tar pkg-config ninja-build ca-certificates \
+  libssl-dev libcurl4-openssl-dev zlib1g-dev
 
 mkdir -p "$DEPS/vcpkg-bincache" "$INSTALL_ROOT"
 export VCPKG_BINARY_SOURCES="${VCPKG_BINARY_SOURCES:-clear;files,$DEPS/vcpkg-bincache,readwrite}"
@@ -76,45 +66,14 @@ if [[ ! -x "$VCPKG_ROOT/vcpkg" ]]; then
   "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
 fi
 
-# Linux: vcpkg's compiler probe uses `c++`, which may be Clang without libstdc++.
+# vcpkg's compiler probe uses `c++`, which may be Clang without libstdc++.
 # Pin GNU so the S3 SDK matches duckbox's g++ link.
-# Darwin: AppleClang only. Never force CC=gcc/CXX=g++ (Homebrew gcc cannot
-# consume the macOS SDK the way vcpkg curl expects). Drop inherited GNU names.
-overlay_args=()
-if [[ "$os" == "linux" ]]; then
-  export CC="${CC:-gcc}"
-  export CXX="${CXX:-g++}"
-elif [[ "$os" == "darwin" ]]; then
-  export VCPKG_OVERLAY_TRIPLETS="${VCPKG_OVERLAY_TRIPLETS:-$OVERLAY_TRIPLETS}"
-  overlay_args=(--overlay-triplets="$VCPKG_OVERLAY_TRIPLETS")
-  _base_cc=""
-  _base_cxx=""
-  [[ -n "${CC:-}" ]] && _base_cc="$(basename "$CC")"
-  [[ -n "${CXX:-}" ]] && _base_cxx="$(basename "$CXX")"
-  if [[ "$_base_cc" == gcc* || "$_base_cc" == *-gcc* ]] && [[ "$_base_cc" != *clang* ]]; then
-    unset CC
-  fi
-  if [[ "$_base_cxx" == g++* || "$_base_cxx" == gcc* || "$_base_cxx" == *-g++* || "$_base_cxx" == *-gcc* ]] &&
-     [[ "$_base_cxx" != *clang* ]]; then
-    unset CXX
-  fi
-  unset _base_cc _base_cxx
-  # Failed SDK 27 curl objects (-Werror=unguarded-availability-new) poison the next run.
-  if [[ -d "$VCPKG_ROOT/buildtrees/curl" ]]; then
-    echo "Removing $VCPKG_ROOT/buildtrees/curl for a clean Darwin curl rebuild"
-    rm -rf "$VCPKG_ROOT/buildtrees/curl"
-  fi
-fi
+export CC="${CC:-gcc}"
+export CXX="${CXX:-g++}"
 
 echo "Installing aws-sdk-cpp[s3] from vcpkg.json ($TRIPLET) CC=${CC:-} CXX=${CXX:-}"
 "$VCPKG_ROOT/vcpkg" install --vcpkg-root="$VCPKG_ROOT" --triplet="$TRIPLET" \
   --x-install-root="$INSTALL_ROOT" --x-manifest-root="$ROOT" \
-  "${overlay_args[@]}" \
   --clean-after-build
-
-if [[ "$os" == "darwin" ]]; then
-  mkdir -p "$INSTALL_ROOT/$TRIPLET"
-  echo "$DARWIN_OVERLAY_ID" > "$(darwin_overlay_stamp "$INSTALL_ROOT")"
-fi
 
 echo "AWS SDK C++ S3 ready in $INSTALL_ROOT/$TRIPLET"

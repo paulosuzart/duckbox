@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download DuckDB 1.5.6 headers + static libs, cpp-httplib, yaml-cpp,
 # nlohmann/json, jwt-cpp, CLI11, and cppcodec.
-# AWS SDK C++ (S3) is scripts/install_aws_sdk.sh (vcpkg).
+# AWS SDK C++ (S3): Linux scripts/install_aws_sdk.sh (vcpkg); macOS brew aws-sdk-cpp openssl@4.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

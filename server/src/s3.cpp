@@ -85,9 +85,9 @@ void EnsureAwsApi() {
 	struct Guard {
 		Aws::SDKOptions options;
 		Guard() {
-			setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
-			setenv("AWS_REQUEST_CHECKSUM_CALCULATION", "WHEN_REQUIRED", 0);
-			setenv("AWS_RESPONSE_CHECKSUM_VALIDATION", "WHEN_REQUIRED", 0);
+			setenv("AWS_EC2_METADATA_DISABLED", "true", 1);
+			setenv("AWS_REQUEST_CHECKSUM_CALCULATION", "WHEN_REQUIRED", 1);
+			setenv("AWS_RESPONSE_CHECKSUM_VALIDATION", "WHEN_REQUIRED", 1);
 			options.loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Fatal;
 			Aws::InitAPI(options);
 		}

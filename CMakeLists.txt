@@ -111,6 +111,22 @@ if(NOT EXISTS "${DUCKBOX_DEPS}/cppcodec/cppcodec/base64_url_unpadded.hpp")
   endif()
 endif()
 
+# On macOS, Homebrew Arrow/gRPC already load openssl@4. Linking a second
+# OpenSSL (vcpkg 3.5 static) into the same binary aborts in AWS ClientConfiguration.
+# Prefer Homebrew aws-sdk-cpp + openssl@4 on Darwin; keep vcpkg on Linux.
+if(APPLE)
+  set(DUCKBOX_USE_HOMEBREW_AWS ON)
+  execute_process(COMMAND brew --prefix aws-sdk-cpp OUTPUT_VARIABLE _brew_aws OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  execute_process(COMMAND brew --prefix openssl@4 OUTPUT_VARIABLE _brew_ssl OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(_brew_aws)
+    list(PREPEND CMAKE_PREFIX_PATH "${_brew_aws}")
+  endif()
+  if(_brew_ssl)
+    set(OPENSSL_ROOT_DIR "${_brew_ssl}" CACHE PATH "" FORCE)
+    list(PREPEND CMAKE_PREFIX_PATH "${_brew_ssl}")
+  endif()
+endif()
+
 # aws-sdk-cpp S3 (vcpkg) before Arrow so OpenSSL::Crypto is vcpkg 3.5, matching curl/s2n.
 # Arrow S3FileSystem has no If-Match / If-None-Match.
 set(_duckbox_vcpkg "$ENV{VCPKG_ROOT}")
@@ -121,7 +137,7 @@ set(_duckbox_vcpkg_installed "$ENV{DUCKBOX_VCPKG_INSTALLED}")
 if(NOT _duckbox_vcpkg_installed)
   set(_duckbox_vcpkg_installed "${DUCKBOX_DEPS}/vcpkg_installed")
 endif()
-set(_duckbox_triplets "$ENV{VCPKG_DEFAULT_TRIPLET};x64-linux;arm64-linux;x64-osx;arm64-osx")
+set(_duckbox_triplets "$ENV{VCPKG_DEFAULT_TRIPLET};x64-linux;arm64-linux")
 set(_duckbox_vcpkg_prefixes
   "${_duckbox_vcpkg_installed}"
   "${_duckbox_vcpkg}/installed")
@@ -145,8 +161,14 @@ macro(duckbox_find_vcpkg_aws)
     endif()
   endforeach()
 endmacro()
-duckbox_find_vcpkg_aws()
+if(APPLE AND DUCKBOX_USE_HOMEBREW_AWS)
+  # Do not prepend vcpkg: its static OpenSSL 3.5 fights Homebrew openssl@4 from Arrow/gRPC.
+  message(STATUS "Using Homebrew aws-sdk-cpp / openssl@4 on Apple")
+else()
+  duckbox_find_vcpkg_aws()
+endif()
 
+if(NOT APPLE)
 # curl/s2n from vcpkg were built against vcpkg OpenSSL 3.5; do not mix system 3.0.
 # Debug coverage links vcpkg's debug curl/s2n, so OpenSSL must be the debug copy too.
 if(DUCKBOX_VCPKG_LIB)
@@ -160,14 +182,20 @@ if(DUCKBOX_VCPKG_LIB)
     unset(OPENSSL_SSL_LIBRARY CACHE)
   endif()
 endif()
+endif()
 find_package(OpenSSL REQUIRED)
 
-set(AWSSDK_ROOT_DIR "${DUCKBOX_VCPKG_LIB}/.." CACHE PATH "vcpkg aws-sdk-cpp prefix")
+if(DUCKBOX_VCPKG_LIB)
+  set(AWSSDK_ROOT_DIR "${DUCKBOX_VCPKG_LIB}/.." CACHE PATH "vcpkg aws-sdk-cpp prefix")
+endif()
 find_package(aws-cpp-sdk-s3 CONFIG QUIET)
 if(NOT aws-cpp-sdk-s3_FOUND)
   find_package(AWSSDK QUIET COMPONENTS s3)
 endif()
 if(NOT aws-cpp-sdk-s3_FOUND AND NOT AWSSDK_FOUND)
+  if(APPLE)
+    message(FATAL_ERROR "Homebrew aws-sdk-cpp not found. brew install aws-sdk-cpp openssl@4")
+  endif()
   message(STATUS "AWS SDK C++ (S3) not found; running scripts/install_aws_sdk.sh")
   execute_process(
     COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/install_aws_sdk.sh"
@@ -241,6 +269,11 @@ target_link_libraries(duckbox_core PUBLIC
   OpenSSL::Crypto
   yaml-cpp)
 if(TARGET aws-cpp-sdk-s3)
+  # Homebrew's exported s3 target lists core as a dependent lib, not INTERFACE.
+  find_package(aws-cpp-sdk-core CONFIG QUIET)
+  if(TARGET aws-cpp-sdk-core)
+    target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-core)
+  endif()
   target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-s3)
 else()
   target_include_directories(duckbox_core PUBLIC ${AWSSDK_INCLUDE_DIRS})

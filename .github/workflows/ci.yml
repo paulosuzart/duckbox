@@ -51,14 +51,14 @@ jobs:
   macos-arm64:
     name: macOS arm64 (build + unit)
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     env:
       DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
     steps:
       - uses: actions/checkout@v4
       - name: Require Apple Silicon
         run: test "$(uname -m)" = "arm64"
-      - name: Install Arrow Flight SQL + build tools
+      - name: Install Arrow, aws-sdk-cpp, openssl@4 (Homebrew)
         run: bash scripts/install_arrow.sh
       - name: Cache DuckDB deps
         uses: actions/cache@v4
@@ -66,21 +66,18 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-osxnopipe2-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-jwtcli11cppcodec-brewaws-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
             duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
-            duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
-      - name: Fetch deps and AWS SDK C++ (S3, vcpkg)
-        run: |
-          bash scripts/fetch_deps.sh
-          bash scripts/install_aws_sdk.sh
+      - name: Fetch DuckDB and C++ headers
+        run: bash scripts/fetch_deps.sh
       - name: Build (AppleClang; omit -DCMAKE_CXX_COMPILER=g++)
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)"
           cmake --build build --parallel
-      - name: Unit tests
-        run: ctest --test-dir build -L unit --output-on-failure
+      - name: Unit and guardrail tests
+        run: ctest --test-dir build -L 'unit|guardrails' --output-on-failure
 
   coverage:
     name: Line coverage (gcovr)
