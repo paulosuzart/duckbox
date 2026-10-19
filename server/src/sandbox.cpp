@@ -53,6 +53,7 @@ void TenantSandbox::Warmup(bool validate_lake) {
 	ExecOrThrow(*con_, "SET autoload_known_extensions=false");
 	AttachLakeFromSpec(*con_, policy_, spec_dir_, *secrets_, daemon_);
 	try {
+		// After attach the lake paths are already allowed; keep COPY/read_csv from reaching the host.
 		ExecOrThrow(*con_, "SET enable_external_access=false");
 	} catch (const std::exception &) {
 		// lock_configuration / older builds; still refuse COPY via validator + plan guard

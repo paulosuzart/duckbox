@@ -22,6 +22,7 @@
 
 namespace duckbox {
 
+// One query result. arrow_ipc is produced from the same materialized result as text_table (query runs once).
 struct QueryOutput {
 	std::vector<uint8_t> arrow_ipc;
 	std::string text_table;
@@ -33,14 +34,15 @@ struct ColumnSchema {
 	std::string logical_type;
 };
 
+// One warm DuckDB for id@version. Not thread-safe across Execute; SandboxRuntime serializes via Get().
 class TenantSandbox {
 public:
 	TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key, std::string init_sql, std::string spec_dir,
 	              std::string sandbox_id = "", int version = 0, std::shared_ptr<SecretResolver> secrets = {});
 	~TenantSandbox();
 
-	void Warmup(bool validate_lake);
-	void Passivate(const char *reason = "shutdown");
+	void Warmup(bool validate_lake); // attach lake, initSQL, lock_configuration; no-op if already warm
+	void Passivate(const char *reason = "shutdown"); // frees DuckDB; definition stays in the registry
 	bool Warm() const {
 		return static_cast<bool>(db_);
 	}
@@ -48,7 +50,7 @@ public:
 	QueryOutput Execute(const std::string &sql); // rewrite + plan guard + single in-memory Arrow export
 	QueryOutput ExecuteRewritten(const std::string &sql, std::vector<ddb::Value> params); // re-validates handle SQL
 	std::vector<ColumnSchema> DescribeRewritten(const std::string &sql);
-	ddb::unique_ptr<ddb::LogicalOperator> ExtractPlan(const std::string &sql);
+	ddb::unique_ptr<ddb::LogicalOperator> ExtractPlan(const std::string &sql); // tests: real bound plans
 
 	const Policy &GetPolicy() const {
 		return policy_;
@@ -97,12 +99,13 @@ private:
 	int warmup_count_ = 0;
 };
 
+// Process-local map of id@version → TenantSandbox. Evicts idle instances.
 class SandboxRuntime {
 public:
 	SandboxRuntime(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases, std::shared_ptr<SandboxRegistry> defs,
 	               std::shared_ptr<IRouter> router = nullptr, std::shared_ptr<SecretResolver> secrets = {});
 
-	std::shared_ptr<TenantSandbox> Get(const SandboxRecord &rec);
+	std::shared_ptr<TenantSandbox> Get(const SandboxRecord &rec); // warms on miss; respects max_sandboxes
 	// keep_from_version >= 0 keeps id@v for v >= that (N-1 during stale-handle grace).
 	void PassivateId(const std::string &id, const char *reason = "update", int keep_from_version = -1);
 	size_t Size() const;

@@ -17,7 +17,7 @@ class ISpecValidator {
 public:
 	virtual ~ISpecValidator() = default;
 	virtual std::vector<SpecIssue> ValidateStatic(const SandboxSpec &spec) const = 0;
-	virtual std::vector<SpecIssue> ValidateLake(SandboxSpec &spec, ddb::Connection &con) const = 0;
+	virtual std::vector<SpecIssue> ValidateLake(SandboxSpec &spec, ddb::Connection &con) const = 0; // fills lake_columns
 };
 
 class SpecValidator : public ISpecValidator {
@@ -27,6 +27,6 @@ public:
 	void ThrowIf(const std::vector<SpecIssue> &issues) const; // SpecError if nonempty
 };
 
-int RunValidateCommand(const DaemonConfig &daemon, const std::string &spec_path);
+int RunValidateCommand(const DaemonConfig &daemon, const std::string &spec_path); // CLI; throwaway sandbox for lake check
 
 } // namespace duckbox

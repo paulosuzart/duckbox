@@ -12,6 +12,7 @@ from duckbox_client import connect  # noqa: E402
 
 
 def main() -> int:
+    """Fail if acme-analyst and acme-kim share deal ids (tenant isolation)."""
     sql = "SELECT id, title FROM deals ORDER BY id"
     with connect(sandbox="acme-analyst") as a_db, connect(sandbox="acme-kim") as b_db:
         a = [int(v) for v in a_db.query(sql)["id"].tolist()]

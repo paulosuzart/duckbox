@@ -20,6 +20,7 @@ from duckbox_client import connect, format_error  # noqa: E402
 
 
 def main() -> int:
+    """Parse flags, run one statement, print the DataFrame or a stripped error."""
     p = argparse.ArgumentParser(description="Run one SQL statement against a local duckbox.")
     p.add_argument("--url", default=None, help="Flight SQL URL (default grpc://127.0.0.1:4747)")
     p.add_argument("--sandbox", default="acme-analyst", help="named sandbox id")

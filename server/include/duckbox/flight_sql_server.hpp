@@ -24,9 +24,12 @@ namespace duckbox {
 
 struct ServerOptions {
 	DaemonConfig daemon;
-	std::string spec_dir;
+	std::string spec_dir; // unused for queries; bootstrap SQL is inlined on the spec
 };
 
+// Flight SQL surface for one node. Every Statement/DoGet path authenticates the
+// caller and resolves x-duckbox-sandbox to a registry record. Catalog RPCs are
+// filtered to spec-allowlisted tables — they never describe the host DuckDB.
 class DuckboxFlightSqlServer : public arrow::flight::sql::FlightSqlServerBase {
 public:
 	DuckboxFlightSqlServer(DaemonConfig daemon, std::shared_ptr<SandboxRegistry> defs,
@@ -74,6 +77,7 @@ public:
 	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> DoGetTableTypes(
 	    const arrow::flight::ServerCallContext &context) override;
 
+	// CreateSandbox / Get / Update / Delete / List. Caller must match auth.callers.
 	arrow::Status HandleSandboxAction(const arrow::flight::ServerCallContext &context, const arrow::flight::Action &action,
 	                                  std::unique_ptr<arrow::flight::ResultStream> *result);
 
@@ -114,6 +118,8 @@ private:
 	static constexpr size_t kMaxBindCache = 256;
 };
 
+// FlightSqlServerBase::DoAction is final; this wrapper intercepts sandbox CRUD
+// and forwards the rest (including DoGet, which still requires caller auth).
 class DuckboxFlightServer : public arrow::flight::FlightServerBase {
 public:
 	explicit DuckboxFlightServer(std::unique_ptr<DuckboxFlightSqlServer> sql);
@@ -150,8 +156,10 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
 class HandshakeAuthHandler : public arrow::flight::ServerAuthHandler {
 public:
 	explicit HandshakeAuthHandler(DaemonConfig daemon);
+	// Reads the handshake token and writes the resolved caller identity.
 	arrow::Status Authenticate(const arrow::flight::ServerCallContext &context, arrow::flight::ServerAuthSender *outgoing,
 	                           arrow::flight::ServerAuthReader *incoming) override;
+	// Does not fall back to the raw token when secrets are configured.
 	arrow::Status IsValid(const arrow::flight::ServerCallContext &context, const std::string &token,
 	                      std::string *peer_identity) override;
 

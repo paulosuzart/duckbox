@@ -16,7 +16,7 @@ namespace duckbox {
 
 struct ValidationContext {
 	const Policy *policy = nullptr;
-	std::vector<std::unordered_set<std::string>> cte_scope;
+	std::vector<std::unordered_set<std::string>> cte_scope; // unqualified names only
 };
 
 class ISqlValidator {
@@ -34,7 +34,7 @@ public:
 void ValidateStatements(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts, const Policy &policy);
 void ValidateSelect(ddb::SelectStatement &stmt, ValidationContext &ctx);
 void ValidateQueryNode(ddb::QueryNode &node, ValidationContext &ctx);
-void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx);
+void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx); // qualified names skip CTE shadowing
 void ValidateExpression(ddb::ParsedExpression &expr, ValidationContext &ctx);
 
 std::unique_ptr<ddb::Parser> ParseSql(const std::string &sql);

@@ -18,6 +18,7 @@
 
 namespace duckbox {
 
+// One version of a named sandbox. spec_yaml is the registry body; secret values never appear.
 struct SandboxRecord {
 	std::string id;
 	std::string key;
@@ -32,10 +33,10 @@ struct SandboxRecord {
 	int64_t updated_at_ms = 0; // wall clock when this version became current
 	SandboxSpec spec;
 
-	std::string ToJson() const;
-	std::string PointerJson() const;
+	std::string ToJson() const;      // immutable vN.json body
+	std::string PointerJson() const; // current.json (id, version, etag, tombstone)
 	static SandboxRecord FromJson(const std::string &json);
-	void ParseSpec();
+	void ParseSpec(); // LoadSpecString(spec_yaml); throws PolicyError
 };
 
 class SandboxRegistry {
@@ -46,12 +47,13 @@ public:
 	virtual SandboxRecord Get(const std::string &id) = 0; // NotFoundError / hides tombstones
 	virtual SandboxRecord Update(SandboxRecord rec) = 0;  // bumps version; ConflictError on CAS fail
 	virtual SandboxRecord Delete(const std::string &id) = 0;
-	virtual std::vector<SandboxRecord> List() = 0;
+	virtual std::vector<SandboxRecord> List() = 0; // live definitions; tombstones omitted
 	virtual void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) = 0;
 	virtual bool LakeValidated(const std::string &id, int version) const = 0;
-	virtual SandboxRecord GetVersion(const std::string &id, int version) = 0;
+	virtual SandboxRecord GetVersion(const std::string &id, int version) = 0; // immutable vN, including N-1
 };
 
+// Process-local registry for tests and daemons with no lease S3.
 class MemorySandboxRegistry : public SandboxRegistry {
 public:
 	SandboxRecord Create(SandboxRecord rec) override;
@@ -70,6 +72,7 @@ private:
 	int etag_seq_ = 1;
 };
 
+// Control-plane S3 registry. Create uses If-None-Match:*; update uses If-Match etag.
 class S3SandboxRegistry : public SandboxRegistry {
 public:
 	explicit S3SandboxRegistry(LeaseSettings lease);
@@ -95,7 +98,7 @@ private:
 	mutable std::unordered_map<std::string, SandboxSpec> lake_cache_;
 };
 
-std::shared_ptr<SandboxRegistry> MakeSandboxRegistry(const DaemonConfig &daemon);
+std::shared_ptr<SandboxRegistry> MakeSandboxRegistry(const DaemonConfig &daemon); // S3 if lease.bucket set, else memory
 SandboxRecord RecordFromSpec(SandboxSpec spec, std::string spec_dir = "");
 int64_t WallNowMs();
 // Current version always wins. The immediately previous version is accepted

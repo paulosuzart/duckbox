@@ -12,6 +12,7 @@
 namespace duckbox {
 
 // Parsed sandbox key. tenant_id_i64 is the typed bind value; never substring-match it.
+struct TenantKey {
 	std::string raw;
 	std::string tenant_id;
 	std::string user;
@@ -19,7 +20,7 @@ namespace duckbox {
 	int64_t tenant_id_i64 = 0;
 	std::map<std::string, std::string> vars;
 
-	std::string Var(const std::string &name) const;
+	std::string Var(const std::string &name) const; // empty if missing; names come from KeySpec
 };
 
 // Default extractor used only when a spec omits auth.key (LoadSpecFile rejects that).

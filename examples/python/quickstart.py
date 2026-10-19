@@ -26,6 +26,7 @@ def show(title: str, df) -> None:
 
 
 def main() -> int:
+    """Create two named sandboxes, query, bind a parameter, show isolation and a rejection."""
     spec = default_spec_path()
     print(f"creating named sandboxes from {spec}")
     print(" ", create_sandbox(sandbox="acme-analyst", key="tenant_21:user_sergio", spec=spec))

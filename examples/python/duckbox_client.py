@@ -51,6 +51,7 @@ class Duckbox:
     """One named-sandbox connection. `.query()` returns a pandas DataFrame."""
 
     def __init__(self, conn: Any, sandbox: str, key: str):
+        """Wrap an ADBC connection already opened against `sandbox`."""
         self._conn = conn
         self.sandbox = sandbox
         self.key = key
@@ -66,6 +67,7 @@ class Duckbox:
         return table.to_pandas()
 
     def close(self) -> None:
+        """Close the underlying ADBC connection."""
         self._conn.close()
 
     def __enter__(self) -> "Duckbox":

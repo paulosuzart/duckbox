@@ -69,6 +69,7 @@
 namespace duckbox {
 namespace ddb = duckdb;
 
+// Copies into DuckDB's vector<> (distinct from std::vector) for prepared Execute.
 inline ddb::vector<ddb::Value> ToDuckValues(const std::vector<ddb::Value> &in) {
 	ddb::vector<ddb::Value> out;
 	out.reserve(in.size());

@@ -163,6 +163,7 @@ void CheckOne(const ddb::SQLStatement &stmt, const DaemonConfig &daemon, const S
 	throw SqlRejected("initSQL statement not allowlisted: " + ddb::StatementTypeToString(type));
 }
 
+// Re-serialize after rewrite so CREATE TEMP VIEW bodies contain the tenant filter, not the original AST.
 std::string SerializedInitSql(const std::string &sql, const DaemonConfig &daemon, const SandboxSpec &spec,
                               const TenantKey *key) {
 	if (sql.empty()) {

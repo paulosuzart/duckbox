@@ -15,6 +15,8 @@
 
 namespace duckbox {
 
+// Walk state. cte_scope is a stack so nested WITH names don't leak, and a
+// catalog-qualified BaseTableRef is never treated as a CTE.
 struct RewriteContext {
 	const Policy *policy = nullptr;
 	TenantKey key;
@@ -23,7 +25,7 @@ struct RewriteContext {
 
 struct RewriteResult {
 	std::string sql;
-	int user_param_count = 0;
+	int user_param_count = 0; // leftover `?` / `$n` for Flight binding
 };
 
 class ISqlRewriter {
@@ -38,13 +40,13 @@ public:
 	RewriteResult Rewrite(const std::string &sql, const Policy &policy, const TenantKey &key) const override;
 };
 
-void RewriteSelect(ddb::SelectStatement &stmt, RewriteContext &ctx);
-void ApplyMaxRows(ddb::QueryNode &node, int64_t max_rows);
+void RewriteSelect(ddb::SelectStatement &stmt, RewriteContext &ctx); // wraps allowlisted tables; recurses VALUES
+void ApplyMaxRows(ddb::QueryNode &node, int64_t max_rows);           // min(user LIMIT, spec cap); never drops the cap
 void BindNamedParameters(ddb::ParsedExpression &expr, const ddb::case_insensitive_map_t<ddb::Value> &values);
 void BindNamedParametersInStatement(ddb::SQLStatement &stmt, const ddb::case_insensitive_map_t<ddb::Value> &values);
 
 ddb::unique_ptr<ddb::ParsedExpression> ParsePolicyFilter(const std::string &filter_sql);
-ddb::Value ValueFromKeyVar(const std::string &name, const std::string &raw);
+ddb::Value ValueFromKeyVar(const std::string &name, const std::string &raw); // tenant_id → BIGINT, never interpolated
 void BindParsedExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr,
                           const ddb::case_insensitive_map_t<ddb::Value> &values);
 

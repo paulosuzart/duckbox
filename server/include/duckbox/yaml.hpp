@@ -31,7 +31,7 @@ struct YamlNode {
 	}
 	bool IsSeq() const {
 		return kind == Kind::Seq;
-	}
+	} // kind predicates; missing keys are not errors until Get*
 
 	// Missing or null → nullptr. Present non-map/seq is still returned.
 	const YamlNode *Get(const std::string &key) const;

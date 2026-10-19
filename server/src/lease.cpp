@@ -8,6 +8,7 @@
 namespace duckbox {
 
 [[noreturn]] void SelfFence(const std::string &reason) {
+	// Exit 3 (not abort): counters reset, ops alert on restart + last-renewal age.
 	std::clog << "{\"event\":\"self_fence\",\"reason\":\"" << reason << "\"}\n";
 	std::_Exit(3);
 }

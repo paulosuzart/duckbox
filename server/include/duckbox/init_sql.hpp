@@ -19,7 +19,7 @@ class IInitSqlGuard {
 public:
 	virtual ~IInitSqlGuard() = default;
 	virtual void Check(const std::string &sql, const DaemonConfig &daemon, const SandboxSpec &spec,
-	                   const TenantKey *key = nullptr) const = 0;
+	                   const TenantKey *key = nullptr) const = 0; // SqlRejected; key rewrites VIEW bodies
 };
 
 class InitSqlGuard : public IInitSqlGuard {

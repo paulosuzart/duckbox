@@ -11,6 +11,7 @@
 
 namespace duckbox {
 
+// Payload sealed inside the token. rewritten_sql is already tenant-filtered.
 struct StatementHandle {
 	std::string rewritten_sql;
 	std::string tenant_raw;
@@ -25,7 +26,8 @@ struct StatementHandle {
 class IHandleSigner {
 public:
 	virtual ~IHandleSigner() = default;
-	// Token is DBX4.<b64 AEAD>.<b64 HMAC>. Payload includes rewritten SQL.
+	// Token is DBX4.<b64 AEAD>.<b64 HMAC>. The AEAD exists because the payload
+	// includes rewritten SQL (HMAC-only left it readable).
 	virtual std::string Sign(const StatementHandle &h) const = 0;
 	// Rejects non-DBX4, bad MAC, decrypt failure, and expired handles.
 	virtual StatementHandle Verify(const std::string &token) const = 0;
@@ -33,6 +35,7 @@ public:
 
 class HmacHandleSigner : public IHandleSigner {
 public:
+	// `secret` must be non-empty (daemon validate enforces length outside dev).
 	HmacHandleSigner(std::string secret, int64_t ttl_seconds);
 	std::string Sign(const StatementHandle &h) const override;
 	StatementHandle Verify(const std::string &token) const override;

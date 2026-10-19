@@ -17,6 +17,7 @@
 
 namespace duckbox {
 
+// Writer fence. epoch is included in lake writes; a stolen lease bumps epoch so stale writers fail.
 struct Lease {
 	std::string tenant_key;
 	uint64_t epoch = 1;
@@ -30,8 +31,8 @@ struct Lease {
 class ILeaseManager {
 public:
 	virtual ~ILeaseManager() = default;
-	virtual Lease Acquire(const TenantKey &key) = 0;
-	virtual void Renew(const Lease &lease) = 0;
+	virtual Lease Acquire(const TenantKey &key) = 0; // If-None-Match create or steal-if-expired
+	virtual void Renew(const Lease &lease) = 0;      // If-Match; SelfFence on lost ownership
 	virtual void Release(const Lease &lease) = 0;
 };
 
@@ -42,19 +43,20 @@ enum class RouteDecision { Local, Forward, Handoff };
 class IRouter {
 public:
 	virtual ~IRouter() = default;
-	virtual RouteDecision Decide(const TenantKey &key) = 0;
+	virtual RouteDecision Decide(const TenantKey &key) = 0; // Local until multi-node leases exist
 };
 
 class LeaseTelemetry {
 public:
 	explicit LeaseTelemetry(std::shared_ptr<IMetrics> metrics = {});
-	IMetrics &M();
+	IMetrics &M(); // NoopMetrics if none was passed
 
 protected:
 	std::shared_ptr<IMetrics> metrics_;
 	std::unordered_set<std::string> owned_;
 };
 
+// Always grants local ownership. Sufficient for the single-node draft.
 class SingleNodeLeaseManager : public ILeaseManager, public LeaseTelemetry {
 public:
 	explicit SingleNodeLeaseManager(std::shared_ptr<IMetrics> metrics = {});
@@ -63,7 +65,7 @@ public:
 	void Release(const Lease &lease) override;
 };
 
-class LocalRouter : public IRouter, public LeaseTelemetry {
+class LocalRouter : public IRouter, public LeaseTelemetry { // always RouteDecision::Local
 public:
 	explicit LocalRouter(std::shared_ptr<IMetrics> metrics = {});
 	RouteDecision Decide(const TenantKey &key) override;

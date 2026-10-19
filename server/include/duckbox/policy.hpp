@@ -61,6 +61,7 @@ struct HandleSettings {
 	std::string stale_version_grace_raw; // original YAML, for validation errors
 };
 
+// How a sandbox key string is split into bind variables (tenant_id, user, …).
 struct KeySpec {
 	std::vector<std::string> patterns;
 	std::string regex;
@@ -72,9 +73,10 @@ struct KeySpec {
 	bool Empty() const {
 		return patterns.empty() && regex.empty() && split.empty();
 	}
-	std::vector<std::string> VariableNames() const;
+	std::vector<std::string> VariableNames() const; // names referenced by patterns/regex/split
 };
 
+// Filled by lake validation (pragma_table_info), not by YAML.
 struct ColumnMeta {
 	std::string name;
 	std::string lake_type;
@@ -110,15 +112,17 @@ struct SandboxSpec {
 	std::vector<std::string> attachments;
 	HandleSettings handles;
 
+	// Bounded Prometheus `policy` label. Never the sandbox id.
 	const std::string &PolicyClass() const {
 		return !policy_class.empty() ? policy_class : metrics_class;
 	}
-	const TablePolicy *FindTable(const std::string &name) const;
+	const TablePolicy *FindTable(const std::string &name) const; // case-insensitive; nullptr if not allowlisted
 	bool FunctionAllowed(const std::string &name) const;
 };
 
 using Policy = SandboxSpec;
 
+// Relative lake.bootstrap_sql is inlined here so the daemon never reads host files at warmup.
 SandboxSpec LoadSpecFile(const std::string &path);
 SandboxSpec LoadSpecString(const std::string &yaml, const std::string &source = "<inline>");
 // gRPC metadata cannot carry newlines; clients send base64url(YAML). Raw YAML is still accepted.
@@ -127,9 +131,10 @@ inline Policy LoadPolicyFile(const std::string &path) {
 	return LoadSpecFile(path);
 }
 
+// Canonical hash of the deny-by-default contract (tables, filters, functions, lake, resources, …).
 std::string FingerprintSpec(const SandboxSpec &spec);
-std::string ContentHash(const SandboxSpec &spec);
-bool ValidSandboxId(const std::string &id);
+std::string ContentHash(const SandboxSpec &spec); // alias of FingerprintSpec
+bool ValidSandboxId(const std::string &id);       // [a-z0-9][a-z0-9_-]{0,63}
 // 0s, 30s, 5m, 1h, 500ms; bare integer is seconds. Returns false if unparseable.
 bool ParseDurationMs(const std::string &raw, int64_t *out_ms);
 

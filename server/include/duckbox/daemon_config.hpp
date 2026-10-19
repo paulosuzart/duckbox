@@ -27,6 +27,7 @@ struct LakeAllow {
 	std::vector<std::string> secret_refs;
 };
 
+// Control-plane S3 (leases + named-sandbox registry). Never used for lake data.
 struct LeaseSettings {
 	std::string endpoint;
 	std::string endpoint_env;
@@ -43,6 +44,7 @@ struct CallerRule {
 	std::vector<std::string> key_patterns;
 };
 
+// Loaded from daemons/*.yaml. allow_insecure_dev defaults false; DefaultDaemonConfig() is the local helper.
 struct DaemonConfig {
 	std::string name = "duckbox";
 	std::string source_path;
@@ -78,7 +80,7 @@ DaemonConfig DefaultDaemonConfig();
 // Refuses empty/short handle_secret unless allow_insecure_dev; requires bearer or JWT otherwise.
 void ValidateDaemonOrThrow(const DaemonConfig &cfg);
 
-bool GlobMatch(const std::string &pattern, const std::string &value);
+bool GlobMatch(const std::string &pattern, const std::string &value); // `*` only; used for caller key patterns
 // Throws AuthError if this identity may not use sandbox_key.
 void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity, const std::string &sandbox_key);
 

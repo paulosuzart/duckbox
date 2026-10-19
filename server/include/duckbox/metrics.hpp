@@ -27,11 +27,11 @@ class IMetrics {
 public:
 	virtual ~IMetrics() = default;
 
-	virtual std::string PolicyLabel(const std::string &metrics_class) const = 0;
+	virtual std::string PolicyLabel(const std::string &metrics_class) const = 0; // allowlisted class or "other"
 	virtual void AddQueriesActive(int delta) = 0;
 	virtual void ObserveQuery(const std::string &policy, const char *outcome, bool cold, double seconds, int64_t rows,
 	                          int64_t bytes) = 0;
-	virtual void IncRejection(const std::string &policy, const char *reason) = 0;
+	virtual void IncRejection(const std::string &policy, const char *reason) = 0; // reason from ClassifyRejection
 	virtual void IncLimit(const std::string &policy, const char *limit) = 0;
 	virtual void ObserveInstantiate(double seconds) = 0;
 	virtual void ObserveWarmup(double seconds) = 0;
@@ -51,10 +51,10 @@ public:
 	virtual void ObserveForward(double seconds) = 0;
 	virtual void ObserveS3LeaseOp(const char *op, double seconds) = 0;
 	virtual void IncS3LeaseError(const char *op, const char *code) = 0;
-	virtual std::string Render() const = 0;
+	virtual std::string Render() const = 0; // Prometheus text; no tenant/user/key/sandbox-id labels
 };
 
-class MetricsRegistry : public IMetrics {
+class MetricsRegistry : public IMetrics { // one per process; mutex-guarded
 public:
 	explicit MetricsRegistry(std::string node, std::unordered_set<std::string> policy_classes = {});
 
@@ -111,7 +111,7 @@ private:
 	int64_t queries_active_ = 0;
 };
 
-class NoopMetrics : public IMetrics {
+class NoopMetrics : public IMetrics { // tests and CLI one-shots that must not bind a port
 public:
 	std::string PolicyLabel(const std::string &metrics_class) const override;
 	void AddQueriesActive(int) override {
@@ -163,9 +163,10 @@ public:
 	}
 };
 
-IMetrics &Metrics();
+IMetrics &Metrics(); // process singleton; NoopMetrics until SetMetrics
 void SetMetrics(std::shared_ptr<IMetrics> m);
 
+// stderr JSON. Includes tenant/user/key — those must not appear on /metrics.
 void WriteAuditLog(const TenantKey &key, const Policy &policy, double seconds, int64_t rows, int64_t bytes,
                    const char *outcome, const char *reason);
 

@@ -11,7 +11,7 @@
 
 namespace duckbox {
 
-struct S3Object {
+struct S3Object { // HTTP status + body; error is a transport message, never a secret
 	int status = 0;
 	std::string body;
 	std::string etag;
@@ -22,12 +22,12 @@ class S3ControlClient {
 public:
 	explicit S3ControlClient(LeaseSettings lease);
 
-	S3Object Get(const std::string &key) const;
+	S3Object Get(const std::string &key) const; // 404 is status=404, not an exception
 	// SigV4 signs Content-Type; extra headers are not duplicated in the canonical request.
 	S3Object Put(const std::string &key, const std::string &body, const std::string &if_match = "",
 	             const std::string &if_none_match = "") const;
 	S3Object Delete(const std::string &key) const;
-	std::vector<std::string> ListKeys(const std::string &prefix) const;
+	std::vector<std::string> ListKeys(const std::string &prefix) const; // ListObjectsV2, path-style
 
 	const std::string &bucket() const {
 		return bucket_;

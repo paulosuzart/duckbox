@@ -12,14 +12,13 @@
 
 namespace duckbox {
 
-std::string EscapeSqlString(const std::string &s);
+std::string EscapeSqlString(const std::string &s); // single-quote doubling for SQL literals
 std::string ResolvePath(const std::string &base_dir, const std::string &path);
 void ExecOrThrow(ddb::Connection &con, const std::string &sql);
 
-// INSTALL/LOAD spec extensions, bootstrap memory SQL or ATTACH DuckLake.
-// Secret refs resolved here; values are not logged.
-void CheckBootstrapSql(const std::string &sql);
-void ConstrainLakeAgainstDaemon(const SandboxSpec &spec, const DaemonConfig &daemon);
+void CheckBootstrapSql(const std::string &sql); // CREATE/INSERT only; used for memory lake seed
+void ConstrainLakeAgainstDaemon(const SandboxSpec &spec, const DaemonConfig &daemon); // lake_allow; PolicyError
+// LOAD then INSTALL-on-miss. Disables enable_external_access after attach.
 void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std::string &spec_dir,
                         const SecretResolver &secrets, const DaemonConfig &daemon = {});
 

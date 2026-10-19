@@ -1,7 +1,7 @@
 #pragma once
 
-// HMAC-SHA256, SHA-256, and base64url. Used to sign opaque Flight SQL
-// prepared-statement handles so any node can verify them without session state.
+// Primitives for opaque Flight SQL handles and caller JWTs. Handles must be
+// verifiable on any node without session state; JWTs are HS256 only.
 
 #include <cstdint>
 #include <string>
@@ -11,18 +11,23 @@ namespace duckbox {
 
 std::string Base64UrlEncode(const void *data, size_t len);
 std::string Base64UrlEncode(const std::string &s);
-std::vector<uint8_t> Base64UrlDecode(const std::string &s); // throws Error on corrupt input
+// Throws Error on corrupt alphabet. `=` / newlines are ignored.
+std::vector<uint8_t> Base64UrlDecode(const std::string &s);
 
 std::string HmacSha256(const std::string &key, const std::string &data); // raw 32 bytes
 std::string Sha256Raw(const std::string &data);
 std::string Sha256Hex(const std::string &data);
 std::string HexEncode(const std::string &raw);
+// Length-mismatch returns false; comparison is constant-time when lengths match.
 bool ConstTimeEquals(const std::string &a, const std::string &b);
 std::string UriEncode(const std::string &s, bool encode_slash);
-// AES-256-GCM; key is SHA-256'd. Blob is nonce||ciphertext||tag.
+
+// AES-256-GCM. The passphrase is SHA-256'd to the key. Blob is nonce||ciphertext||tag.
 std::string AesGcmEncrypt(const std::string &key, const std::string &plaintext);
-std::string AesGcmDecrypt(const std::string &key, const std::string &blob); // HandleError on tag mismatch
-// HS256 only. Returns `sub`. Rejects alg=none and bad signatures (AuthError).
+// HandleError on truncated input or tag mismatch (does not distinguish which).
+std::string AesGcmDecrypt(const std::string &key, const std::string &blob);
+
+// HS256 only. Returns JWT `sub`. Rejects alg=none and bad signatures (AuthError).
 std::string VerifyJwtHs256(const std::string &token, const std::string &secret);
 
 } // namespace duckbox

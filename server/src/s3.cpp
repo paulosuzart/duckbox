@@ -88,6 +88,7 @@ S3Object S3ControlClient::Request(const std::string &method, const std::string &
 	headers["x-amz-content-sha256"] = payload_hash;
 	headers["x-amz-date"] = amz_date;
 	if (method == "PUT") {
+		// RustFS/SigV4 rejects the request if Content-Type is sent unsigned.
 		headers["content-type"] = "application/json";
 	}
 	for (auto &kv : extra) {
