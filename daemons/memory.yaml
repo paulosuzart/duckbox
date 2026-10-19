@@ -1,0 +1,12 @@
+# Control plane only: no lake, no table access. Lease S3 is optional.
+name: memory-dev
+listen: 127.0.0.1:4747
+auth:
+  mode: trusted
+limits:
+  handle_ttl_seconds: 300
+  idle_evict_ms: 300000
+  max_sandboxes: 600
+  max_sandboxes_per_key: 3
+  init_sql_timeout_ms: 5000
+handle_secret: duckbox-dev-secret

@@ -1,6 +1,11 @@
 name: analyst
 auth:
-  mode: trusted
+  key:
+    patterns:
+      - "tenant_{tenant_id}:{user}"
+      - "{tenant_id}:{user}"
+    strip_prefixes:
+      - tenant_
 resources:
   memory_limit: 256MB
   threads: 2
@@ -9,15 +14,19 @@ resources:
 lake:
   kind: ducklake
   alias: lake
-  catalog: "ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox"
+  catalog_env: DUCKBOX_LAKE_CATALOG
   data_path: "s3://duckbox-lake/data/"
   read_only: true
+  extensions:
+    - httpfs
+    - postgres
+    - ducklake
   s3:
     endpoint: "127.0.0.1:9000"
     url_style: path
     use_ssl: false
-    access_key: rustfsadmin
-    secret_key: rustfsadmin
+    access_key_env: DUCKBOX_S3_KEY
+    secret_key_env: DUCKBOX_S3_SECRET
     region: us-east-1
 tables:
   deals:

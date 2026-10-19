@@ -10,4 +10,4 @@ SELECT * FROM dbox.deals;
 SELECT * FROM duckbox_query('SELECT id, amount FROM deals');
 ```
 
-That work is deferred so the first runnable path can stay a single C++ server plus `pyarrow`.
+That work is deferred so the first runnable path can stay Arrow Flight SQL plus ADBC.

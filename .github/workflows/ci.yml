@@ -16,13 +16,11 @@ jobs:
   enforcement:
     name: Build and enforcement tests
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Install build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake g++ unzip curl ca-certificates
+      - name: Install Arrow Flight SQL + build tools
+        run: bash scripts/install_arrow.sh
       - name: Cache DuckDB deps
         uses: actions/cache@v4
         with:
@@ -34,3 +32,61 @@ jobs:
         run: make build CXX=g++
       - name: Enforcement tests
         run: make test
+      - name: Validate memory spec
+        run: make validate
+
+  ducklake-e2e:
+    name: DuckLake + S3 emulator (Flight SQL / ADBC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Arrow Flight SQL + build tools
+        run: bash scripts/install_arrow.sh
+      - name: Cache DuckDB deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            .deps
+            ~/.duckdb
+          key: duckdb-v1.5.6-nanoarrow-ducklake-${{ runner.os }}-${{ runner.arch }}
+      - name: Build
+        run: make build CXX=g++
+      - name: Start Postgres + RustFS
+        run: docker compose up -d
+      - name: Python deps
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r examples/python/requirements.txt
+      - name: Seed DuckLake
+        run: .venv/bin/python scripts/seed_ducklake.py
+      - name: Serve Flight SQL and isolation check
+        env:
+          DUCKBOX_S3_KEY: rustfsadmin
+          DUCKBOX_S3_SECRET: rustfsadmin
+          DUCKBOX_LAKE_CATALOG: ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox
+        run: |
+          ./build/duckbox serve --daemon ./daemons/ducklake.yaml --listen 127.0.0.1:4747 &
+          echo $! > /tmp/duckbox.pid
+          for i in $(seq 1 30); do
+            if .venv/bin/python -c "import socket; s=socket.create_connection(('127.0.0.1',4747),1)"; then
+              break
+            fi
+            sleep 1
+          done
+          .venv/bin/python examples/python/isolation_check.py \
+            --url grpc://127.0.0.1:4747 \
+            --spec policies/ducklake/analyst.yaml
+          .venv/bin/python examples/python/query.py \
+            --url grpc://127.0.0.1:4747 \
+            --spec policies/ducklake/analyst.yaml \
+            --key tenant_21:user_sergio \
+            --sql 'SELECT id, title, amount FROM deals WHERE id = ?' \
+            --params 1
+          kill "$(cat /tmp/duckbox.pid)" || true
+      - name: Compose logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Stop compose
+        if: always()
+        run: docker compose down -v

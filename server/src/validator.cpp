@@ -214,6 +214,10 @@ void ValidateSelect(ddb::SelectStatement &stmt, ValidationContext &ctx) {
 	ValidateQueryNode(*stmt.node, ctx);
 }
 
+void SqlValidator::Validate(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts, const Policy &policy) const {
+	ValidateStatements(stmts, policy);
+}
+
 void ValidateStatements(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts, const Policy &policy) {
 	if (stmts.empty()) {
 		throw SqlRejected("empty query");

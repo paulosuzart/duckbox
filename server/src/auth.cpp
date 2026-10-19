@@ -4,15 +4,13 @@
 namespace duckbox {
 
 TenantKey Authenticate(const Policy &policy, const AuthRequest &req) {
-	if (policy.auth_mode == AuthMode::Token) {
-		// STUB: JWT verification (issuer, signature, tenant claim) is not implemented.
-		// Any non-empty Bearer token is accepted and the tenant key still comes from
-		// the trusted header. mTLS / shared-secret for AuthMode::Trusted is also TODO.
-		if (req.bearer_token.empty()) {
-			throw AuthError("token auth requires Authorization: Bearer <token> (JWT verify is stubbed)");
-		}
+	// Auth mode lives on the daemon (control plane). Token/JWT gating is in
+	// Flight SQL Auth(); this only parses the spec's key extractor.
+	if (req.key_header.empty()) {
+		throw AuthError("missing tenant key (x-duckbox-key header or handshake username)");
 	}
-	return ParseTenantKey(req.key_header);
+	(void)req.bearer_token;
+	return ParseTenantKey(req.key_header, policy.key);
 }
 
 } // namespace duckbox

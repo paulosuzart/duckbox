@@ -7,7 +7,7 @@
 namespace duckbox {
 
 // Minimal YAML subset: mappings, sequences, scalars, comments, `|` blocks.
-// Policy files only — not a general YAML implementation.
+// Daemon config and sandbox specs only.
 struct YamlNode {
 	enum class Kind { Null, Scalar, Map, Seq };
 	Kind kind = Kind::Null;

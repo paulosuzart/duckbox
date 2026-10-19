@@ -1,18 +1,11 @@
 #pragma once
 
-#include "duckbox/policy.hpp"
-#include "duckbox/sandbox.hpp"
+// Debug HTTP POST /v1/query. Off unless daemon.debug_http is set.
 
-#include <string>
+#include "duckbox/flight_sql_server.hpp"
 
 namespace duckbox {
 
-struct ServerOptions {
-	std::string listen = "127.0.0.1:4747";
-	std::string policies_dir = "policies";
-};
-
-int RunServer(const ServerOptions &opt);
-int SeedFromPolicy(const std::string &policies_dir, const std::string &policy_name);
+void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<ISandboxRegistry> sandboxes);
 
 } // namespace duckbox

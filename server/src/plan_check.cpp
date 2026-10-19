@@ -142,6 +142,14 @@ void CheckLogicalPlan(ddb::LogicalOperator &plan, const Policy &policy, const Te
 	Walk(plan, policy, key);
 }
 
+void PlanChecker::Check(ddb::LogicalOperator &plan, const Policy &policy, const TenantKey &key) const {
+	CheckLogicalPlan(plan, policy, key);
+}
+
+void PlanChecker::Register(ddb::DBConfig &config, const Policy &policy, const TenantKey &key) const {
+	RegisterPlanGuard(config, policy, key);
+}
+
 void RegisterPlanGuard(ddb::DBConfig &config, const Policy &policy, const TenantKey &key) {
 	ddb::OptimizerExtension ext;
 	auto info = ddb::make_shared_ptr<PlanGuardInfo>();

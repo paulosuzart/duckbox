@@ -201,10 +201,9 @@ void BindExpr(ddb::unique_ptr<ddb::ParsedExpression> &expr, const ddb::case_inse
 	if (expr->GetExpressionClass() == ddb::ExpressionClass::PARAMETER) {
 		auto &p = expr->Cast<ddb::ParameterExpression>();
 		auto it = values.find(p.identifier);
-		if (it == values.end()) {
-			throw SqlRejected("unbound parameter $" + p.identifier);
+		if (it != values.end()) {
+			expr = ddb::make_uniq<ddb::ConstantExpression>(it->second);
 		}
-		expr = ddb::make_uniq<ddb::ConstantExpression>(it->second);
 		return;
 	}
 	if (expr->GetExpressionClass() == ddb::ExpressionClass::SUBQUERY) {
@@ -295,10 +294,8 @@ void ApplyMaxRows(ddb::QueryNode &node, int64_t max_rows) {
 }
 
 void BindNamedParameters(ddb::ParsedExpression &expr, const ddb::case_insensitive_map_t<ddb::Value> &values) {
-	ddb::unique_ptr<ddb::ParsedExpression> holder;
-	(void)holder;
-	(void)expr;
-	(void)values;
+	ddb::unique_ptr<ddb::ParsedExpression> holder = expr.Copy();
+	BindExpr(holder, values);
 }
 
 void BindNamedParametersInStatement(ddb::SQLStatement &stmt, const ddb::case_insensitive_map_t<ddb::Value> &values) {
@@ -311,7 +308,31 @@ void BindNamedParametersInStatement(ddb::SQLStatement &stmt, const ddb::case_ins
 	}
 }
 
-std::string RewriteUserSql(const std::string &sql, const Policy &policy, const TenantKey &key) {
+int CountUserPlaceholders(const std::string &sql) {
+	int n = 0;
+	for (char c : sql) {
+		if (c == '?') {
+			n++;
+		}
+	}
+	return n;
+}
+
+ddb::Value ValueFromKeyVar(const std::string &name, const std::string &raw) {
+	bool numeric = !raw.empty();
+	for (char c : raw) {
+		if (!std::isdigit(static_cast<unsigned char>(c))) {
+			numeric = false;
+			break;
+		}
+	}
+	if (numeric && (name == "tenant_id" || ddb::StringUtil::EndsWith(name, "_id"))) {
+		return ddb::Value::INTEGER(std::stoi(raw));
+	}
+	return ddb::Value(raw);
+}
+
+RewriteResult RewriteUserSqlDetailed(const std::string &sql, const Policy &policy, const TenantKey &key) {
 	auto parser = ParseSql(sql);
 	ValidateStatements(parser->statements, policy);
 	auto &select = parser->statements[0]->Cast<ddb::SelectStatement>();
@@ -321,9 +342,25 @@ std::string RewriteUserSql(const std::string &sql, const Policy &policy, const T
 	RewriteSelect(select, rctx);
 	ApplyMaxRows(*select.node, policy.resources.max_result_rows);
 	ddb::case_insensitive_map_t<ddb::Value> params;
-	params["tenant_id"] = ddb::Value::INTEGER(key.tenant_id_i32);
+	for (auto &kv : key.vars) {
+		params[kv.first] = ValueFromKeyVar(kv.first, kv.second);
+	}
+	if (!key.tenant_id.empty() && params.find("tenant_id") == params.end()) {
+		params["tenant_id"] = ddb::Value::INTEGER(key.tenant_id_i32);
+	}
 	BindNamedParametersInStatement(select, params);
-	return select.ToString();
+	RewriteResult out;
+	out.sql = select.ToString();
+	out.user_param_count = CountUserPlaceholders(sql);
+	return out;
+}
+
+std::string RewriteUserSql(const std::string &sql, const Policy &policy, const TenantKey &key) {
+	return RewriteUserSqlDetailed(sql, policy, key).sql;
+}
+
+RewriteResult SqlRewriter::Rewrite(const std::string &sql, const Policy &policy, const TenantKey &key) const {
+	return RewriteUserSqlDetailed(sql, policy, key);
 }
 
 } // namespace duckbox

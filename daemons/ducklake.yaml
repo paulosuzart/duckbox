@@ -1,0 +1,18 @@
+name: ducklake-dev
+listen: 127.0.0.1:4747
+auth:
+  mode: trusted
+limits:
+  handle_ttl_seconds: 300
+  idle_evict_ms: 300000
+  max_sandboxes: 600
+  max_sandboxes_per_key: 3
+  init_sql_timeout_ms: 8000
+handle_secret: duckbox-dev-secret
+# Optional S3 lease prefix (daemon's only credential). Omit for single-node draft.
+# lease:
+#   endpoint_env: DUCKBOX_LEASE_ENDPOINT
+#   bucket: duckbox-leases
+#   prefix: leases/
+#   access_key_env: DUCKBOX_LEASE_KEY
+#   secret_key_env: DUCKBOX_LEASE_SECRET

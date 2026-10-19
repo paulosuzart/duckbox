@@ -1,9 +1,11 @@
 #include "duckbox/policy.hpp"
+#include "duckbox/crypto.hpp"
 #include "duckbox/yaml.hpp"
 
 #include <algorithm>
 #include <cctype>
-#include <filesystem>
+#include <fstream>
+#include <sstream>
 
 namespace duckbox {
 namespace {
@@ -24,45 +26,48 @@ std::vector<std::string> StringList(const YamlNode *n) {
 				out.push_back(item.scalar);
 			}
 		}
-	} else if (n->kind == YamlNode::Kind::Scalar && !n->scalar.empty()) {
+	} else if (n->kind == YamlNode::Kind::Scalar && !n->scalar.empty() && n->scalar != "[]") {
 		out.push_back(n->scalar);
 	}
 	return out;
 }
 
-} // namespace
-
-const TablePolicy *Policy::FindTable(const std::string &name) const {
-	auto it = tables.find(Lower(name));
-	if (it == tables.end()) {
-		return nullptr;
+KeySpec LoadKeySpec(const YamlNode *n) {
+	KeySpec k;
+	if (!n) {
+		return k;
 	}
-	return &it->second;
+	k.regex = n->GetString("regex");
+	k.split = n->GetString("split");
+	k.regex_names = StringList(n->Get("names"));
+	if (k.regex_names.empty()) {
+		k.regex_names = StringList(n->Get("regex_names"));
+	}
+	k.split_names = StringList(n->Get("split_names"));
+	if (k.split_names.empty() && k.regex.empty()) {
+		k.split_names = StringList(n->Get("names"));
+	}
+	k.strip_prefixes = StringList(n->Get("strip_prefixes"));
+	if (auto *pats = n->Get("patterns")) {
+		k.patterns = StringList(pats);
+	}
+	auto single = n->GetString("pattern");
+	if (!single.empty()) {
+		k.patterns.insert(k.patterns.begin(), single);
+	}
+	return k;
 }
 
-bool Policy::FunctionAllowed(const std::string &name) const {
-	return functions.count(Lower(name)) > 0;
-}
-
-Policy LoadPolicyFile(const std::string &path) {
-	auto root = LoadYamlFile(path);
+SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const std::string &body) {
 	if (!root.IsMap()) {
-		throw PolicyError("policy root must be a mapping: " + path);
+		throw PolicyError("sandbox spec root must be a mapping: " + path);
 	}
-	Policy p;
+	SandboxSpec p;
+	p.source_path = path;
+	p.yaml_body = body;
 	p.name = root.GetString("name");
-	if (p.name.empty()) {
-		throw PolicyError("policy missing name: " + path);
-	}
 	if (auto *auth = root.Get("auth")) {
-		auto mode = Lower(auth->GetString("mode", "trusted"));
-		if (mode == "trusted") {
-			p.auth_mode = AuthMode::Trusted;
-		} else if (mode == "token") {
-			p.auth_mode = AuthMode::Token;
-		} else {
-			throw PolicyError("unknown auth.mode '" + mode + "'");
-		}
+		p.key = LoadKeySpec(auth->Get("key"));
 	}
 	if (auto *res = root.Get("resources")) {
 		p.resources.memory_limit = res->GetString("memory_limit", p.resources.memory_limit);
@@ -81,16 +86,23 @@ Policy LoadPolicyFile(const std::string &path) {
 		}
 		p.lake.alias = lake->GetString("alias", p.lake.alias);
 		p.lake.catalog = lake->GetString("catalog");
+		p.lake.catalog_env = lake->GetString("catalog_env");
 		p.lake.data_path = lake->GetString("data_path");
 		p.lake.read_only = lake->GetBool("read_only", true);
-		p.lake.init_sql_path = lake->GetString("init_sql");
+		p.lake.bootstrap_sql_path = lake->GetString("bootstrap_sql");
+		if (p.lake.bootstrap_sql_path.empty()) {
+			p.lake.bootstrap_sql_path = lake->GetString("init_sql");
+		}
+		p.lake.extensions = StringList(lake->Get("extensions"));
 		if (auto *s3 = lake->Get("s3")) {
 			p.lake.s3.endpoint = s3->GetString("endpoint");
+			p.lake.s3.endpoint_env = s3->GetString("endpoint_env");
 			p.lake.s3.url_style = s3->GetString("url_style", "path");
 			p.lake.s3.use_ssl = s3->GetBool("use_ssl", false);
-			p.lake.s3.access_key = s3->GetString("access_key");
-			p.lake.s3.secret_key = s3->GetString("secret_key");
+			p.lake.s3.access_key_env = s3->GetString("access_key_env");
+			p.lake.s3.secret_key_env = s3->GetString("secret_key_env");
 			p.lake.s3.region = s3->GetString("region", "us-east-1");
+			p.lake.s3.region_env = s3->GetString("region_env");
 		}
 	}
 	if (auto *tables = root.Get("tables")) {
@@ -111,40 +123,92 @@ Policy LoadPolicyFile(const std::string &path) {
 		p.functions.insert(Lower(fn));
 	}
 	p.deny_table_functions = root.GetBool("deny_table_functions", true);
+	p.require_prepared_statements = root.GetBool("require_prepared_statements", false);
+	p.init_sql = root.GetString("init_sql");
+	p.version = FingerprintSpec(p);
 	return p;
 }
 
-void PolicyStore::LoadDirectory(const std::string &dir) {
-	namespace fs = std::filesystem;
-	if (!fs::exists(dir)) {
-		throw PolicyError("policies directory does not exist: " + dir);
+} // namespace
+
+const TablePolicy *SandboxSpec::FindTable(const std::string &name) const {
+	auto it = tables.find(Lower(name));
+	if (it == tables.end()) {
+		return nullptr;
 	}
-	for (auto &entry : fs::directory_iterator(dir)) {
-		if (!entry.is_regular_file()) {
-			continue;
-		}
-		auto ext = entry.path().extension().string();
-		if (ext != ".yaml" && ext != ".yml") {
-			continue;
-		}
-		Add(LoadPolicyFile(entry.path().string()));
-	}
-	if (policies_.empty()) {
-		throw PolicyError("no YAML policies found in " + dir);
-	}
+	return &it->second;
 }
 
-void PolicyStore::Add(Policy policy) {
-	auto name = policy.name;
-	policies_[std::move(name)] = std::move(policy);
+bool SandboxSpec::FunctionAllowed(const std::string &name) const {
+	return functions.count(Lower(name)) > 0;
 }
 
-const Policy &PolicyStore::Get(const std::string &name) const {
-	auto it = policies_.find(name);
-	if (it == policies_.end()) {
-		throw PolicyError("unknown policy: " + name);
+std::string FingerprintSpec(const SandboxSpec &spec) {
+	std::ostringstream os;
+	os << spec.name << '\n' << spec.require_prepared_statements << '\n';
+	os << static_cast<int>(spec.lake.kind) << '|' << spec.lake.alias << '|' << spec.lake.catalog << '|'
+	   << spec.lake.catalog_env << '|' << spec.lake.data_path << '|' << spec.lake.bootstrap_sql_path << '\n';
+	os << spec.lake.s3.endpoint_env << '|' << spec.lake.s3.access_key_env << '|' << spec.lake.s3.secret_key_env << '\n';
+	for (auto &e : spec.lake.extensions) {
+		os << "ext:" << e << '\n';
 	}
-	return it->second;
+	for (auto &pat : spec.key.patterns) {
+		os << "p:" << pat << '\n';
+	}
+	os << "re:" << spec.key.regex << '\n';
+	for (auto &kv : spec.tables) {
+		os << kv.first << '|';
+		for (auto &c : kv.second.columns) {
+			os << c << ',';
+		}
+		os << '|';
+		for (auto &f : kv.second.filters) {
+			os << f << ';';
+		}
+		os << '\n';
+	}
+	for (auto &fn : spec.functions) {
+		os << fn << ',';
+	}
+	return Sha256Hex(os.str());
+}
+
+std::string SandboxInstanceId(const std::string &tenant_raw, const SandboxSpec &spec, const std::string &init_sql) {
+	return tenant_raw + "|" + spec.version + "|" + Sha256Hex(init_sql);
+}
+
+std::string DecodeSpecPayload(const std::string &raw) {
+	if (raw.empty()) {
+		return raw;
+	}
+	if (raw.find('\n') != std::string::npos || raw.find("name:") != std::string::npos ||
+	    raw.find("tables:") != std::string::npos) {
+		return raw;
+	}
+	try {
+		auto bytes = Base64UrlDecode(raw);
+		std::string decoded(bytes.begin(), bytes.end());
+		if (decoded.find("name:") != std::string::npos || decoded.find('\n') != std::string::npos) {
+			return decoded;
+		}
+	} catch (...) {
+	}
+	return raw;
+}
+
+SandboxSpec LoadSpecString(const std::string &yaml, const std::string &source) {
+	auto body = DecodeSpecPayload(yaml);
+	return SpecFromYaml(ParseYaml(body), source, body);
+}
+
+SandboxSpec LoadSpecFile(const std::string &path) {
+	std::ifstream in(path);
+	if (!in) {
+		throw PolicyError("cannot read sandbox spec " + path);
+	}
+	std::ostringstream os;
+	os << in.rdbuf();
+	return LoadSpecString(os.str(), path);
 }
 
 } // namespace duckbox

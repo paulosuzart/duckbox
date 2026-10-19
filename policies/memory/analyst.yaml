@@ -1,6 +1,11 @@
 name: analyst
 auth:
-  mode: trusted
+  key:
+    patterns:
+      - "tenant_{tenant_id}:{user}"
+      - "{tenant_id}:{user}"
+    strip_prefixes:
+      - tenant_
 resources:
   memory_limit: 256MB
   threads: 2
@@ -10,7 +15,8 @@ lake:
   kind: memory
   alias: memory
   read_only: true
-  init_sql: ../../examples/sql/memory_init.sql
+  bootstrap_sql: ../../examples/sql/memory_init.sql
+  extensions: []
 tables:
   deals:
     tenant_column: tenant_id
@@ -37,3 +43,4 @@ functions:
   - round
   - abs
 deny_table_functions: true
+require_prepared_statements: false

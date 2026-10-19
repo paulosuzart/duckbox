@@ -73,6 +73,16 @@ YamlNode ParseBlock(const std::vector<Line> &lines, size_t &i, int min_indent);
 
 YamlNode ParseValue(const std::vector<Line> &lines, size_t &i, const std::string &inline_value, int key_indent) {
 	if (!inline_value.empty() && inline_value != "|" && inline_value != ">") {
+		if (inline_value == "[]") {
+			YamlNode n;
+			n.kind = YamlNode::Kind::Seq;
+			return n;
+		}
+		if (inline_value == "{}") {
+			YamlNode n;
+			n.kind = YamlNode::Kind::Map;
+			return n;
+		}
 		return ParseScalar(inline_value);
 	}
 	if (inline_value == "|") {

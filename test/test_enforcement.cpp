@@ -1,11 +1,17 @@
+#include "duckbox/crypto.hpp"
+#include "duckbox/daemon_config.hpp"
 #include "duckbox/error.hpp"
+#include "duckbox/handle.hpp"
+#include "duckbox/init_sql.hpp"
 #include "duckbox/plan_check.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/sandbox.hpp"
+#include "duckbox/spec_validator.hpp"
 #include "duckbox/tenant_key.hpp"
 #include "duckbox/validator.hpp"
 
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
@@ -41,13 +47,18 @@ void ExpectThrowContains(const std::function<void()> &fn, const std::string &nee
 	}
 }
 
+duckbox::DaemonConfig TestDaemon() {
+	return duckbox::DefaultDaemonConfig();
+}
+
 duckbox::Policy TestPolicy() {
 	duckbox::Policy p;
 	p.name = "analyst";
-	p.auth_mode = duckbox::AuthMode::Trusted;
 	p.resources.max_result_rows = 100;
 	p.lake.kind = duckbox::LakeKind::Memory;
-	p.lake.init_sql_path = std::string(DUCKBOX_SOURCE_DIR) + "/examples/sql/memory_init.sql";
+	p.lake.alias = "memory";
+	p.lake.bootstrap_sql_path = std::string(DUCKBOX_SOURCE_DIR) + "/examples/sql/memory_init.sql";
+	p.key.patterns = {"tenant_{tenant_id}:{user}", "{tenant_id}:{user}"};
 	p.deny_table_functions = true;
 	duckbox::TablePolicy deals;
 	deals.name = "deals";
@@ -58,6 +69,7 @@ duckbox::Policy TestPolicy() {
 	for (auto *fn : {"count", "count_star", "sum", "avg", "min", "max", "lower", "upper", "coalesce"}) {
 		p.functions.insert(fn);
 	}
+	p.version = FingerprintSpec(p);
 	return p;
 }
 
@@ -65,20 +77,68 @@ duckbox::Policy TestPolicy() {
 
 int main() {
 	using namespace duckbox;
+	auto daemon = TestDaemon();
 	auto policy = TestPolicy();
-	auto key_a = ParseTenantKey("tenant_21:user_sergio");
-	auto key_b = ParseTenantKey("tenant_22:user_kim");
+	auto key_a = ParseTenantKey("tenant_21:user_sergio", policy.key);
+	auto key_b = ParseTenantKey("tenant_22:user_kim", policy.key);
 	Expect(key_a.tenant_id_i32 == 21, "parse tenant 21");
 	Expect(key_b.tenant_id == "22", "parse tenant 22");
+	Expect(key_a.Var("user") == "user_sergio", "key extracts user");
+
+	{
+		ValidateDaemonOrThrow(daemon);
+		auto loaded_daemon = LoadDaemonFile(std::string(DUCKBOX_SOURCE_DIR) + "/daemons/memory.yaml");
+		Expect(loaded_daemon.listen.find("4747") != std::string::npos, "daemon yaml listen");
+		Expect(loaded_daemon.lease.bucket.empty(), "memory daemon has no lease/lake credentials");
+		auto bad_path = "/tmp/duckbox-bad-daemon-lake.yaml";
+		{
+			std::ofstream o(bad_path);
+			o << "name: bad\nlisten: 127.0.0.1:9\nhandle_secret: x\nlake:\n  kind: memory\n";
+		}
+		ExpectThrowContains([&] { LoadDaemonFile(bad_path); }, "control-plane",
+		                    "daemon yaml with lake is rejected");
+	}
 
 	auto yaml_path = std::string(DUCKBOX_SOURCE_DIR) + "/policies/memory/analyst.yaml";
 	auto loaded = LoadPolicyFile(yaml_path);
+	{
+		std::ifstream in(yaml_path);
+		std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		auto b64 = Base64UrlEncode(body);
+		auto from_b64 = LoadSpecString(b64, "<b64>");
+		Expect(from_b64.name == "analyst", "base64url spec payload decodes");
+		Expect(from_b64.FindTable("deals") != nullptr, "base64url spec has deals");
+	}
 	Expect(loaded.name == "analyst", "yaml policy name");
 	Expect(loaded.FindTable("deals") != nullptr, "yaml deals table");
 	Expect(loaded.FindTable("deals")->filters.size() == 2, "yaml deals filters parsed");
 	Expect(loaded.FunctionAllowed("sum"), "yaml sum allowlisted");
+	Expect(!loaded.key.Empty(), "yaml auth.key present");
 
-	// --- bypass attempts: must be rejected at AST validation ---
+	SpecValidator validator;
+	auto static_issues = validator.ValidateStatic(loaded);
+	Expect(static_issues.empty(), "memory analyst spec is statically valid");
+
+	auto ducklake_spec =
+	    LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/analyst.yaml");
+	Expect(ducklake_spec.lake.kind == LakeKind::Ducklake, "ducklake spec kind");
+	Expect(ducklake_spec.lake.catalog_env == "DUCKBOX_LAKE_CATALOG", "catalog via env name, not inline");
+	Expect(ducklake_spec.lake.s3.access_key_env == "DUCKBOX_S3_KEY", "s3 key is env name");
+	Expect(validator.ValidateStatic(ducklake_spec).empty(), "ducklake spec is statically valid");
+
+	ExpectThrowContains(
+	    [&] {
+		    auto bad = loaded;
+		    bad.key = KeySpec{};
+		    bad.tables.clear();
+		    auto iss = validator.ValidateStatic(bad);
+		    if (iss.size() < 2) {
+			    throw std::runtime_error("expected multiple field-path errors, got " + std::to_string(iss.size()));
+		    }
+		    throw SpecError(iss);
+	    },
+	    "auth.key", "static validation reports field paths");
+
 	const std::vector<std::pair<std::string, std::string>> rejects = {
 	    {"INSERT INTO deals VALUES (21, 9, 'x', 1, false)", "only SELECT"},
 	    {"SELECT 1; SELECT 2", "single statement"},
@@ -114,28 +174,27 @@ int main() {
 		}
 	}
 
-	// Valid rewrite wraps deals and binds tenant 21.
 	auto rewritten = RewriteUserSql("SELECT id, title, amount FROM deals", policy, key_a);
 	Expect(rewritten.find("tenant_id") != std::string::npos, "rewrite mentions tenant_id");
 	Expect(rewritten.find("21") != std::string::npos, "rewrite binds tenant 21");
 	Expect(rewritten.find("_deleted") != std::string::npos, "rewrite mentions _deleted");
 
-	// CTE: inner deals is rewritten; outer cte name is not treated as a base table.
 	auto cte_sql = RewriteUserSql("WITH d AS (SELECT id, amount FROM deals) SELECT sum(amount) FROM d", policy, key_a);
-	Expect(cte_sql.find("FROM d") != std::string::npos || cte_sql.find("from d") != std::string::npos ||
-	           cte_sql.find("d") != std::string::npos,
-	       "cte name preserved");
+	Expect(cte_sql.find("d") != std::string::npos, "cte name preserved");
 	Expect(cte_sql.find("21") != std::string::npos, "cte body still tenant-filtered");
 
-	// User extra predicate cannot drop the mandatory filter.
 	auto sneaky = RewriteUserSql("SELECT * FROM deals WHERE tenant_id = 22 OR 1=1", policy, key_a);
 	Expect(sneaky.find("21") != std::string::npos, "mandatory tenant filter still present");
 
-	// --- execute with isolation ---
-	TenantSandbox box_a(policy, key_a, std::string(DUCKBOX_SOURCE_DIR) + "/policies/memory");
-	TenantSandbox box_b(policy, key_b, std::string(DUCKBOX_SOURCE_DIR) + "/policies/memory");
+	auto param_rw = RewriteUserSqlDetailed("SELECT id FROM deals WHERE id = ?", policy, key_a);
+	Expect(param_rw.user_param_count >= 1, "user ? remains a parameter");
+	Expect(param_rw.sql.find("21") != std::string::npos, "tenant still bound as constant");
 
-	TenantSandbox box_yaml(loaded, key_a, std::string(DUCKBOX_SOURCE_DIR) + "/policies/memory");
+	std::string spec_dir = std::string(DUCKBOX_SOURCE_DIR) + "/policies/memory";
+	TenantSandbox box_a(daemon, policy, key_a, "", spec_dir);
+	TenantSandbox box_b(daemon, policy, key_b, "", spec_dir);
+	TenantSandbox box_yaml(daemon, loaded, key_a, "", spec_dir);
+
 	auto yaml_out = box_yaml.Execute("SELECT id, title, amount FROM deals ORDER BY id");
 	Expect(yaml_out.row_count == 1, "yaml policy execute tenant 21");
 
@@ -150,8 +209,6 @@ int main() {
 	Expect(!out_a.arrow_ipc.empty(), "arrow ipc produced");
 
 	auto bypass_a = box_a.Execute("SELECT id, title FROM deals WHERE tenant_id = 22");
-	Expect(bypass_a.row_count == 0 || bypass_a.text_table.find("bravo") == std::string::npos,
-	       "WHERE tenant_id=22 still cannot see tenant 22");
 	Expect(bypass_a.text_table.find("bravo") == std::string::npos, "no bravo rows on bypass attempt");
 
 	auto cte_out = box_a.Execute("WITH d AS (SELECT amount FROM deals) SELECT sum(amount) AS total FROM d");
@@ -160,6 +217,87 @@ int main() {
 	ExpectThrowContains([&] { box_a.Execute("SELECT * FROM secrets"); }, "allowlisted", "secrets table denied at exec");
 	ExpectThrowContains([&] { box_a.Execute("SELECT * FROM read_parquet('x.parquet')"); }, "table functions",
 	                    "read_parquet denied at exec");
+
+	// Parameter binding: typed values, no SQL interpolation.
+	{
+		auto rw = RewriteUserSqlDetailed("SELECT id, title FROM deals WHERE id = ?", policy, key_a);
+		std::vector<ddb::Value> params;
+		params.push_back(ddb::Value::INTEGER(1));
+		auto got = box_a.ExecuteRewritten(rw.sql, params);
+		Expect(got.row_count == 1, "bound id=1 returns one row");
+		Expect(got.text_table.find("alpha deal") != std::string::npos, "bound param hits alpha");
+		params[0] = ddb::Value::INTEGER(3);
+		auto miss = box_a.ExecuteRewritten(rw.sql, params);
+		Expect(miss.row_count == 0 || miss.text_table.find("bravo") == std::string::npos, "id=3 is not tenant 21");
+	}
+
+	// Signed handle tampering.
+	{
+		HmacHandleSigner signer("test-secret", 60);
+		StatementHandle h;
+		h.rewritten_sql = "SELECT 1";
+		h.tenant_raw = "tenant_21:user_sergio";
+		h.spec_name = "analyst";
+		h.spec_version = policy.version;
+		h.policy_yaml = "name: analyst";
+		auto tok = signer.Sign(h);
+		auto ok = signer.Verify(tok);
+		Expect(ok.rewritten_sql == h.rewritten_sql, "handle roundtrip");
+		auto bad = tok;
+		if (bad.size() > 8) {
+			bad[5] = bad[5] == 'A' ? 'B' : 'A';
+		}
+		ExpectThrowContains([&] { signer.Verify(bad); }, "signature", "tampered handle rejected");
+		auto other = h;
+		other.tenant_raw = "tenant_22:user_kim";
+		auto tok2 = signer.Sign(other);
+		Expect(tok2 != tok, "different tenant signs differently");
+		StatementHandle expired = h;
+		expired.expires_at_unix = 1;
+		auto tok3 = signer.Sign(expired);
+		ExpectThrowContains([&] { signer.Verify(tok3); }, "expired", "expired handle rejected");
+	}
+
+	// initSQL allowlist + warmup rerun.
+	{
+		InitSqlGuard guard;
+		ExpectThrowContains([&] { guard.Check("ATTACH 'foo.db' AS x", daemon, policy); }, "ATTACH",
+		                    "initSQL ATTACH denied");
+		ExpectThrowContains([&] { guard.Check("INSTALL httpfs", daemon, policy); }, "INSTALL", "initSQL INSTALL denied");
+		ExpectThrowContains([&] { guard.Check("COPY deals TO 'x.csv'", daemon, policy); }, "COPY",
+		                    "initSQL COPY denied");
+		ExpectThrowContains([&] { guard.Check("SET enable_external_access=true", daemon, policy); }, "security",
+		                    "initSQL security SET denied");
+		guard.Check("CREATE TEMP VIEW v AS SELECT 1 AS x", daemon, policy);
+
+		TenantSandbox box(daemon, policy, key_a, "CREATE TEMP VIEW v AS SELECT 1 AS x", spec_dir);
+		box.Warmup(true);
+		Expect(box.warmup_count() == 1, "first warmup");
+		ExpectThrowContains([&] { box.Execute("SELECT * FROM v"); }, "allowlisted",
+		                    "initSQL view hidden unless policy whitelists it");
+		box.Passivate();
+		Expect(!box.Warm(), "passivate frees DuckDB");
+		box.Warmup(false);
+		Expect(box.warmup_count() == 2, "warmup reruns after passivate");
+		Expect(box.Warm(), "warm after second warmup");
+	}
+
+	// Per-connection policy hash: different policy => different sandbox; cache skips second lake check.
+	{
+		auto leases = std::make_shared<SingleNodeLeaseManager>();
+		SandboxRegistry reg(daemon, leases);
+		auto a = reg.Get(policy, key_a, "", spec_dir);
+		Expect(reg.LakeValidated(policy.version), "lake validation cached by policy hash");
+		auto a2 = reg.Get(policy, key_a, "", spec_dir);
+		Expect(a.get() == a2.get(), "same key+policy+initSQL reuses sandbox");
+		auto p2 = policy;
+		p2.name = "analyst-tight";
+		p2.resources.max_result_rows = 10;
+		p2.version = FingerprintSpec(p2);
+		auto b = reg.Get(p2, key_a, "", spec_dir);
+		Expect(a.get() != b.get(), "different policy hash is a separate sandbox");
+		Expect(reg.Size() >= 2, "registry holds both policy hashes");
+	}
 
 	std::cout << "passed=" << g_passed << " failed=" << g_failed << "\n";
 	return g_failed == 0 ? 0 : 1;

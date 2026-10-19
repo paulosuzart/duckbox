@@ -25,17 +25,31 @@ if(NOT EXISTS "${DUCKBOX_DEPS}/duckdb/include/duckdb/parser/parser.hpp" OR
   endif()
 endif()
 
+find_package(Arrow CONFIG REQUIRED)
+find_package(ArrowFlight CONFIG REQUIRED)
+find_package(ArrowFlightSql CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
+
 set(DUCKBOX_SOURCES
   server/src/yaml.cpp
+  server/src/error.cpp
+  server/src/crypto.cpp
+  server/src/secrets.cpp
   server/src/policy.cpp
+  server/src/daemon_config.cpp
   server/src/tenant_key.cpp
   server/src/validator.cpp
   server/src/rewriter.cpp
   server/src/plan_check.cpp
   server/src/lease.cpp
+  server/src/lake.cpp
+  server/src/init_sql.cpp
+  server/src/spec_validator.cpp
   server/src/sandbox.cpp
   server/src/arrow_ipc.cpp
   server/src/auth.cpp
+  server/src/handle.cpp
+  server/src/flight_sql_server.cpp
   server/src/http_server.cpp)
 
 add_library(duckbox_core STATIC ${DUCKBOX_SOURCES})
@@ -48,6 +62,11 @@ target_compile_definitions(duckbox_core PUBLIC DUCKBOX_DUCKDB_VERSION="${DUCKBOX
 if(NOT MSVC)
   target_compile_options(duckbox_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
+target_link_libraries(duckbox_core PUBLIC
+  Arrow::arrow_shared
+  ArrowFlight::arrow_flight_shared
+  ArrowFlightSql::arrow_flight_sql_shared
+  OpenSSL::Crypto)
 
 set(_duckdb_libdir "${DUCKBOX_DEPS}/duckdb/lib")
 set(_duckdb_libs
