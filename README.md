@@ -46,19 +46,23 @@ brew install apache-arrow openssl cmake
 ```
 
 ```bash
-bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp + nlohmann/json
+bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp + nlohmann/json + jwt-cpp + CLI11 + cppcodec
 bash scripts/install_aws_sdk.sh     # AWS SDK for C++ (S3 only, vcpkg) — registry/lease conditional PUTs
+                                    # First run takes several minutes (vcpkg builds aws-sdk-cpp S3).
 ```
 
 ### 2. Build
 
 ```bash
+# Linux
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
 cmake --build build --parallel
 # equivalent: make build CXX=g++
-```
 
-On macOS you can omit `-DCMAKE_CXX_COMPILER=g++` and use the default AppleClang.
+# macOS — omit -DCMAKE_CXX_COMPILER=g++; AppleClang is the default
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
 
 ### 3. Tests (no Docker)
 
@@ -75,6 +79,8 @@ docker compose up -d --wait
 python3 -m venv .venv
 .venv/bin/pip install -r examples/python/requirements.txt
 
+# Set these in the terminal that runs `serve` (the daemon reads them at warmup).
+# The CLI / quickstart terminal does not need them.
 export DUCKBOX_S3_KEY=rustfsadmin DUCKBOX_S3_SECRET=rustfsadmin
 export DUCKBOX_HANDLE_SECRET=duckbox-dev-secret
 export DUCKBOX_LAKE_CATALOG='ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox'
@@ -84,7 +90,7 @@ export DUCKBOX_LAKE_CATALOG='ducklake:postgres:dbname=ducklake host=127.0.0.1 po
 ./build/duckbox serve --daemon ./daemons/ducklake.yaml --listen 127.0.0.1:4747
 ```
 
-In another terminal (same env vars are not required for the CLI; the daemon already has them):
+In another terminal (the CLI does not need those env vars; they belong on the `serve` process):
 
 ```bash
 ./build/duckbox sandbox create --url grpc://127.0.0.1:4747 \
@@ -109,6 +115,8 @@ print(db.query("SELECT id, title, amount FROM deals"))
 ```
 
 `DUCKBOX_URL` / `DUCKBOX_SPEC` / `DUCKBOX_SANDBOX` override the defaults. Memory lake (no Docker): serve `daemons/memory.yaml` and set `DUCKBOX_SPEC=policies/memory/analyst.yaml`. A flag-oriented one-shot lives at `examples/python/query_cli.py`.
+
+`lake.bootstrap_sql` file paths are **relative to the spec file**, not the working directory (`policies/memory/analyst.yaml` uses `../../examples/sql/memory_init.sql`). Inlined SQL is also accepted. The daemon never re-reads that host path at warmup — LoadSpecFile inlines the file first.
 
 **RustFS** is the emulator in `docker-compose.yml` to match the product S3 target; if the image is unusable, MinIO is the fallback (same path-style endpoint). Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads — that client is **aws-sdk-cpp S3Client** (vcpkg, S3 component only) with endpoint override and path-style addressing. Arrow `S3FileSystem` has no conditional-write headers, so it is not used for the control plane. Tests inject an in-memory `S3ControlClient`.
 
