@@ -25,7 +25,7 @@ attachments:
 
 ## Run everything locally (macOS and Linux)
 
-Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (compose → seed → serve → CLI create → quickstart). Job `enforcement` runs the test commands.
+Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (compose → seed → serve → CLI create → quickstart). Job `enforcement` runs the test commands. Job `macos-arm64` builds with AppleClang and runs unit tests (no Docker).
 
 ### Prerequisites
 

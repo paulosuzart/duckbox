@@ -62,10 +62,12 @@ if [[ ! -x "$VCPKG_ROOT/vcpkg" ]]; then
   "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
 fi
 
-# vcpkg's compiler probe uses `c++`, which may be Clang without libstdc++.
-# Pin GNU so the S3 SDK matches duckbox's g++ link.
-export CC="${CC:-gcc}"
-export CXX="${CXX:-g++}"
+# Linux: vcpkg's compiler probe uses `c++`, which may be Clang without libstdc++.
+# Pin GNU so the S3 SDK matches duckbox's g++ link. macOS uses AppleClang.
+if [[ "$os" == "linux" ]]; then
+  export CC="${CC:-gcc}"
+  export CXX="${CXX:-g++}"
+fi
 
 echo "Installing aws-sdk-cpp[s3] from vcpkg.json ($TRIPLET) CC=$CC CXX=$CXX"
 "$VCPKG_ROOT/vcpkg" install --vcpkg-root="$VCPKG_ROOT" --triplet="$TRIPLET" \

@@ -20,7 +20,7 @@ if [[ "$os" == "Linux" ]]; then
   $SUDO apt-get install -y libarrow-dev libarrow-flight-dev libarrow-flight-sql-dev
   echo "Arrow $(pkg-config --modversion arrow) with Flight SQL"
 elif [[ "$os" == "Darwin" ]]; then
-  brew install apache-arrow openssl cmake
+  brew install apache-arrow openssl cmake ninja
   echo "Arrow via Homebrew (Flight SQL enabled in recent formulae)"
 else
   echo "Install Apache Arrow C++ with ARROW_FLIGHT=ON ARROW_FLIGHT_SQL=ON" >&2
