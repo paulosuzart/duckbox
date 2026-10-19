@@ -113,6 +113,11 @@ cases:
     expect: deny
     reason: table functions
 
+  - id: duckdb_secrets
+    sql: "SELECT * FROM duckdb_secrets()"
+    expect: deny
+    reason: table functions
+
   - id: copy_out
     sql: "COPY deals TO 'out.csv'"
     expect: deny

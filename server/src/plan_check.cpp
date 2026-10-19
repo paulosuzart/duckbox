@@ -64,8 +64,10 @@ bool IsDuckdbCatalogScan(const std::string &lower) {
 	if (!ddb::StringUtil::StartsWith(lower, "duckdb_")) {
 		return false;
 	}
-	// Never treat secret introspection as catalog I/O.
-	return lower.find("secret") == std::string::npos;
+	// DuckLake 1.5.6 metadata probe uses duckdb_secrets (and duckdb_tables,
+	// duckdb_columns, …) against the instance it just attached. User SQL
+	// naming these is still denied at the AST (deny_table_functions).
+	return true;
 }
 
 bool ValuesEqual(const ddb::Value &got, const ddb::Value &want) {

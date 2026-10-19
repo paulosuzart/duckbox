@@ -51,13 +51,17 @@ void duckbox::test::RunPlanGuardTests() {
 	}
 	{
 		auto get = MakeScan("duckdb_secrets", {});
-		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "denied scan",
-		                    "duckdb_secrets is never catalog I/O");
+		ExpectPlanOk(*get, lake, key_a, "DuckLake metadata probe uses duckdb_secrets");
 	}
 	{
 		auto get = MakeScan("duckdb_tables", {});
 		ExpectThrowContains([&] { CheckLogicalPlan(*get, policy, key_a); }, "denied scan",
 		                    "memory spec rejects duckdb_tables in the plan");
+	}
+	{
+		auto get = MakeScan("duckdb_secrets", {});
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, policy, key_a); }, "denied scan",
+		                    "memory spec rejects duckdb_secrets in the plan");
 	}
 	{
 		auto get = MakeScan("ducklake_scan", {"deals"});

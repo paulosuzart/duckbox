@@ -2,7 +2,8 @@
 
 // Optimizer-extension plan guard. Last line of defense after rewrite: a CTE
 // name must not become a lake scan. Scan functions are an allowlist
-// (seq_scan / ducklake_scan / postgres_* / pragma_table_info). Bound tables
+// (seq_scan / ducklake_scan / postgres_* / duckdb_* on a ducklake spec /
+// pragma_table_info). Bound tables
 // come from GetTable()/ParentCatalog(). Bound postgres_* must match the spec
 // alias (or __ducklake_metadata_<alias>) exactly; unbound postgres_* is
 // allowed only when a parameter DSN matches the spec attach. ducklake_scan of
