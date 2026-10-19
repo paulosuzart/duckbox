@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Download DuckDB 1.5.6 headers + static libs, cpp-httplib, yaml-cpp,
-# nlohmann/json, jwt-cpp, and CLI11. AWS SDK C++ (S3) is scripts/install_aws_sdk.sh (vcpkg).
+# nlohmann/json, jwt-cpp, CLI11, and cppcodec.
+# AWS SDK C++ (S3) is scripts/install_aws_sdk.sh (vcpkg).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -51,10 +52,12 @@ YAML_CPP_VERSION="${YAML_CPP_VERSION:-0.8.0}"
 NLOHMANN_JSON_VERSION="${NLOHMANN_JSON_VERSION:-v3.11.3}"
 JWT_CPP_VERSION="${JWT_CPP_VERSION:-v0.7.0}"
 CLI11_VERSION="${CLI11_VERSION:-v2.4.2}"
+CPPCODEC_VERSION="${CPPCODEC_VERSION:-v0.2}"
 yaml_tar="$DEPS/cache/yaml-cpp-${YAML_CPP_VERSION}.tar.gz"
 json_hdr="$DEPS/cache/nlohmann-json-${NLOHMANN_JSON_VERSION}.hpp"
 jwt_tar="$DEPS/cache/jwt-cpp-${JWT_CPP_VERSION}.tar.gz"
 cli11_hdr="$DEPS/cache/CLI11-${CLI11_VERSION}.hpp"
+codec_tar="$DEPS/cache/cppcodec-${CPPCODEC_VERSION}.tar.gz"
 download "https://github.com/duckdb/duckdb/archive/refs/tags/${DUCKDB_VERSION}.tar.gz" "$src_tar"
 download "$base/$lib_zip" "$lib_zip_path"
 download "https://raw.githubusercontent.com/yhirose/cpp-httplib/${HTTP_LIB_VERSION}/httplib.h" "$DEPS/httplib/httplib.h"
@@ -62,6 +65,7 @@ download "https://github.com/jbeder/yaml-cpp/archive/refs/tags/${YAML_CPP_VERSIO
 download "https://github.com/nlohmann/json/releases/download/${NLOHMANN_JSON_VERSION}/json.hpp" "$json_hdr"
 download "https://github.com/Thalhammer/jwt-cpp/archive/refs/tags/${JWT_CPP_VERSION}.tar.gz" "$jwt_tar"
 download "https://github.com/CLIUtils/CLI11/releases/download/${CLI11_VERSION}/CLI11.hpp" "$cli11_hdr"
+download "https://github.com/tplgy/cppcodec/archive/refs/tags/${CPPCODEC_VERSION}.tar.gz" "$codec_tar"
 mkdir -p "$DEPS/nlohmann/nlohmann"
 cp -f "$json_hdr" "$DEPS/nlohmann/nlohmann/json.hpp"
 mkdir -p "$DEPS/cli11/CLI"
@@ -78,6 +82,16 @@ if [[ ! -f "$DEPS/jwt-cpp/include/jwt-cpp/jwt.h" ]]; then
   rm -rf "$DEPS/jwt-cpp"
   mkdir -p "$DEPS/jwt-cpp"
   cp -a "$src_root/include" "$DEPS/jwt-cpp/include"
+  rm -rf "$tmp"
+fi
+if [[ ! -f "$DEPS/cppcodec/cppcodec/base64_url_unpadded.hpp" ]]; then
+  echo "Extracting cppcodec ${CPPCODEC_VERSION}"
+  tmp="$(mktemp -d)"
+  tar -xzf "$codec_tar" -C "$tmp"
+  src_root="$(find "$tmp" -maxdepth 1 -type d -name 'cppcodec-*' | head -1)"
+  rm -rf "$DEPS/cppcodec"
+  mkdir -p "$DEPS/cppcodec"
+  cp -a "$src_root/cppcodec" "$DEPS/cppcodec/cppcodec"
   rm -rf "$tmp"
 fi
 

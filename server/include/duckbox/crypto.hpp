@@ -11,7 +11,8 @@ namespace duckbox {
 
 std::string Base64UrlEncode(const void *data, size_t len);
 std::string Base64UrlEncode(const std::string &s);
-// Throws Error on corrupt alphabet. `=` / newlines are ignored.
+// cppcodec base64_url_unpadded. Throws Error on a corrupt alphabet.
+// `=` / newlines are stripped before decode (handles never emit padding).
 std::vector<uint8_t> Base64UrlDecode(const std::string &s);
 
 std::string HmacSha256(const std::string &key, const std::string &data); // raw 32 bytes

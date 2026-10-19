@@ -19,7 +19,8 @@ if(NOT EXISTS "${DUCKBOX_DEPS}/duckdb/include/duckdb/parser/parser.hpp" OR
    NOT EXISTS "${DUCKBOX_DEPS}/yaml-cpp-0.8.0/CMakeLists.txt" OR
    NOT EXISTS "${DUCKBOX_DEPS}/nlohmann/nlohmann/json.hpp" OR
    NOT EXISTS "${DUCKBOX_DEPS}/jwt-cpp/include/jwt-cpp/jwt.h" OR
-   NOT EXISTS "${DUCKBOX_DEPS}/cli11/CLI/CLI.hpp")
+   NOT EXISTS "${DUCKBOX_DEPS}/cli11/CLI/CLI.hpp" OR
+   NOT EXISTS "${DUCKBOX_DEPS}/cppcodec/cppcodec/base64_url_unpadded.hpp")
   message(STATUS "Fetching DuckDB ${DUCKBOX_DUCKDB_VERSION} and httplib into ${DUCKBOX_DEPS}")
   execute_process(
     COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/fetch_deps.sh"
@@ -91,6 +92,21 @@ if(NOT EXISTS "${DUCKBOX_DEPS}/cli11/CLI/CLI.hpp")
     file(MAKE_DIRECTORY "${DUCKBOX_DEPS}/cli11/CLI")
     file(COPY "${cli11_SOURCE_DIR}/CLI11.hpp" DESTINATION "${DUCKBOX_DEPS}/cli11/CLI")
     file(RENAME "${DUCKBOX_DEPS}/cli11/CLI/CLI11.hpp" "${DUCKBOX_DEPS}/cli11/CLI/CLI.hpp")
+  endif()
+endif()
+
+# cppcodec: Base64URL (unpadded) for handles, spec payloads, JWT test helpers.
+if(NOT EXISTS "${DUCKBOX_DEPS}/cppcodec/cppcodec/base64_url_unpadded.hpp")
+  include(FetchContent)
+  FetchContent_Declare(
+    cppcodec
+    URL https://github.com/tplgy/cppcodec/archive/refs/tags/v0.2.tar.gz
+    URL_HASH SHA256=0edaea2a9d9709d456aa99a1c3e17812ed130f9ef2b5c2d152c230a5cbc5c482)
+  FetchContent_GetProperties(cppcodec)
+  if(NOT cppcodec_POPULATED)
+    FetchContent_Populate(cppcodec)
+    file(MAKE_DIRECTORY "${DUCKBOX_DEPS}/cppcodec")
+    file(COPY "${cppcodec_SOURCE_DIR}/cppcodec" DESTINATION "${DUCKBOX_DEPS}/cppcodec")
   endif()
 endif()
 
@@ -270,6 +286,7 @@ endfunction()
 duckbox_link_duckdb(duckbox_core)
 
 add_executable(duckbox server/src/main.cpp)
+target_include_directories(duckbox PRIVATE ${DUCKBOX_DEPS}/cli11)
 target_link_libraries(duckbox PRIVATE duckbox_core)
 duckbox_link_duckdb(duckbox)
 

@@ -2,6 +2,7 @@
 #include "duckbox/error.hpp"
 
 #include <jwt-cpp/traits/nlohmann-json/defaults.h>
+#include <cppcodec/base64_url_unpadded.hpp>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -10,36 +11,16 @@
 
 #include <chrono>
 #include <cstring>
-#include <limits>
 #include <system_error>
 
 namespace duckbox {
 
 std::string Base64UrlEncode(const void *data, size_t len) {
+	// cppcodec base64_url_unpadded: JWT/handle alphabet, no homemade +/=/_ map.
 	if (len == 0) {
 		return "";
 	}
-	if (len > static_cast<size_t>(std::numeric_limits<int>::max())) {
-		throw Error("base64url input too large");
-	}
-	std::string stdb64(static_cast<size_t>(((len + 2) / 3) * 4) + 1, '\0');
-	int n = EVP_EncodeBlock(reinterpret_cast<unsigned char *>(&stdb64[0]),
-	                        static_cast<const unsigned char *>(data), static_cast<int>(len));
-	if (n < 0) {
-		throw Error("base64url encode failed");
-	}
-	stdb64.resize(static_cast<size_t>(n));
-	for (char &c : stdb64) {
-		if (c == '+') {
-			c = '-';
-		} else if (c == '/') {
-			c = '_';
-		}
-	}
-	while (!stdb64.empty() && stdb64.back() == '=') {
-		stdb64.pop_back();
-	}
-	return stdb64;
+	return cppcodec::base64_url_unpadded::encode(static_cast<const uint8_t *>(data), len);
 }
 
 std::string Base64UrlEncode(const std::string &s) {
@@ -47,48 +28,22 @@ std::string Base64UrlEncode(const std::string &s) {
 }
 
 std::vector<uint8_t> Base64UrlDecode(const std::string &s) {
-	std::string stdb64;
-	stdb64.reserve(s.size() + 4);
+	std::string cleaned;
+	cleaned.reserve(s.size());
 	for (unsigned char c : s) {
 		if (c == '=' || c == '\n' || c == '\r') {
 			continue;
 		}
-		if (c == '-') {
-			stdb64.push_back('+');
-		} else if (c == '_') {
-			stdb64.push_back('/');
-		} else {
-			stdb64.push_back(static_cast<char>(c));
-		}
+		cleaned.push_back(static_cast<char>(c));
 	}
-	while (stdb64.size() % 4 != 0) {
-		stdb64.push_back('=');
-	}
-	if (stdb64.empty()) {
+	if (cleaned.empty()) {
 		return {};
 	}
-	if (stdb64.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+	try {
+		return cppcodec::base64_url_unpadded::decode<std::vector<uint8_t>>(cleaned);
+	} catch (const std::exception &) {
 		throw Error("invalid base64url");
 	}
-	std::vector<uint8_t> out((stdb64.size() / 4) * 3);
-	int n = EVP_DecodeBlock(out.data(), reinterpret_cast<const unsigned char *>(stdb64.data()),
-	                        static_cast<int>(stdb64.size()));
-	if (n < 0) {
-		throw Error("invalid base64url");
-	}
-	int pad = 0;
-	if (!stdb64.empty() && stdb64.back() == '=') {
-		pad++;
-	}
-	if (stdb64.size() >= 2 && stdb64[stdb64.size() - 2] == '=') {
-		pad++;
-	}
-	n -= pad;
-	if (n < 0) {
-		throw Error("invalid base64url");
-	}
-	out.resize(static_cast<size_t>(n));
-	return out;
 }
 
 std::string HmacSha256(const std::string &key, const std::string &data) {
