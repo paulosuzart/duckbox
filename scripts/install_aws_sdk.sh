@@ -10,6 +10,8 @@ INSTALL_ROOT="${DUCKBOX_VCPKG_INSTALLED:-$DEPS/vcpkg_installed}"
 # Pin for CI cache stability. Newer tags are fine if this clone fails.
 VCPKG_TAG="${VCPKG_TAG:-2025.09.17}"
 OVERLAY_TRIPLETS="$ROOT/cmake/vcpkg-triplets"
+# Bump when Darwin overlay flags change so a prior vcpkg install is rebuilt.
+DARWIN_OVERLAY_ID="osx-unguarded-nopipe2"
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
@@ -33,7 +35,18 @@ aws_config() {
     [[ -f "$root/$TRIPLET/share/AWSSDK/AWSSDKConfig.cmake" ]]
 }
 
-if aws_config "$INSTALL_ROOT" || aws_config "$VCPKG_ROOT/installed"; then
+darwin_overlay_stamp() {
+  echo "$1/$TRIPLET/.duckbox-darwin-overlay"
+}
+
+darwin_overlay_current() {
+  [[ "$os" != "darwin" ]] && return 0
+  local stamp
+  stamp="$(darwin_overlay_stamp "$INSTALL_ROOT")"
+  [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "$DARWIN_OVERLAY_ID" ]]
+}
+
+if { aws_config "$INSTALL_ROOT" || aws_config "$VCPKG_ROOT/installed"; } && darwin_overlay_current; then
   echo "aws-sdk-cpp[s3] already installed ($TRIPLET)"
   exit 0
 fi
@@ -98,5 +111,10 @@ echo "Installing aws-sdk-cpp[s3] from vcpkg.json ($TRIPLET) CC=${CC:-} CXX=${CXX
   --x-install-root="$INSTALL_ROOT" --x-manifest-root="$ROOT" \
   "${overlay_args[@]}" \
   --clean-after-build
+
+if [[ "$os" == "darwin" ]]; then
+  mkdir -p "$INSTALL_ROOT/$TRIPLET"
+  echo "$DARWIN_OVERLAY_ID" > "$(darwin_overlay_stamp "$INSTALL_ROOT")"
+fi
 
 echo "AWS SDK C++ S3 ready in $INSTALL_ROOT/$TRIPLET"

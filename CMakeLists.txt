@@ -246,6 +246,12 @@ else()
   target_include_directories(duckbox_core PUBLIC ${AWSSDK_INCLUDE_DIRS})
   target_link_libraries(duckbox_core PUBLIC ${AWSSDK_LIBRARIES})
 endif()
+if(APPLE)
+  target_link_libraries(duckbox_core PUBLIC
+    "-framework CoreFoundation"
+    "-framework Security"
+    "-framework SystemConfiguration")
+endif()
 
 set(_duckdb_libdir "${DUCKBOX_DEPS}/duckdb/lib")
 set(_duckdb_libs

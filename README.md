@@ -51,10 +51,10 @@ bash scripts/install_aws_sdk.sh     # AWS SDK for C++ (S3 only, vcpkg) — regis
                                     # First run takes several minutes (vcpkg builds aws-sdk-cpp S3).
 ```
 
-On **macOS 26+** (SDK 27 headers), first-time `install_aws_sdk.sh` uses overlay triplets `cmake/vcpkg-triplets/{arm64,x64}-osx.cmake` that add `-Wno-error=unguarded-availability-new` to vcpkg C/C++ flags. SDK 27 marks `pipe2` as 27.0+; curl builds with `-Werror` and otherwise fails. Do **not** raise `MACOSX_DEPLOYMENT_TARGET` to 27 — that binary would not run on 26.x. The extra flag is harmless on older GitHub-hosted SDKs. AppleClang only: do not set `CC=gcc` / `CXX=g++` on macOS. If a previous run failed while building curl:
+On **macOS 26+** (SDK 27 headers), first-time `install_aws_sdk.sh` uses overlay triplets `cmake/vcpkg-triplets/{arm64,x64}-osx.cmake`. Those add `-Wno-error=unguarded-availability-new` and pass `-DHAVE_PIPE2=OFF` so vcpkg curl does not compile in a `pipe2` call (SDK 27 marks it 27.0+; calling it on 26.x aborts). Do **not** raise `MACOSX_DEPLOYMENT_TARGET` to 27 — that binary would not run on 26.x. The extra flag is a no-op on older SDKs. AppleClang only: do not set `CC=gcc` / `CXX=g++` on macOS. If a previous run failed while building curl, or unit tests abort in the AWS S3 client:
 
 ```bash
-rm -rf .deps/vcpkg/buildtrees/curl
+rm -rf .deps/vcpkg/buildtrees/curl .deps/vcpkg_installed
 bash scripts/install_aws_sdk.sh
 ```
 
