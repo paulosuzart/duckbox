@@ -1,0 +1,238 @@
+# Table-driven SQL guardrails. Add a bypass as a new case; no C++ required.
+# expect: allow | deny
+# stage: rewrite | execute | both  (deny defaults to rewrite, allow to execute)
+cases:
+  - id: insert_denied
+    sql: "INSERT INTO deals VALUES (21, 9, 'x', 1, false)"
+    expect: deny
+    reason: only SELECT
+
+  - id: multi_statement
+    sql: "SELECT 1; SELECT 2"
+    expect: deny
+    reason: single statement
+
+  - id: secrets_unqualified
+    sql: "SELECT * FROM secrets"
+    expect: deny
+    reason: not allowlisted
+
+  - id: secrets_main
+    sql: "SELECT * FROM main.secrets"
+    expect: deny
+    reason: not allowlisted
+
+  - id: read_csv_auto
+    sql: "SELECT * FROM read_csv_auto('x.csv')"
+    expect: deny
+    reason: table functions
+
+  - id: replacement_scan_s3
+    sql: "SELECT * FROM 's3://duckbox-lake/data/secret.parquet'"
+    expect: deny
+    reason: replacement scans
+
+  - id: parquet_scan
+    sql: "SELECT * FROM parquet_scan('x.parquet')"
+    expect: deny
+    reason: table functions
+
+  - id: postgres_scan
+    sql: "SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
+    expect: deny
+    reason: table functions
+
+  - id: duckdb_tables
+    sql: "SELECT * FROM duckdb_tables()"
+    expect: deny
+    reason: table functions
+
+  - id: copy_out
+    sql: "COPY deals TO 'out.csv'"
+    expect: deny
+    reason: only SELECT
+
+  - id: pragma_show_tables
+    sql: "PRAGMA show_tables"
+    expect: deny
+    reason: only SELECT
+
+  - id: md5_not_allowlisted
+    sql: "SELECT md5(title) FROM deals"
+    expect: deny
+    reason: function not allowlisted
+
+  - id: window_not_allowlisted
+    sql: "SELECT row_number() OVER (ORDER BY id) FROM deals"
+    expect: deny
+    reason: window function not allowlisted
+
+  - id: attach_user_sql
+    sql: "ATTACH 'foo.db' AS x"
+    expect: deny
+    reason: only SELECT
+
+  - id: install_httpfs
+    sql: "INSTALL httpfs"
+    expect: deny
+    reason: only SELECT
+
+  - id: union_secrets
+    sql: "SELECT id FROM deals UNION SELECT 1 FROM secrets"
+    expect: deny
+    reason: not allowlisted
+
+  - id: exists_secrets
+    sql: "SELECT 1 WHERE EXISTS (SELECT * FROM secrets)"
+    expect: deny
+    reason: not allowlisted
+
+  - id: star_projects_allowlist
+    sql: "SELECT * FROM deals"
+    expect: allow
+    stage: execute
+    not_contains:
+      - note
+      - should never be visible
+
+  - id: c1_cte_shadow_qualified_secrets
+    sql: "WITH secrets AS (SELECT 1) SELECT * FROM memory.main.secrets"
+    expect: deny
+    reason: not allowlisted
+    stage: both
+
+  - id: select_deals_rewrite
+    sql: "SELECT id, title, amount FROM deals"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - tenant_id
+      - "21"
+      - _deleted
+
+  - id: cte_tenant_filter
+    sql: "WITH d AS (SELECT id, amount FROM deals) SELECT sum(amount) FROM d"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - "21"
+
+  - id: mandatory_filter_or_true
+    sql: "SELECT * FROM deals WHERE tenant_id = 22 OR 1=1"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - "21"
+
+  - id: user_question_param
+    sql: "SELECT id FROM deals WHERE id = ?"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - "21"
+
+  - id: limit_capped
+    sql: "SELECT id FROM deals LIMIT 99999"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - "100"
+
+  - id: c3_values_subquery_rewrite
+    sql: "SELECT * FROM (VALUES ((SELECT max(title) FROM deals WHERE tenant_id = 22))) t(x)"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - "21"
+
+  - id: literal_question_mark
+    sql: "SELECT id FROM deals WHERE title = '?'"
+    expect: allow
+    stage: rewrite
+
+  - id: literal_colon_name
+    sql: "SELECT id FROM deals WHERE title = ':tenant_id'"
+    expect: allow
+    stage: rewrite
+
+  - id: execute_tenant_21
+    sql: "SELECT id, title, amount FROM deals ORDER BY id"
+    expect: allow
+    stage: execute
+    contains:
+      - alpha deal
+    not_contains:
+      - bravo
+      - alpha deleted
+
+  - id: execute_tenant_22
+    sql: "SELECT id, title, amount FROM deals ORDER BY id"
+    expect: allow
+    stage: execute
+    key: tenant_22:user_kim
+    contains:
+      - bravo deal
+    not_contains:
+      - alpha deal
+
+  - id: execute_bypass_tenant_predicate
+    sql: "SELECT id, title FROM deals WHERE tenant_id = 22"
+    expect: allow
+    stage: execute
+    not_contains:
+      - bravo
+
+  - id: execute_cte_aggregate
+    sql: "WITH d AS (SELECT amount FROM deals) SELECT sum(amount) AS total FROM d"
+    expect: allow
+    stage: execute
+    contains:
+      - "100"
+
+  - id: execute_copy_rewritten
+    sql: "COPY deals TO '/tmp/x.csv'"
+    expect: deny
+    reason: only SELECT
+    stage: execute
+
+  - id: execute_secrets
+    sql: "SELECT * FROM secrets"
+    expect: deny
+    reason: allowlisted
+    stage: execute
+
+  - id: execute_read_parquet
+    sql: "SELECT * FROM read_parquet('x.parquet')"
+    expect: deny
+    reason: table functions
+    stage: execute
+
+  - id: c1_execute_qualified_deals_hides_deleted
+    sql: "WITH deals AS (SELECT 1) SELECT * FROM main.deals WHERE tenant_id=21"
+    expect: allow
+    stage: execute
+    not_contains:
+      - alpha deleted
+      - note
+
+  - id: c2_tenant_typed_equality
+    sql: "WITH deals AS (SELECT 1) SELECT * FROM main.deals WHERE tenant_id = 22"
+    expect: allow
+    stage: execute
+    key: tenant_2:mallory
+    not_contains:
+      - bravo
+
+  - id: c3_values_subquery_execute
+    sql: "SELECT * FROM (VALUES ((SELECT max(title) FROM deals WHERE tenant_id = 22))) t(x)"
+    expect: allow
+    stage: execute
+    not_contains:
+      - bravo two
+
+  - id: union_deals_self
+    sql: "SELECT id FROM deals UNION SELECT id FROM deals"
+    expect: allow
+    stage: execute
+    not_contains:
+      - bravo

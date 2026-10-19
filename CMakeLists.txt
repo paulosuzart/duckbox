@@ -134,11 +134,47 @@ add_executable(duckbox server/src/main.cpp)
 target_link_libraries(duckbox PRIVATE duckbox_core)
 duckbox_link_duckdb(duckbox)
 
-add_executable(duckbox_tests test/test_enforcement.cpp)
-target_link_libraries(duckbox_tests PRIVATE duckbox_core)
-duckbox_link_duckdb(duckbox_tests)
-target_compile_definitions(duckbox_tests PRIVATE
-  DUCKBOX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+function(duckbox_add_test name)
+  add_executable(${name} ${ARGN})
+  target_link_libraries(${name} PRIVATE duckbox_core)
+  duckbox_link_duckdb(${name})
+  target_include_directories(${name} PRIVATE
+    ${CMAKE_SOURCE_DIR}/test/support
+    ${CMAKE_SOURCE_DIR}/test/unit
+    ${CMAKE_SOURCE_DIR}/test/integration)
+  target_compile_definitions(${name} PRIVATE
+    DUCKBOX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+endfunction()
+
+duckbox_add_test(duckbox_unit_tests
+  test/support/check.cpp
+  test/unit/main.cpp
+  test/unit/tenant_key_test.cpp
+  test/unit/spec_loader_test.cpp
+  test/unit/validator_test.cpp
+  test/unit/rewriter_test.cpp
+  test/unit/plan_guard_test.cpp
+  test/unit/init_sql_test.cpp
+  test/unit/handle_test.cpp
+  test/unit/registry_test.cpp
+  test/unit/metrics_test.cpp)
+
+duckbox_add_test(duckbox_guardrail_tests
+  test/support/check.cpp
+  test/guardrails/runner.cpp)
+
+duckbox_add_test(duckbox_integration_tests
+  test/support/check.cpp
+  test/integration/main.cpp
+  test/integration/sandbox_exec_test.cpp
+  test/integration/runtime_test.cpp
+  test/integration/s3_registry_test.cpp
+  test/integration/auth_flight_test.cpp)
 
 enable_testing()
-add_test(NAME enforcement COMMAND duckbox_tests)
+add_test(NAME unit COMMAND duckbox_unit_tests)
+add_test(NAME guardrails COMMAND duckbox_guardrail_tests)
+add_test(NAME integration COMMAND duckbox_integration_tests)
+set_tests_properties(unit PROPERTIES LABELS "unit")
+set_tests_properties(guardrails PROPERTIES LABELS "guardrails")
+set_tests_properties(integration PROPERTIES LABELS "integration")

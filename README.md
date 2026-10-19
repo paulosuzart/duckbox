@@ -131,7 +131,7 @@ macOS: `brew install apache-arrow openssl cmake` (recent formulae enable Flight 
 bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
 cmake --build build --parallel
-./build/duckbox_tests
+ctest --test-dir build --output-on-failure
 make validate
 ```
 
@@ -160,7 +160,7 @@ Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match)
 | `policies/` | Sandbox specs (lake + tables + key + functions) |
 | `server/` | C++ daemon + enforcement |
 | `examples/python/` | Quickstart notebook/script, `duckbox_client`, CLI utility |
-| `test/` | AST, isolation, handles, named-sandbox CRUD, initSQL |
+| `test/` | CTest suites: `unit`, `guardrails` (YAML SQL corpus), `integration` |
 
 ## Stubbed
 

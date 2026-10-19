@@ -1,0 +1,16 @@
+#include "suite.hpp"
+#include "check.hpp"
+
+int main() {
+	using namespace duckbox::test;
+	RunTenantKeyTests();
+	RunSpecLoaderTests();
+	RunValidatorTests();
+	RunRewriterTests();
+	RunPlanGuardTests();
+	RunInitSqlTests();
+	RunHandleTests();
+	RunRegistryTests();
+	RunMetricsTests();
+	return ReportAndExit("unit");
+}

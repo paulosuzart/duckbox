@@ -18,7 +18,7 @@ build: configure
 	$(CMAKE) --build $(BUILD_DIR) --parallel
 
 test: build
-	$(BUILD_DIR)/duckbox_tests
+	ctest --test-dir $(BUILD_DIR) --output-on-failure
 
 serve: build
 	$(BUILD_DIR)/duckbox serve --daemon $(PROJ_DIR)daemons/memory.yaml --listen 127.0.0.1:4747
