@@ -6,7 +6,7 @@
 
 #include <functional>
 #include <iostream>
-#include <unordered_set>
+#include <unordered_map>
 
 namespace duckbox {
 
@@ -43,7 +43,8 @@ const char *kUserStmtState = "duckbox.user_statement";
 struct UserStatementGuardState : ddb::ClientContextState {
 	int scopes = 0;
 	int optimizer_depth = 0;
-	std::unordered_set<std::string> trusted_scan_keys;
+	// Remaining opaque authorized-view LogicalGet counts for this statement.
+	std::unordered_map<std::string, int> view_scan_budget;
 };
 
 bool ValuesEqual(const ddb::Value &got, const ddb::Value &want) {
@@ -297,9 +298,9 @@ std::string ScanKeyOf(const ddb::LogicalGet &get) {
 	return k;
 }
 
-void CollectGets(ddb::LogicalOperator &op, std::unordered_set<std::string> &out) {
+void CollectGets(ddb::LogicalOperator &op, std::unordered_map<std::string, int> &out) {
 	if (op.type == ddb::LogicalOperatorType::LOGICAL_GET) {
-		out.insert(ScanKeyOf(op.Cast<ddb::LogicalGet>()));
+		out[ScanKeyOf(op.Cast<ddb::LogicalGet>())]++;
 	}
 	for (auto &child : op.children) {
 		if (child) {
@@ -400,13 +401,23 @@ void CollectBaseTablesFromSql(const std::string &sql, std::vector<std::string> &
 }
 
 void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, const std::vector<BoundEq> &inherited,
-              const std::unordered_set<std::string> *trusted_view_scans) {
+              std::unordered_map<std::string, int> *view_scan_budget) {
 	auto fname = ddb::StringUtil::Lower(get.function.name);
 	auto table = get.GetTable();
 	auto tname = BoundTableName(get);
 
-	if (trusted_view_scans && trusted_view_scans->count(ScanKeyOf(get))) {
-		return;
+	if (view_scan_budget) {
+		auto it = view_scan_budget->find(ScanKeyOf(get));
+		if (it != view_scan_budget->end() && it->second > 0) {
+			// seq_scan / ducklake_scan: counted, so a view that reads secrets
+			// once does not also cover an agent-written secrets join.
+			// Table functions (read_parquet, range, query, …) are opaque: the
+			// agent cannot write them (AST), but inlining may duplicate gets.
+			if (fname == "seq_scan" || fname == "ducklake_scan") {
+				it->second--;
+			}
+			return;
+		}
 	}
 	auto require_preds = [&](const TablePolicy &spec, const std::string &shown) {
 		for (auto &pred : PredicatesFor(spec, key)) {
@@ -463,7 +474,7 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 }
 
 void Walk(ddb::LogicalOperator &op, const Policy &policy, const TenantKey &key, std::vector<BoundEq> inherited,
-          const std::unordered_set<std::string> *trusted_view_scans) {
+          std::unordered_map<std::string, int> *view_scan_budget) {
 	if (op.type == ddb::LogicalOperatorType::LOGICAL_FILTER) {
 		for (auto &e : op.expressions) {
 			if (e) {
@@ -472,25 +483,25 @@ void Walk(ddb::LogicalOperator &op, const Policy &policy, const TenantKey &key, 
 		}
 	}
 	if (op.type == ddb::LogicalOperatorType::LOGICAL_GET) {
-		CheckGet(op.Cast<ddb::LogicalGet>(), policy, key, inherited, trusted_view_scans);
+		CheckGet(op.Cast<ddb::LogicalGet>(), policy, key, inherited, view_scan_budget);
 	}
 	for (auto &child : op.children) {
-		Walk(*child, policy, key, inherited, trusted_view_scans);
+		Walk(*child, policy, key, inherited, view_scan_budget);
 	}
 }
 
 } // namespace
 
 void CheckLogicalPlan(ddb::LogicalOperator &plan, const Policy &policy, const TenantKey &key,
-                      const std::unordered_set<std::string> *trusted_view_scans) {
-	Walk(plan, policy, key, {}, trusted_view_scans);
+                      std::unordered_map<std::string, int> *view_scan_budget) {
+	Walk(plan, policy, key, {}, view_scan_budget);
 }
 
 std::string LogicalGetScanKey(const ddb::LogicalGet &get) {
 	return ScanKeyOf(get);
 }
 
-void CollectScanKeys(ddb::LogicalOperator &plan, std::unordered_set<std::string> &out) {
+void CollectScanKeys(ddb::LogicalOperator &plan, std::unordered_map<std::string, int> &out) {
 	CollectGets(plan, out);
 }
 
@@ -517,7 +528,7 @@ UserStatementScope::~UserStatementScope() {
 		st.scopes--;
 	}
 	if (st.scopes == 0) {
-		st.trusted_scan_keys.clear();
+		st.view_scan_budget.clear();
 	}
 }
 
@@ -526,16 +537,16 @@ void NoteAuthorizedViews(ddb::ClientContext &ctx, const PlanGuardInfo &info, con
 	if (!st || st->scopes <= 0) {
 		return;
 	}
-	st->trusted_scan_keys.clear();
+	st->view_scan_budget.clear();
 	std::vector<std::string> tables;
 	CollectBaseTablesFromSql(sql, tables);
 	for (auto &name : tables) {
-		auto it = info.view_scan_keys.find(name);
-		if (it == info.view_scan_keys.end()) {
+		auto it = info.view_scan_counts.find(name);
+		if (it == info.view_scan_counts.end()) {
 			continue;
 		}
-		for (auto &k : it->second) {
-			st->trusted_scan_keys.insert(k);
+		for (auto &kv : it->second) {
+			st->view_scan_budget[kv.first] += kv.second;
 		}
 	}
 }
@@ -565,7 +576,7 @@ ddb::shared_ptr<PlanGuardInfo> RegisterPlanGuard(ddb::DBConfig &config, const Po
 			return;
 		}
 		try {
-			CheckLogicalPlan(*plan, info->policy, info->key, &st->trusted_scan_keys);
+			CheckLogicalPlan(*plan, info->policy, info->key, &st->view_scan_budget);
 		} catch (const PlanRejected &e) {
 			std::clog << "duckbox plan guard: " << e.what() << "\n";
 			throw;

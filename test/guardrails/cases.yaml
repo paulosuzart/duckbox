@@ -215,6 +215,30 @@ cases:
     contains:
       - "1"
 
+  - id: authorized_view_opaque_mix
+    sql: "SELECT leaked, i FROM mix ORDER BY i"
+    expect: allow
+    stage: execute
+    init_sql: "CREATE TEMP VIEW mix AS SELECT (SELECT max(note) FROM secrets) AS leaked, r.range AS i FROM range(1, 3) r"
+    extra_tables:
+      - name: mix
+        columns:
+          - leaked
+          - i
+    contains:
+      - "should never"
+
+  - id: authorized_view_join_secrets
+    sql: "SELECT * FROM mix, secrets"
+    expect: deny
+    reason: not allowlisted
+    init_sql: "CREATE TEMP VIEW mix AS SELECT (SELECT max(note) FROM secrets) AS leaked, r.range AS i FROM range(1, 3) r"
+    extra_tables:
+      - name: mix
+        columns:
+          - leaked
+          - i
+
   - id: duckdb_tables
     sql: "SELECT * FROM duckdb_tables()"
     expect: deny

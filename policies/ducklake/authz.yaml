@@ -1,0 +1,76 @@
+id: acme-authz
+key: tenant_21:user_sergio
+name: analyst
+policy_class: analyst
+auth:
+  key:
+    patterns:
+      - "tenant_{tenant_id}:{user}"
+      - "{tenant_id}:{user}"
+    strip_prefixes:
+      - tenant_
+resources:
+  memory_limit: 256MB
+  threads: 2
+  query_timeout_ms: 8000
+  max_result_rows: 1000
+lake:
+  kind: ducklake
+  alias: lake
+  catalog_env: DUCKBOX_LAKE_CATALOG
+  data_path: "s3://duckbox-lake/data/"
+  read_only: true
+  extensions:
+    - httpfs
+    - postgres
+    - ducklake
+  s3:
+    endpoint: "127.0.0.1:9000"
+    url_style: path
+    use_ssl: false
+    access_key_env: DUCKBOX_S3_KEY
+    secret_key_env: DUCKBOX_S3_SECRET
+    region: us-east-1
+authorized_paths:
+  - "s3://duckbox-lake/authorized/"
+init_sql: |
+  CREATE TEMP VIEW parquet_ok AS SELECT * FROM read_parquet('s3://duckbox-lake/authorized/ok.parquet');
+  CREATE TEMP VIEW parquet_no AS SELECT * FROM read_parquet('s3://duckbox-lake/forbidden/no.parquet');
+tables:
+  deals:
+    tenant_column: tenant_id
+    columns:
+      - tenant_id
+      - id
+      - title
+      - amount
+      - _deleted
+    filters:
+      - "tenant_id = :tenant_id"
+      - "_deleted = false"
+  parquet_ok:
+    authorized_view: true
+    columns:
+      - id
+      - title
+  parquet_no:
+    authorized_view: true
+    columns:
+      - id
+      - title
+functions:
+  - count
+  - count_star
+  - sum
+  - avg
+  - min
+  - max
+  - lower
+  - upper
+  - length
+  - coalesce
+  - round
+  - abs
+deny_table_functions: true
+handles:
+  stale_version_grace: 0s

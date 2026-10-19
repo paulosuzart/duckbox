@@ -8,9 +8,10 @@
 // tables with typed tenant filters. Every other name in
 // IsAlwaysDeniedTableFunction (query, glob, read_*, postgres_*, duckdb_*, …)
 // is denied in the user plan unconditionally — same list as spec validation,
-// not AST-only — unless the scan originated in an authorized initSQL view
-// that the agent SQL referenced. Mandatory filters are typed ConstantFilter /
-// BoundComparison on direct table access.
+// not AST-only — unless the scan is covered by an authorized-view subtree
+// budget (opaque: no table-function/allowlist rejection inside the view).
+// Leftover LogicalGets are agent-written and still checked. Mandatory filters
+// are typed ConstantFilter / BoundComparison on direct table access.
 
 #include "duckbox/policy.hpp"
 #include "duckbox/tenant_key.hpp"
@@ -18,7 +19,6 @@
 
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace duckbox {
 
@@ -26,8 +26,10 @@ namespace duckbox {
 struct PlanGuardInfo : ddb::OptimizerExtensionInfo {
 	Policy policy;
 	TenantKey key;
-	// lowercased view name → LogicalGet scan keys captured at warmup (no user marker).
-	std::unordered_map<std::string, std::unordered_set<std::string>> view_scan_keys;
+	// lowercased view name → LogicalGet scan-key counts captured at warmup
+	// (no user marker). Counts are a multiset so a view that scans secrets
+	// once does not also cover an agent-written secrets join.
+	std::unordered_map<std::string, std::unordered_map<std::string, int>> view_scan_counts;
 };
 
 class IPlanChecker {
@@ -44,9 +46,10 @@ public:
 };
 
 // Throws PlanRejected. Used by tests on real ExtractPlan trees and by the extension.
-// trusted_view_scans: LogicalGet keys from authorized views referenced by this agent statement.
+// view_scan_budget: remaining opaque authorized-view scan counts for this statement
+// (decremented as matching LogicalGets are skipped).
 void CheckLogicalPlan(ddb::LogicalOperator &plan, const Policy &policy, const TenantKey &key,
-                      const std::unordered_set<std::string> *trusted_view_scans = nullptr);
+                      std::unordered_map<std::string, int> *view_scan_budget = nullptr);
 // Installs the optimizer callback on this DuckDB config (once per sandbox warmup).
 ddb::shared_ptr<PlanGuardInfo> RegisterPlanGuard(ddb::DBConfig &config, const Policy &policy, const TenantKey &key);
 
@@ -55,7 +58,7 @@ ddb::shared_ptr<PlanGuardInfo> RegisterPlanGuard(ddb::DBConfig &config, const Po
 bool CatalogIsAttachedLake(const std::string &catalog, const Policy &policy);
 
 std::string LogicalGetScanKey(const ddb::LogicalGet &get);
-void CollectScanKeys(ddb::LogicalOperator &plan, std::unordered_set<std::string> &out);
+void CollectScanKeys(ddb::LogicalOperator &plan, std::unordered_map<std::string, int> &out);
 
 // Marks this ClientContext as executing user SQL. Nested optimizer callbacks
 // (DuckLake metadata I/O) see a deeper depth and skip the user plan guard.
@@ -75,7 +78,7 @@ private:
 };
 
 // Record which authorized views this agent statement references so the plan
-// guard can trust their expansion scans (BigQuery-style authorized views).
+// guard can treat their expansion subtrees as opaque (counted scan budget).
 void NoteAuthorizedViews(ddb::ClientContext &ctx, const PlanGuardInfo &info, const std::string &sql);
 
 } // namespace duckbox

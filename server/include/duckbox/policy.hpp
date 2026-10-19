@@ -95,7 +95,8 @@ struct ColumnMeta {
 
 // Allowlisted table or authorized view. filters are typed equalities (tenant_id,
 // _deleted, …) verified on the bound plan for direct table access. authorized_view
-// is set at warmup when the spec name is an initSQL view (not YAML).
+// may be set in YAML (skips mandatory tenant filters) and is confirmed at warmup
+// when the spec name is an initSQL view, not a base table.
 struct TablePolicy {
 	std::string name;
 	std::vector<std::string> columns;
@@ -118,6 +119,10 @@ struct SandboxSpec {
 	bool deny_table_functions = true;
 	bool require_prepared_statements = false;
 	std::string init_sql;
+	// Prefixes the SaaS authorizes for initSQL views (read_parquet, COPY, …).
+	// Applied to DuckDB allowed_paths / allowed_directories before
+	// enable_external_access=false. Never parsed from initSQL.
+	std::vector<std::string> authorized_paths;
 	std::string version; // hash(policy + initSQL); monotonic registry version is separate
 	std::string yaml_body;
 	// Bounded Prometheus `policy` label. Never the sandbox id.

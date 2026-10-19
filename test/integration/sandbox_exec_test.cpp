@@ -134,6 +134,67 @@ void duckbox::test::RunSandboxExecTests() {
 	}
 
 	{
+		auto mix_pol = policy;
+		TablePolicy mix;
+		mix.name = "mix";
+		mix.columns = {"leaked", "i"};
+		mix_pol.tables["mix"] = mix;
+		TenantSandbox box_mix(
+		    daemon, mix_pol, key_a,
+		    "CREATE TEMP VIEW mix AS SELECT (SELECT max(note) FROM secrets) AS leaked, r.range AS i FROM range(1, 3) r",
+		    spec_dir);
+		auto from_mix = box_mix.Execute("SELECT leaked, i FROM mix ORDER BY i");
+		Expect(from_mix.text_table.find("should never") != std::string::npos,
+		       "authorized view body may scan a non-allowlisted table and a table function");
+		ExpectThrowContains([&] { box_mix.Execute("SELECT * FROM mix, secrets"); }, "allowlisted",
+		                    "agent join of authorized view with a non-allowlisted table is denied");
+		auto after_join = box_mix.Execute("SELECT leaked FROM mix");
+		Expect(after_join.text_table.find("should never") != std::string::npos,
+		       "denied join does not poison the next authorized-view query");
+	}
+
+	{
+		auto ok_dir = std::string("/tmp/duckbox-authz-ok");
+		auto bad_dir = std::string("/tmp/duckbox-authz-bad");
+		std::filesystem::create_directories(ok_dir);
+		std::filesystem::create_directories(bad_dir);
+		auto ok_path = ok_dir + "/t.parquet";
+		auto bad_path = bad_dir + "/t.parquet";
+		{
+			ddb::DuckDB db(nullptr);
+			ddb::Connection con(db);
+			ExecOrThrow(con, "COPY (SELECT 1 AS id, 'authz_ok' AS title) TO '" + ok_path + "' (FORMAT PARQUET)");
+			ExecOrThrow(con, "COPY (SELECT 2 AS id, 'authz_bad' AS title) TO '" + bad_path + "' (FORMAT PARQUET)");
+		}
+		auto path_pol = policy;
+		path_pol.authorized_paths = {ok_dir};
+		TablePolicy okv;
+		okv.name = "parquet_ok";
+		okv.columns = {"id", "title"};
+		path_pol.tables["parquet_ok"] = okv;
+		TablePolicy nov;
+		nov.name = "parquet_no";
+		nov.columns = {"id", "title"};
+		path_pol.tables["parquet_no"] = nov;
+		auto init = std::string("CREATE TEMP VIEW parquet_ok AS SELECT * FROM read_parquet('") + ok_path +
+		            "');\nCREATE TEMP VIEW parquet_no AS SELECT * FROM read_parquet('" + bad_path + "');";
+		TenantSandbox box_p(daemon, path_pol, key_a, init, spec_dir);
+		auto from_ok = box_p.Execute("SELECT * FROM parquet_ok");
+		Expect(from_ok.text_table.find("authz_ok") != std::string::npos,
+		       "authorized view over read_parquet on an authorized_paths prefix works");
+		try {
+			box_p.Execute("SELECT * FROM parquet_no");
+			Expect(false, "view over read_parquet outside authorized_paths must fail");
+		} catch (const std::exception &e) {
+			std::string w = e.what();
+			Expect(w.find("authz_ok") == std::string::npos,
+			       "non-authorized prefix view must not return authorized rows");
+		}
+		ExpectThrowContains([&] { box_p.Execute("SELECT * FROM read_parquet('" + ok_path + "')"); }, "table functions",
+		                    "agent cannot call read_parquet directly even on an authorized prefix");
+	}
+
+	{
 		auto mallory = ParseTenantKey("tenant_2:mallory", policy.key);
 		TenantSandbox box_m(daemon, policy, mallory, "", spec_dir);
 		auto c2 = box_m.Execute("WITH deals AS (SELECT 1) SELECT * FROM main.deals WHERE tenant_id = 22");

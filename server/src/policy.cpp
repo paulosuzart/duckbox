@@ -77,7 +77,8 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	}
 	YamlRejectUnknownKeys(root, {"id", "key", "name", "policy_class", "metrics_class", "auth", "resources", "lake",
 	                             "tables", "functions", "deny_table_functions", "require_prepared_statements",
-	                             "init_sql", "bootstrap_sql_inline", "handles", "attachments", "metrics", "lifecycle"});
+	                             "init_sql", "authorized_paths", "bootstrap_sql_inline", "handles", "attachments",
+	                             "metrics", "lifecycle"});
 	SandboxSpec p;
 	p.source_path = path;
 	p.yaml_body = body;
@@ -162,12 +163,13 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 			if (!kv.second.IsMap()) {
 				throw PolicyError("tables." + kv.first + ": expected mapping");
 			}
-			YamlRejectUnknownKeys(kv.second, {"columns", "filters", "tenant_column"});
+			YamlRejectUnknownKeys(kv.second, {"columns", "filters", "tenant_column", "authorized_view"});
 			TablePolicy t;
 			t.name = kv.first;
 			t.columns = StringList(kv.second.Get("columns"), ChildPath("tables." + kv.first, "columns"));
 			t.filters = StringList(kv.second.Get("filters"), ChildPath("tables." + kv.first, "filters"));
 			t.tenant_column = kv.second.GetString("tenant_column", "tenant_id");
+			t.authorized_view = kv.second.GetBool("authorized_view", false);
 			p.tables.emplace(Lower(t.name), std::move(t));
 		}
 	}
@@ -187,6 +189,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	p.deny_table_functions = true;
 	p.require_prepared_statements = root.GetBool("require_prepared_statements", false);
 	p.init_sql = root.GetString("init_sql");
+	p.authorized_paths = StringList(root.Get("authorized_paths"), "authorized_paths");
 	auto inline_boot = root.GetString("bootstrap_sql_inline");
 	if (!inline_boot.empty()) {
 		p.lake.bootstrap_sql = inline_boot;
@@ -316,7 +319,7 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
 		os << "sp:" << n << '\n';
 	}
 	for (auto &kv : spec.tables) {
-		os << kv.first << '|' << kv.second.tenant_column << '|';
+		os << kv.first << '|' << kv.second.tenant_column << '|' << kv.second.authorized_view << '|';
 		for (auto &c : kv.second.columns) {
 			os << c << ',';
 		}
@@ -330,6 +333,9 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
 		os << fn << ',';
 	}
 	os << "\ninit:" << spec.init_sql << '\n';
+	for (auto &p : spec.authorized_paths) {
+		os << "ap:" << p << '\n';
+	}
 	os << spec.resources.memory_limit << '|' << spec.resources.threads << '|' << spec.resources.query_timeout_ms << '|'
 	   << spec.resources.max_result_rows << '\n';
 	os << "grace:" << spec.handles.stale_version_grace_ms << '\n';

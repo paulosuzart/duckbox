@@ -108,7 +108,7 @@ int main() {
 				continue;
 			}
 			for (auto &tn : extra_tbl->seq) {
-				YamlRejectUnknownKeys(tn, {"name", "columns", "filters", "tenant_column"});
+				YamlRejectUnknownKeys(tn, {"name", "columns", "filters", "tenant_column", "authorized_view"});
 				TablePolicy tp;
 				tp.name = tn.GetString("name");
 				tp.columns = YamlStringList(tn.Get("columns"), tn.path + ".columns");
@@ -117,6 +117,7 @@ int main() {
 				if (!tc.empty()) {
 					tp.tenant_column = tc;
 				}
+				tp.authorized_view = tn.GetBool("authorized_view", false);
 				if (tp.name.empty()) {
 					g_failed++;
 					std::cerr << "FAIL: " << id << " extra_tables entry needs name\n";

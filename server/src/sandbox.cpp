@@ -67,24 +67,83 @@ void TenantSandbox::Warmup(bool validate_lake) {
 		ExecOrThrow(*con_, "SET autoinstall_known_extensions=false");
 		ExecOrThrow(*con_, "SET autoload_known_extensions=false");
 		AttachLakeFromSpec(*con_, policy_, spec_dir_, *secrets_, daemon_);
-		if (!policy_.lake.data_path.empty()) {
+		{
 			// SET must happen while enable_external_access is still true; after
 			// disable it is a silent no-op (DuckDB keeps the previous empty list).
-			auto try_set = [&](const char *setting) -> bool {
-				auto sql = std::string("SET ") + setting + "=['" + EscapeSqlString(policy_.lake.data_path) + "']";
-				auto r = con_->Query(sql);
-				if (r->HasError()) {
-					return false;
+			// lake.data_path + spec.authorized_paths (declared by the SaaS, never
+			// parsed from initSQL). Remote prefixes are not ignored: inlined
+			// read_parquet in an authorized view needs these after disable.
+			std::vector<std::string> paths;
+			auto add_path = [&](const std::string &p) {
+				if (p.empty()) {
+					return;
 				}
-				auto got = con_->Query(std::string("SELECT current_setting('") + setting + "')");
-				return got && !got->HasError() &&
-				       got->ToString().find(policy_.lake.data_path) != std::string::npos;
+				if (std::find(paths.begin(), paths.end(), p) == paths.end()) {
+					paths.push_back(p);
+				}
 			};
-			bool ok = try_set("allowed_directories");
-			ok = try_set("allowed_paths") || ok;
-			auto remote = ddb::StringUtil::Lower(policy_.lake.data_path).find("://") != std::string::npos;
-			if (!ok && !remote) {
-				throw Error("allowed_paths did not take effect for the lake data_path");
+			add_path(policy_.lake.data_path);
+			for (auto &p : policy_.authorized_paths) {
+				add_path(p);
+			}
+			if (!paths.empty()) {
+				std::ostringstream list;
+				list << '[';
+				for (size_t i = 0; i < paths.size(); i++) {
+					if (i) {
+						list << ", ";
+					}
+					list << "'" << EscapeSqlString(paths[i]) << "'";
+				}
+				list << ']';
+				auto listed = list.str();
+				auto try_set = [&](const char *setting) -> bool {
+					auto sql = std::string("SET ") + setting + "=" + listed;
+					auto r = con_->Query(sql);
+					if (r->HasError()) {
+						return false;
+					}
+					auto got = con_->Query(std::string("SELECT current_setting('") + setting + "')");
+					if (!got || got->HasError()) {
+						return false;
+					}
+					auto text = got->ToString();
+					for (auto &p : paths) {
+						if (text.find(p) == std::string::npos) {
+							return false;
+						}
+					}
+					return true;
+				};
+				bool set_ok = try_set("allowed_directories");
+				set_ok = try_set("allowed_paths") || set_ok;
+				// SET of s3:// prefixes can fail the SQL validator; the options
+				// sets are what enable_external_access=false actually checks.
+				auto &cfg = ddb::DBConfig::GetConfig(*con_->context);
+				for (auto &p : paths) {
+					try {
+						cfg.AddAllowedDirectory(p);
+					} catch (...) {
+					}
+					try {
+						cfg.AddAllowedPath(p);
+					} catch (...) {
+					}
+				}
+				bool cfg_ok = true;
+				for (auto &p : paths) {
+					auto san = cfg.SanitizeAllowedPath(p);
+					bool in_paths = cfg.options.allowed_paths.count(p) > 0 || cfg.options.allowed_paths.count(san) > 0;
+					bool in_dirs = cfg.options.allowed_directories.count(p) > 0 ||
+					               cfg.options.allowed_directories.count(san) > 0;
+					if (!in_paths && !in_dirs) {
+						cfg_ok = false;
+					}
+				}
+				if (!set_ok && !cfg_ok) {
+					throw Error("allowed_paths/allowed_directories did not take effect for lake data_path and "
+					            "authorized_paths");
+				}
 			}
 		}
 		auto i0 = std::chrono::steady_clock::now();
@@ -138,7 +197,7 @@ void TenantSandbox::SnapshotAuthorizedViews() {
 	if (!con_ || !plan_info_) {
 		return;
 	}
-	plan_info_->view_scan_keys.clear();
+	plan_info_->view_scan_counts.clear();
 	auto quote = [](const std::string &n) {
 		std::string o = "\"";
 		for (char c : n) {
@@ -171,6 +230,10 @@ void TenantSandbox::SnapshotAuthorizedViews() {
 		// rewriter keeps qualifying the base table (tenant filters still apply).
 		if (view_sql.empty() || has_base) {
 			kv.second.authorized_view = false;
+			if (kv.second.filters.empty()) {
+				throw Error("tables." + kv.second.name +
+				            " is not an authorized view; filters are required");
+			}
 			continue;
 		}
 		kv.second.authorized_view = true;
@@ -188,13 +251,13 @@ void TenantSandbox::SnapshotAuthorizedViews() {
 		try {
 			auto plan = con_->ExtractPlan(body);
 			if (plan) {
-				CollectScanKeys(*plan, plan_info_->view_scan_keys[lower]);
+				CollectScanKeys(*plan, plan_info_->view_scan_counts[lower]);
 			}
 		} catch (const std::exception &e) {
 			try {
 				auto plan = con_->ExtractPlan("SELECT * FROM " + quote(kv.second.name));
 				if (plan) {
-					CollectScanKeys(*plan, plan_info_->view_scan_keys[lower]);
+					CollectScanKeys(*plan, plan_info_->view_scan_counts[lower]);
 				}
 			} catch (const std::exception &e2) {
 				throw Error(std::string("authorized view '") + kv.second.name + "' plan snapshot failed: " + e.what() +

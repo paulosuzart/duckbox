@@ -12,6 +12,8 @@ void duckbox::test::RunValidatorTests() {
 
 	auto ducklake_spec = LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/analyst.yaml");
 	Expect(validator.ValidateStatic(ducklake_spec).empty(), "ducklake spec is statically valid");
+	auto authz_spec = LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/authz.yaml");
+	Expect(validator.ValidateStatic(authz_spec).empty(), "ducklake authz spec is statically valid");
 
 	auto with_grace_val = [&](const std::string &val) {
 		auto s = loaded.yaml_body;
@@ -99,6 +101,18 @@ void duckbox::test::RunValidatorTests() {
 		           IsAlwaysDeniedTableFunction("query") && IsAlwaysDeniedTableFunction("query_table") &&
 		           !IsAlwaysDeniedTableFunction("count"),
 		       "table-function names are banned from the functions allowlist");
+	}
+
+	{
+		auto av = loaded;
+		av.tables["qv"].name = "qv";
+		av.tables["qv"].columns = {"x"};
+		av.tables["qv"].filters.clear();
+		av.tables["qv"].authorized_view = true;
+		Expect(validator.ValidateStatic(av).empty(), "authorized_view with no tenant filters is statically valid");
+		av.authorized_paths = {""};
+		Expect(has_path(validator.ValidateStatic(av), "authorized_paths[0]", "non-empty"),
+		       "empty authorized_paths entry is a field-path error");
 	}
 
 	Expect(RunValidateCommand(TestDaemon(), "") == 1, "validate without --spec fails");

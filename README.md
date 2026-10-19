@@ -10,7 +10,7 @@ This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/inclu
 2. **SaaS** (trusted caller). Creates, updates, expires, and deletes sandboxes through its own harness (CRUD is authenticated and scoped by key prefix). It supplies **initSQL**. Duckbox does not AST-check that SQL.
 3. **Sandbox**. Exposes spec-whitelisted tables/views and scalar functions. Agent SQL is fully guarded (AST + plan): only those names, plus tenant filters on **direct table** access.
 
-**initSQL** is trusted. It runs at warmup **before** `enable_external_access=false` and `lock_configuration`. The agent never executes in that phase. Views (and macros) created there are **authorized views** (BigQuery-style): if the spec exposes the view, scans and table functions inside its expansion are trusted. The same function called directly by the agent is denied. initSQL is written to the audit log with secrets redacted.
+**initSQL** is trusted. It runs at warmup **before** `enable_external_access=false` and `lock_configuration`. The agent never executes in that phase. Views (and macros) created there are **authorized views** (BigQuery-style): if the spec exposes the view, the plan guard treats that view's expansion as opaque (no table-function/allowlist rejection *inside* it) and still checks everything the agent wrote around it. The same function or non-allowlisted table used directly by the agent is denied. External files a view reads must be listed in spec `authorized_paths` (SaaS-declared prefixes such as `s3://bucket/prefix/`; never parsed from initSQL). Those prefixes are applied to DuckDB `allowed_paths` / `allowed_directories` **before** external access is disabled. Paths outside them fail. initSQL is written to the audit log with secrets redacted.
 
 ## Quickstart in 5 minutes
 
@@ -108,7 +108,7 @@ Daemon startup validates **only** daemon config (listen, limits, optional lease 
 
 Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap. Spec `lifecycle.idle_timeout` overrides the daemon default (capped by `limits.max_idle_timeout`). Spec `lifecycle.ttl` / `expires_at` tombstone the named definition when due.
 
-**initSQL**: trusted SaaS SQL, rerun on every warmup, then `enable_external_access=false` and `lock_configuration`. Objects it creates are visible to agent SQL **only if the spec lists them**. Exposed views are authorized (body trusted in the plan guard). After initSQL, `allowed_directories`/`allowed_paths` cover the lake; agent SQL cannot `COPY`/`read_*` except through those views.
+**initSQL**: trusted SaaS SQL, rerun on every warmup, then `enable_external_access=false` and `lock_configuration`. Objects it creates are visible to agent SQL **only if the spec lists them**. Exposed views are authorized (expansion opaque in the plan guard; agent-written SQL around them is still checked). Spec `authorized_paths` plus `lake.data_path` are applied to `allowed_directories`/`allowed_paths` before external access is disabled. Agent SQL cannot `COPY`/`read_*` except through those views, and only for prefixes the SaaS declared.
 
 ### Metrics
 

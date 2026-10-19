@@ -147,7 +147,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 		if (kv.second.columns.empty()) {
 			add(prefix + ".columns", "required (deny-by-default: list every visible column)");
 		}
-		if (kv.second.filters.empty()) {
+		if (kv.second.filters.empty() && !kv.second.authorized_view) {
 			add(prefix + ".filters", "required (at least one mandatory filter)");
 		}
 		bool tenant_from_key = false;
@@ -194,9 +194,14 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 				add(path, std::string("failed to parse with DuckDB: ") + e.what());
 			}
 		}
-		if (!kv.second.filters.empty() && !tenant_from_key) {
+		if (!kv.second.authorized_view && !kv.second.filters.empty() && !tenant_from_key) {
 			add(prefix + ".filters", "tenant column '" + kv.second.tenant_column +
 			                             "' must be constrained by a key variable (e.g. tenant_id = :tenant_id)");
+		}
+	}
+	for (size_t i = 0; i < spec.authorized_paths.size(); i++) {
+		if (spec.authorized_paths[i].empty()) {
+			add("authorized_paths[" + std::to_string(i) + "]", "must be a non-empty path prefix");
 		}
 	}
 	if (!spec.deny_table_functions) {
@@ -271,6 +276,9 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
 				auto chunk = vr->Fetch();
 				is_view = chunk && chunk->size() > 0;
 			}
+		}
+		if (kv.second.filters.empty() && !is_view) {
+			add(prefix + ".filters", "required (at least one mandatory filter)");
 		}
 		if (!is_view && !coltypes.count(ddb::StringUtil::Lower(kv.second.tenant_column))) {
 			add(prefix + ".tenant_column", "column '" + kv.second.tenant_column + "' does not exist");

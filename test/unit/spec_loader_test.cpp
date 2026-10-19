@@ -117,6 +117,15 @@ void duckbox::test::RunSpecLoaderTests() {
 	Expect(ducklake_spec.PolicyClass() == "analyst", "ducklake policy class");
 	Expect(ducklake_spec.lake.catalog_env == "DUCKBOX_LAKE_CATALOG", "catalog via env name, not inline");
 	Expect(ducklake_spec.lake.s3.access_key.Spec() == "env:DUCKBOX_S3_KEY", "s3 key is a reference");
+	auto authz_spec = LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/authz.yaml");
+	Expect(authz_spec.authorized_paths.size() == 1 &&
+	           authz_spec.authorized_paths[0] == "s3://duckbox-lake/authorized/",
+	       "authz spec authorized_paths");
+	Expect(authz_spec.FindTable("parquet_ok") && authz_spec.FindTable("parquet_ok")->authorized_view,
+	       "authz spec marks parquet_ok as authorized_view");
+	Expect(authz_spec.init_sql.find("read_parquet") != std::string::npos, "authz spec initSQL creates parquet views");
+	Expect(FingerprintSpec(authz_spec) != FingerprintSpec(ducklake_spec),
+	       "authorized_paths/initSQL change the spec fingerprint");
 
 	ExpectThrowContains(
 	    [&] {
@@ -161,6 +170,17 @@ void duckbox::test::RunSpecLoaderTests() {
 	p2 = policy;
 	p2.lake.s3.endpoint = "evil:9";
 	Expect(FingerprintSpec(p2) != FingerprintSpec(policy), "fingerprint includes S3 endpoint");
+	p2 = policy;
+	p2.authorized_paths = {"s3://duckbox-lake/authorized/"};
+	Expect(FingerprintSpec(p2) != FingerprintSpec(policy), "fingerprint includes authorized_paths");
+	{
+		std::string s = mini;
+		s += "authorized_paths:\n  - \"s3://duckbox-lake/authorized/\"\n";
+		auto loaded_ap = LoadSpecString(s, "<ap>");
+		Expect(loaded_ap.authorized_paths.size() == 1 &&
+		           loaded_ap.authorized_paths[0] == "s3://duckbox-lake/authorized/",
+		       "authorized_paths YAML list loads");
+	}
 
 	ExpectThrowContains([&] { ParseSecretRef("super-secret-value", "lake.s3.access_key"); }, "reference",
 	                    "inline secret values rejected");

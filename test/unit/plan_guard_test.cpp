@@ -4,6 +4,8 @@
 #include "duckbox/plan_check.hpp"
 #include "duckbox/tenant_key.hpp"
 
+#include <unordered_map>
+
 void duckbox::test::RunPlanGuardTests() {
 	using namespace duckbox;
 	auto policy = TestPolicy();
@@ -205,5 +207,68 @@ void duckbox::test::RunPlanGuardTests() {
 		ddb::DBConfig cfg;
 		checker.Register(cfg, lake, key_a);
 		Expect(true, "PlanChecker::Register installs the optimizer extension");
+	}
+	{
+		auto range = MakeScan("range", {"1", "3"});
+		auto key = LogicalGetScanKey(*range);
+		std::unordered_map<std::string, int> budget;
+		budget[key] = 1;
+		try {
+			CheckLogicalPlan(*range, policy, key_a, &budget);
+			Expect(true, "opaque authorized-view budget skips table-function denial");
+		} catch (const std::exception &e) {
+			Expect(false, std::string("opaque range scan should be skipped: ") + e.what());
+		}
+		Expect(budget[key] == 1, "table-function opaque skip does not consume multiplicity");
+		auto secrets = MakeScan("ducklake_scan", {"secrets"});
+		auto skey = LogicalGetScanKey(*secrets);
+		std::unordered_map<std::string, int> sb;
+		sb[skey] = 1;
+		try {
+			CheckLogicalPlan(*secrets, lake, key_a, &sb);
+			Expect(true, "opaque budget skips a view-body table scan");
+		} catch (const std::exception &e) {
+			Expect(false, std::string("opaque secrets scan should be skipped: ") + e.what());
+		}
+		Expect(sb[skey] == 0, "table-scan opaque budget is consumed");
+		ExpectThrowContains([&] { CheckLogicalPlan(*secrets, lake, key_a, &sb); }, "not allowlisted",
+		                    "exhausted opaque budget still denies the leftover table scan");
+	}
+	{
+		auto a = MakeScan("read_parquet", {"s3://bucket/ok.parquet"});
+		auto b = MakeScan("read_parquet", {"s3://bucket/ok.parquet"});
+		auto key = LogicalGetScanKey(*a);
+		a->children.push_back(std::move(b));
+		std::unordered_map<std::string, int> one;
+		one[key] = 1;
+		try {
+			CheckLogicalPlan(*a, policy, key_a, &one);
+			Expect(true, "table-function view scans stay opaque even if inlining duplicates gets");
+		} catch (const std::exception &e) {
+			Expect(false, std::string("opaque parquet scans should be skipped: ") + e.what());
+		}
+		auto secrets = MakeScan("read_parquet", {"s3://bucket/other.parquet"});
+		std::unordered_map<std::string, int> other;
+		other[key] = 2;
+		ExpectThrowContains([&] { CheckLogicalPlan(*secrets, policy, key_a, &other); }, "denied in user SQL",
+		                    "opaque budget does not cover a different scan key");
+	}
+	{
+		auto a = MakeScan("ducklake_scan", {"secrets"});
+		auto b = MakeScan("ducklake_scan", {"secrets"});
+		auto key = LogicalGetScanKey(*a);
+		a->children.push_back(std::move(b));
+		std::unordered_map<std::string, int> one;
+		one[key] = 1;
+		ExpectThrowContains([&] { CheckLogicalPlan(*a, lake, key_a, &one); }, "not allowlisted",
+		                    "leftover agent-written table scan is denied after view budget is consumed");
+		std::unordered_map<std::string, int> two;
+		two[key] = 2;
+		try {
+			CheckLogicalPlan(*a, lake, key_a, &two);
+			Expect(true, "two matching view table scans are both opaque when budget is 2");
+		} catch (const std::exception &e) {
+			Expect(false, std::string("budget 2 should cover both secrets scans: ") + e.what());
+		}
 	}
 }
