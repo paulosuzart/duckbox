@@ -53,6 +53,26 @@ void duckbox::test::RunCryptoTests() {
 
 	ExpectThrowContains([&] { VerifyJwtHs256("not-a-jwt", secret); }, "malformed", "H1 malformed JWT is rejected");
 
+	auto rs256 = MkJwt(secret, "{\"alg\":\"RS256\",\"typ\":\"JWT\"}",
+	                   std::string("{\"sub\":\"analyst-svc\",\"exp\":") + std::to_string(now + 3600) + "}");
+	ExpectThrowContains([&] { VerifyJwtHs256(rs256, secret); }, "HS256",
+	                    "H1 RS256 confusion (HMAC under alg=RS256) is rejected");
+
+	auto none_empty_hdr = Base64UrlEncode(std::string("{\"alg\":\"none\",\"typ\":\"JWT\"}"));
+	auto none_empty_pay =
+	    Base64UrlEncode(std::string("{\"sub\":\"analyst-svc\",\"exp\":") + std::to_string(now + 3600) + "}");
+	ExpectThrowContains([&] { VerifyJwtHs256(none_empty_hdr + "." + none_empty_pay + ".", secret); }, "unsigned JWT",
+	                    "H1 alg=none with an empty signature is rejected");
+
+	auto good = MkJwt(secret, "{\"alg\":\"HS256\",\"typ\":\"JWT\"}",
+	                  std::string("{\"sub\":\"analyst-svc\",\"exp\":") + std::to_string(now + 3600) + "}");
+	auto d1 = good.find('.');
+	auto d2 = good.find('.', d1 + 1);
+	auto evil_payload =
+	    Base64UrlEncode(std::string("{\"sub\":\"attacker\",\"exp\":") + std::to_string(now + 3600) + "}");
+	auto tampered = good.substr(0, d1 + 1) + evil_payload + good.substr(d2);
+	ExpectThrowContains([&] { VerifyJwtHs256(tampered, secret); }, "signature", "H1 tampered payload is rejected");
+
 	auto aad = "sb-1\n1\ntenant_21:user";
 	auto sealed = AesGcmEncrypt("handle-secret", "payload", aad);
 	Expect(AesGcmDecrypt("handle-secret", sealed, aad) == "payload", "AES-GCM roundtrip with AAD");

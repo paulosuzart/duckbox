@@ -17,7 +17,8 @@ if(NOT EXISTS "${DUCKBOX_DEPS}/duckdb/include/duckdb/parser/parser.hpp" OR
    NOT EXISTS "${DUCKBOX_DEPS}/duckdb/lib/libduckdb_static.a" OR
    NOT EXISTS "${DUCKBOX_DEPS}/httplib/httplib.h" OR
    NOT EXISTS "${DUCKBOX_DEPS}/yaml-cpp-0.8.0/CMakeLists.txt" OR
-   NOT EXISTS "${DUCKBOX_DEPS}/nlohmann/nlohmann/json.hpp")
+   NOT EXISTS "${DUCKBOX_DEPS}/nlohmann/nlohmann/json.hpp" OR
+   NOT EXISTS "${DUCKBOX_DEPS}/jwt-cpp/include/jwt-cpp/jwt.h")
   message(STATUS "Fetching DuckDB ${DUCKBOX_DUCKDB_VERSION} and httplib into ${DUCKBOX_DEPS}")
   execute_process(
     COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/fetch_deps.sh"
@@ -57,6 +58,21 @@ if(NOT EXISTS "${DUCKBOX_DEPS}/nlohmann/nlohmann/json.hpp")
     FetchContent_Populate(nlohmann_json)
     file(MAKE_DIRECTORY "${DUCKBOX_DEPS}/nlohmann/nlohmann")
     file(COPY "${nlohmann_json_SOURCE_DIR}/json.hpp" DESTINATION "${DUCKBOX_DEPS}/nlohmann/nlohmann")
+  endif()
+endif()
+
+# jwt-cpp: HS256 JWT verification (OpenSSL backend, nlohmann traits). Never a homemade verifier.
+if(NOT EXISTS "${DUCKBOX_DEPS}/jwt-cpp/include/jwt-cpp/jwt.h")
+  include(FetchContent)
+  FetchContent_Declare(
+    jwt_cpp
+    URL https://github.com/Thalhammer/jwt-cpp/archive/refs/tags/v0.7.0.tar.gz
+    URL_HASH SHA256=b9eb270e3ba8221e4b2bc38723c9a1cb4fa6c241a42908b9a334daff31137406)
+  FetchContent_GetProperties(jwt_cpp)
+  if(NOT jwt_cpp_POPULATED)
+    FetchContent_Populate(jwt_cpp)
+    file(MAKE_DIRECTORY "${DUCKBOX_DEPS}/jwt-cpp")
+    file(COPY "${jwt_cpp_SOURCE_DIR}/include" DESTINATION "${DUCKBOX_DEPS}/jwt-cpp")
   endif()
 endif()
 
@@ -168,7 +184,8 @@ target_include_directories(duckbox_core
     ${CMAKE_SOURCE_DIR}/server/include
     ${DUCKBOX_DEPS}/duckdb/include
     ${DUCKBOX_DEPS}/httplib
-    ${DUCKBOX_DEPS}/nlohmann)
+    ${DUCKBOX_DEPS}/nlohmann
+    ${DUCKBOX_DEPS}/jwt-cpp/include)
 target_compile_definitions(duckbox_core PUBLIC DUCKBOX_DUCKDB_VERSION="${DUCKBOX_DUCKDB_VERSION}")
 if(NOT MSVC)
   target_compile_options(duckbox_core PRIVATE -Wall -Wextra -Wno-unused-parameter)

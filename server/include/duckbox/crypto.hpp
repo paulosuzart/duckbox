@@ -28,8 +28,9 @@ std::string AesGcmEncrypt(const std::string &key, const std::string &plaintext, 
 // HandleError on truncated input, AAD/tag mismatch (does not distinguish which).
 std::string AesGcmDecrypt(const std::string &key, const std::string &blob, const std::string &aad = {});
 
-// HS256 only. Returns JWT `sub`. Requires alg == "HS256" exactly, a numeric
-// `exp` (60s leeway), and optional `nbf`. Rejects alg=none and bad signatures.
+// HS256 only (jwt-cpp, OpenSSL backend). Returns JWT `sub`. Requires
+// alg == "HS256" exactly, a numeric `exp` (60s leeway), and optional `nbf`.
+// Rejects alg=none, alg confusion (e.g. RS256), and bad signatures.
 std::string VerifyJwtHs256(const std::string &token, const std::string &secret);
 
 } // namespace duckbox

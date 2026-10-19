@@ -31,7 +31,9 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
       - name: Install AWS SDK C++ (S3, vcpkg)
         run: bash scripts/install_aws_sdk.sh
       - name: Build
@@ -63,7 +65,9 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
       - name: Install AWS SDK C++ (S3, vcpkg)
         run: bash scripts/install_aws_sdk.sh
       - name: Coverage (gcovr, server/src >= 75%)
@@ -86,7 +90,9 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-ducklake-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-ducklake-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch deps and build
         run: |
           bash scripts/fetch_deps.sh

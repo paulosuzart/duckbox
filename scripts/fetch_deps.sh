@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download DuckDB 1.5.6 headers + static libs, cpp-httplib, yaml-cpp,
-# and nlohmann/json. AWS SDK C++ (S3) is scripts/install_aws_sdk.sh (vcpkg).
+# nlohmann/json, and jwt-cpp. AWS SDK C++ (S3) is scripts/install_aws_sdk.sh (vcpkg).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,18 +49,31 @@ fi
 
 YAML_CPP_VERSION="${YAML_CPP_VERSION:-0.8.0}"
 NLOHMANN_JSON_VERSION="${NLOHMANN_JSON_VERSION:-v3.11.3}"
+JWT_CPP_VERSION="${JWT_CPP_VERSION:-v0.7.0}"
 yaml_tar="$DEPS/cache/yaml-cpp-${YAML_CPP_VERSION}.tar.gz"
 json_hdr="$DEPS/cache/nlohmann-json-${NLOHMANN_JSON_VERSION}.hpp"
+jwt_tar="$DEPS/cache/jwt-cpp-${JWT_CPP_VERSION}.tar.gz"
 download "https://github.com/duckdb/duckdb/archive/refs/tags/${DUCKDB_VERSION}.tar.gz" "$src_tar"
 download "$base/$lib_zip" "$lib_zip_path"
 download "https://raw.githubusercontent.com/yhirose/cpp-httplib/${HTTP_LIB_VERSION}/httplib.h" "$DEPS/httplib/httplib.h"
 download "https://github.com/jbeder/yaml-cpp/archive/refs/tags/${YAML_CPP_VERSION}.tar.gz" "$yaml_tar"
 download "https://github.com/nlohmann/json/releases/download/${NLOHMANN_JSON_VERSION}/json.hpp" "$json_hdr"
+download "https://github.com/Thalhammer/jwt-cpp/archive/refs/tags/${JWT_CPP_VERSION}.tar.gz" "$jwt_tar"
 mkdir -p "$DEPS/nlohmann/nlohmann"
 cp -f "$json_hdr" "$DEPS/nlohmann/nlohmann/json.hpp"
 if [[ ! -f "$DEPS/yaml-cpp-${YAML_CPP_VERSION}/CMakeLists.txt" ]]; then
   echo "Extracting yaml-cpp ${YAML_CPP_VERSION}"
   tar -xzf "$yaml_tar" -C "$DEPS"
+fi
+if [[ ! -f "$DEPS/jwt-cpp/include/jwt-cpp/jwt.h" ]]; then
+  echo "Extracting jwt-cpp ${JWT_CPP_VERSION}"
+  tmp="$(mktemp -d)"
+  tar -xzf "$jwt_tar" -C "$tmp"
+  src_root="$(find "$tmp" -maxdepth 1 -type d -name 'jwt-cpp-*' | head -1)"
+  rm -rf "$DEPS/jwt-cpp"
+  mkdir -p "$DEPS/jwt-cpp"
+  cp -a "$src_root/include" "$DEPS/jwt-cpp/include"
+  rm -rf "$tmp"
 fi
 
 if [[ ! -f "$DEPS/duckdb/include/duckdb/parser/parser.hpp" ]]; then

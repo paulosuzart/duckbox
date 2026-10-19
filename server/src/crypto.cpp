@@ -1,17 +1,18 @@
 #include "duckbox/crypto.hpp"
 #include "duckbox/error.hpp"
-#include "duckbox/json.hpp"
 
+#include <jwt-cpp/traits/nlohmann-json/defaults.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
 #include <limits>
+#include <system_error>
 
 namespace duckbox {
 
@@ -257,79 +258,81 @@ std::string AesGcmDecrypt(const std::string &key, const std::string &blob, const
 }
 
 std::string VerifyJwtHs256(const std::string &token, const std::string &secret) {
-	auto d1 = token.find('.');
-	auto d2 = token.find('.', d1 == std::string::npos ? 0 : d1 + 1);
-	if (d1 == std::string::npos || d2 == std::string::npos) {
-		throw AuthError("malformed JWT");
-	}
-	auto header_b64 = token.substr(0, d1);
-	auto payload_b64 = token.substr(d1 + 1, d2 - d1 - 1);
-	auto sig_b64 = token.substr(d2 + 1);
-	auto header_bytes = Base64UrlDecode(header_b64);
-	Json header;
+	constexpr std::chrono::seconds kLeeway{60};
 	try {
-		header = ParseJsonObject(std::string(header_bytes.begin(), header_bytes.end()), "JWT header");
-	} catch (const std::exception &) {
-		throw AuthError("JWT header is not JSON");
-	}
-	if (!header.contains("alg") || !header["alg"].is_string()) {
-		throw AuthError("JWT alg must be HS256");
-	}
-	auto alg = header["alg"].get<std::string>();
-	if (alg != "HS256") {
+		auto decoded = jwt::decode(token);
+		std::string alg;
+		try {
+			if (!decoded.has_header_claim("alg")) {
+				throw AuthError("JWT alg must be HS256");
+			}
+			alg = decoded.get_algorithm();
+		} catch (const AuthError &) {
+			throw;
+		} catch (const std::exception &) {
+			throw AuthError("JWT alg must be HS256");
+		}
 		if (alg == "none") {
 			throw AuthError("unsigned JWT is not accepted");
 		}
-		throw AuthError("JWT alg must be HS256");
-	}
-	auto mac = HmacSha256(secret, header_b64 + "." + payload_b64);
-	auto got = Base64UrlDecode(sig_b64);
-	std::string got_s(got.begin(), got.end());
-	if (!ConstTimeEquals(got_s, mac)) {
-		throw AuthError("invalid JWT signature");
-	}
-	auto payload_b = Base64UrlDecode(payload_b64);
-	Json payload;
-	try {
-		payload = ParseJsonObject(std::string(payload_b.begin(), payload_b.end()), "JWT payload");
-	} catch (const std::exception &) {
-		throw AuthError("JWT payload is not JSON");
-	}
-	if (!payload.contains("sub") || !payload["sub"].is_string() || payload["sub"].get<std::string>().empty()) {
-		throw AuthError("JWT missing sub");
-	}
-	if (!payload.contains("exp") || payload["exp"].is_null()) {
-		throw AuthError("JWT missing exp");
-	}
-	int64_t exp = 0;
-	int64_t nbf = 0;
-	bool has_nbf = false;
-	try {
-		if (!payload["exp"].is_number_integer()) {
-			throw AuthError("JWT exp/nbf must be numeric");
+		if (alg != "HS256") {
+			throw AuthError("JWT alg must be HS256");
 		}
-		exp = payload["exp"].get<int64_t>();
-		if (payload.contains("nbf") && !payload["nbf"].is_null()) {
-			if (!payload["nbf"].is_number_integer()) {
+		try {
+			jwt::verify().allow_algorithm(jwt::algorithm::hs256{secret}).leeway(kLeeway.count()).verify(decoded);
+		} catch (const jwt::error::signature_verification_exception &) {
+			throw AuthError("invalid JWT signature");
+		} catch (const jwt::error::token_verification_exception &e) {
+			if (e.code() == jwt::error::token_verification_error::token_expired) {
+				try {
+					if (decoded.has_not_before()) {
+						auto nbf = decoded.get_not_before();
+						if (std::chrono::system_clock::now() < nbf - kLeeway) {
+							throw AuthError("JWT not yet valid");
+						}
+					}
+				} catch (const AuthError &) {
+					throw;
+				} catch (const std::exception &) {
+					throw AuthError("JWT exp/nbf must be numeric");
+				}
+				throw AuthError("JWT expired");
+			}
+			if (e.code() == jwt::error::token_verification_error::wrong_algorithm) {
+				throw AuthError("JWT alg must be HS256");
+			}
+			if (e.code() == jwt::error::token_verification_error::claim_type_missmatch) {
 				throw AuthError("JWT exp/nbf must be numeric");
 			}
-			nbf = payload["nbf"].get<int64_t>();
-			has_nbf = true;
+			throw AuthError("invalid JWT signature");
+		} catch (const std::bad_cast &) {
+			throw AuthError("JWT exp/nbf must be numeric");
 		}
+		if (!decoded.has_subject()) {
+			throw AuthError("JWT missing sub");
+		}
+		std::string sub;
+		try {
+			sub = decoded.get_subject();
+		} catch (const std::exception &) {
+			throw AuthError("JWT missing sub");
+		}
+		if (sub.empty()) {
+			throw AuthError("JWT missing sub");
+		}
+		if (!decoded.has_expires_at()) {
+			throw AuthError("JWT missing exp");
+		}
+		return sub;
 	} catch (const AuthError &) {
 		throw;
+	} catch (const std::invalid_argument &) {
+		throw AuthError("malformed JWT");
+	} catch (const jwt::error::invalid_json_exception &) {
+		throw AuthError("malformed JWT");
 	} catch (const std::exception &) {
-		throw AuthError("JWT exp/nbf must be numeric");
+		throw AuthError("malformed JWT");
 	}
-	constexpr int64_t kLeeway = 60;
-	auto now = static_cast<int64_t>(std::time(nullptr));
-	if (exp + kLeeway < now) {
-		throw AuthError("JWT expired");
-	}
-	if (has_nbf && nbf > now + kLeeway) {
-		throw AuthError("JWT not yet valid");
-	}
-	return payload["sub"].get<std::string>();
 }
 
 } // namespace duckbox
