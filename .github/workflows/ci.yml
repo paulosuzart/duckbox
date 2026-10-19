@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  enforcement:
+    name: Build and enforcement tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ unzip curl ca-certificates
+      - name: Cache DuckDB deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            .deps
+            ~/.duckdb
+          key: duckdb-v1.5.6-nanoarrow-${{ runner.os }}-${{ runner.arch }}
+      - name: Build
+        run: make build CXX=g++
+      - name: Enforcement tests
+        run: make test
