@@ -5,7 +5,6 @@
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/policy.hpp"
-#include "duckbox/s3.hpp"
 #include "duckbox/secrets.hpp"
 #include "duckbox/spec_validator.hpp"
 #include "duckbox/yaml.hpp"
@@ -280,14 +279,6 @@ void duckbox::test::RunSpecLoaderTests() {
 		auto hu = ParseListenAddress("http://127.0.0.1:9000", 80);
 		Expect(hu.first == "127.0.0.1" && hu.second == 9000, "Arrow URI parses http URL");
 		ExpectThrowContains([&] { ParseListenAddress("", 80); }, "empty", "empty listen is rejected");
-	}
-	{
-		auto keys = ParseS3ListKeysXml(
-		    "<ListBucketResult><Contents><Key>sandboxes/a/current.json</Key></Contents>"
-		    "<Contents><Key>path/with/&amp;ampersand</Key></Contents></ListBucketResult>");
-		Expect(keys.size() == 2 && keys[0] == "sandboxes/a/current.json", "ListObjectsV2 Key is parsed");
-		Expect(keys[1] == "path/with/&ampersand", "ListObjectsV2 unescapes XML entities");
-		Expect(ParseS3ListKeysXml("not xml").empty(), "malformed ListObjectsV2 XML yields no keys");
 	}
 	{
 		auto path = "/tmp/duckbox-daemon-full.yaml";

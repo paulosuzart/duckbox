@@ -16,9 +16,11 @@ jobs:
   enforcement:
     name: Build and tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     env:
       DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+      CC: gcc
+      CXX: g++
     steps:
       - uses: actions/checkout@v4
       - name: Install Arrow Flight SQL + build tools
@@ -29,7 +31,9 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-tinyxml210-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
+      - name: Install AWS SDK C++ (S3, vcpkg)
+        run: bash scripts/install_aws_sdk.sh
       - name: Build
         run: make build CXX=g++
       - name: Unit tests
@@ -44,9 +48,11 @@ jobs:
   coverage:
     name: Line coverage (gcovr)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     env:
       DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+      CC: gcc
+      CXX: g++
     steps:
       - uses: actions/checkout@v4
       - name: Install Arrow Flight SQL + build tools
@@ -57,14 +63,19 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-tinyxml210-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
+      - name: Install AWS SDK C++ (S3, vcpkg)
+        run: bash scripts/install_aws_sdk.sh
       - name: Coverage (gcovr, server/src >= 75%)
         run: make coverage
 
   readme-runbook:
     name: README local runbook (compose, CLI, quickstart)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
+    env:
+      CC: gcc
+      CXX: g++
     steps:
       - uses: actions/checkout@v4
       - name: Install Arrow Flight SQL + build tools
@@ -75,10 +86,11 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-tinyxml210-ducklake-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-ducklake-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch deps and build
         run: |
           bash scripts/fetch_deps.sh
+          bash scripts/install_aws_sdk.sh
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
           cmake --build build --parallel
       - name: Tests (README step 3)

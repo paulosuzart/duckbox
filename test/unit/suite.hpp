@@ -13,6 +13,7 @@ void RunHandleTests();
 void RunCryptoTests();
 void RunRegistryTests();
 void RunMetricsTests();
+void RunS3ClientTests();
 
 } // namespace test
 } // namespace duckbox

@@ -1,11 +1,16 @@
 #pragma once
 
-// Path-style S3 client for the control-plane prefix (leases + named sandbox
-// registry). Uses the lease credential only. Never used for lake data.
+// Path-style S3 control-plane client (leases + named sandbox registry).
+// Uses the lease credential only. Never used for lake data.
+//
+// Arrow S3FileSystem has no If-Match / If-None-Match on writes, so the real
+// implementation is aws-sdk-cpp S3Client (PutObject SetIfMatch/SetIfNoneMatch)
+// with endpoint override + path-style addressing for RustFS. Tests inject
+// MakeMemoryS3ControlClient().
 
 #include "duckbox/daemon_config.hpp"
 
-#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -20,33 +25,23 @@ struct S3Object { // HTTP status + body; error is a transport message, never a s
 
 class S3ControlClient {
 public:
-	explicit S3ControlClient(LeaseSettings lease);
+	virtual ~S3ControlClient() = default;
 
-	S3Object Get(const std::string &key) const; // 404 is status=404, not an exception
-	// SigV4 signs Content-Type; extra headers are not duplicated in the canonical request.
-	S3Object Put(const std::string &key, const std::string &body, const std::string &if_match = "",
-	             const std::string &if_none_match = "") const;
-	S3Object Delete(const std::string &key) const;
-	std::vector<std::string> ListKeys(const std::string &prefix) const; // ListObjectsV2, path-style
+	virtual S3Object Get(const std::string &key) const = 0; // 404 is status=404, not an exception
+	virtual S3Object Put(const std::string &key, const std::string &body, const std::string &if_match = "",
+	                     const std::string &if_none_match = "") const = 0;
+	virtual S3Object Delete(const std::string &key) const = 0;
+	virtual std::vector<std::string> ListKeys(const std::string &prefix) const = 0; // ListObjectsV2, path-style
 
-	const std::string &bucket() const {
-		return bucket_;
-	}
-
-private:
-	S3Object Request(const std::string &method, const std::string &key, const std::string &query,
-	                 const std::string &body, const std::map<std::string, std::string> &extra) const;
-
-	std::string host_;
-	int port_ = 80;
-	bool https_ = false;
-	std::string region_ = "us-east-1";
-	std::string bucket_;
-	std::string access_key_;
-	std::string secret_key_;
+	virtual const std::string &bucket() const = 0;
 };
 
-// Parses ListObjectsV2 XML (tinyxml2). Unescapes entities; skips malformed docs.
-std::vector<std::string> ParseS3ListKeysXml(const std::string &xml);
+// aws-sdk-cpp S3Client. Path-style + endpoint override. Throws PolicyError if
+// bucket/credentials/endpoint are missing or unparseable.
+std::shared_ptr<S3ControlClient> MakeS3ControlClient(LeaseSettings lease);
+// In-memory If-Match / If-None-Match client for tests.
+std::shared_ptr<S3ControlClient> MakeMemoryS3ControlClient(std::string bucket = "control");
+// Conditional PUT If-None-Match:*. Empty string = ok (200/204/412); else error.
+std::string ProbeControlPlaneS3(const LeaseSettings &lease);
 
 } // namespace duckbox

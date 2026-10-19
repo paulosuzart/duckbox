@@ -46,7 +46,8 @@ brew install apache-arrow openssl cmake
 ```
 
 ```bash
-bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp + nlohmann/json + tinyxml2
+bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp + nlohmann/json
+bash scripts/install_aws_sdk.sh     # AWS SDK for C++ (S3 only, vcpkg) — registry/lease conditional PUTs
 ```
 
 ### 2. Build
@@ -109,7 +110,7 @@ print(db.query("SELECT id, title, amount FROM deals"))
 
 `DUCKBOX_URL` / `DUCKBOX_SPEC` / `DUCKBOX_SANDBOX` override the defaults. Memory lake (no Docker): serve `daemons/memory.yaml` and set `DUCKBOX_SPEC=policies/memory/analyst.yaml`. A flag-oriented one-shot lives at `examples/python/query_cli.py`.
 
-**RustFS** is the emulator in `docker-compose.yml` to match the product S3 target; if the image is unusable, MinIO is the fallback (same path-style endpoint). Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads.
+**RustFS** is the emulator in `docker-compose.yml` to match the product S3 target; if the image is unusable, MinIO is the fallback (same path-style endpoint). Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads — that client is **aws-sdk-cpp S3Client** (vcpkg, S3 component only) with endpoint override and path-style addressing. Arrow `S3FileSystem` has no conditional-write headers, so it is not used for the control plane. Tests inject an in-memory `S3ControlClient`.
 
 ## Named sandboxes
 

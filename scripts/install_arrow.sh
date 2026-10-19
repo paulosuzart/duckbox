@@ -10,7 +10,8 @@ if [[ "$os" == "Linux" ]]; then
     SUDO=""
   fi
   $SUDO apt-get update -qq
-  $SUDO apt-get install -y --no-install-recommends ca-certificates lsb-release wget g++ cmake unzip curl libssl-dev
+  $SUDO apt-get install -y --no-install-recommends ca-certificates lsb-release wget g++ cmake unzip curl zip tar \
+    pkg-config ninja-build git libssl-dev libcurl4-openssl-dev zlib1g-dev
   codename="$(lsb_release --codename --short)"
   deb="apache-arrow-apt-source-latest-${codename}.deb"
   wget -q "https://packages.apache.org/artifactory/arrow/ubuntu/${deb}" -O "/tmp/${deb}"

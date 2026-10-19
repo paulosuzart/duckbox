@@ -8,6 +8,7 @@ export DUCKBOX_HANDLE_SECRET ?= duckbox-dev-secret
 
 deps:
 	bash $(PROJ_DIR)scripts/fetch_deps.sh
+	bash $(PROJ_DIR)scripts/install_aws_sdk.sh
 
 arrow:
 	bash $(PROJ_DIR)scripts/install_arrow.sh

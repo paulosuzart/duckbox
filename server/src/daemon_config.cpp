@@ -1,11 +1,11 @@
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/policy.hpp"
+#include "duckbox/s3.hpp"
 #include "duckbox/secrets.hpp"
 #include "duckbox/yaml.hpp"
 
 #include "arrow/result.h"
 #include "arrow/util/uri.h"
-#include "httplib.h"
 
 #include <cctype>
 #include <cstdlib>
@@ -291,32 +291,12 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 	if (!endpoint.empty() && !cfg.lease.skip_probe) {
 		if (cfg.lease.bucket.empty()) {
 			add("lease.bucket", "required when lease endpoint is set");
-		}
-		std::string host = endpoint;
-		int port = 80;
-		if (host.rfind("http://", 0) == 0) {
-			host = host.substr(7);
-			port = 80;
-		} else if (host.rfind("https://", 0) == 0) {
-			host = host.substr(8);
-			port = 443;
-		}
-		auto colon = host.rfind(':');
-		if (colon != std::string::npos) {
-			port = std::stoi(host.substr(colon + 1));
-			host = host.substr(0, colon);
-		}
-		httplib::Client cli(host, port);
-		cli.set_connection_timeout(2, 0);
-		auto res = cli.Get("/");
-		if (!res) {
-			add("lease.endpoint", "not reachable (daemon lease/registry prefix only; no lake access)");
+		} else if (cfg.lease.access_key_env.empty() || cfg.lease.secret_key_env.empty()) {
+			add("lease.access_key_env", "required (with lease.secret_key_env) for the S3 probe");
 		} else {
-			std::string probe = "/" + cfg.lease.bucket + "/" + cfg.lease.prefix + ".duckbox-cw-probe";
-			httplib::Headers h = {{"If-None-Match", "*"}};
-			auto put = cli.Put(probe.c_str(), h, "duckbox-lease-probe", "text/plain");
-			if (!put) {
-				add("lease", "conditional PUT (If-None-Match) failed to reach " + probe);
+			auto err = ProbeControlPlaneS3(cfg.lease);
+			if (!err.empty()) {
+				add("lease", err);
 			}
 		}
 	}

@@ -351,7 +351,7 @@ SandboxRecord MemorySandboxRegistry::GetVersion(const std::string &id, int versi
 }
 
 S3SandboxRegistry::S3SandboxRegistry(LeaseSettings lease)
-    : S3SandboxRegistry(std::make_shared<S3ControlClient>(std::move(lease))) {
+    : S3SandboxRegistry(MakeS3ControlClient(std::move(lease))) {
 }
 
 S3SandboxRegistry::S3SandboxRegistry(std::shared_ptr<S3ControlClient> client) : client_(std::move(client)) {

@@ -13,5 +13,6 @@ int main() {
 	RunCryptoTests();
 	RunRegistryTests();
 	RunMetricsTests();
+	RunS3ClientTests();
 	return ReportAndExit("unit");
 }
