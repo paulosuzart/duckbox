@@ -20,6 +20,7 @@ SQL = "SELECT id, title, amount FROM deals ORDER BY id"
 
 
 def show(title: str, df) -> None:
+    """Print a labeled DataFrame without the pandas index."""
     print(f"\n{title}")
     print(df.to_string(index=False))
 

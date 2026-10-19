@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Download DuckDB 1.5.6 headers + static libs and cpp-httplib.
+# Download DuckDB 1.5.6 headers + static libs, cpp-httplib, and yaml-cpp.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -46,9 +46,16 @@ if [[ -f /tmp/duckdb-dl/static-libs-linux-amd64.zip && "$lib_zip" == "static-lib
   cp /tmp/duckdb-dl/static-libs-linux-amd64.zip "$lib_zip_path"
 fi
 
+YAML_CPP_VERSION="${YAML_CPP_VERSION:-0.8.0}"
+yaml_tar="$DEPS/cache/yaml-cpp-${YAML_CPP_VERSION}.tar.gz"
 download "https://github.com/duckdb/duckdb/archive/refs/tags/${DUCKDB_VERSION}.tar.gz" "$src_tar"
 download "$base/$lib_zip" "$lib_zip_path"
 download "https://raw.githubusercontent.com/yhirose/cpp-httplib/${HTTP_LIB_VERSION}/httplib.h" "$DEPS/httplib/httplib.h"
+download "https://github.com/jbeder/yaml-cpp/archive/refs/tags/${YAML_CPP_VERSION}.tar.gz" "$yaml_tar"
+if [[ ! -f "$DEPS/yaml-cpp-${YAML_CPP_VERSION}/CMakeLists.txt" ]]; then
+  echo "Extracting yaml-cpp ${YAML_CPP_VERSION}"
+  tar -xzf "$yaml_tar" -C "$DEPS"
+fi
 
 if [[ ! -f "$DEPS/duckdb/include/duckdb/parser/parser.hpp" ]]; then
   echo "Extracting DuckDB headers"

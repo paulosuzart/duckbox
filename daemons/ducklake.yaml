@@ -2,6 +2,14 @@ name: ducklake-dev
 listen: 127.0.0.1:4747
 auth:
   mode: trusted
+  allow_insecure_dev: true
+lake_allow:
+  s3_endpoints:
+    - "127.0.0.1:9000"
+  secret_refs:
+    - env:DUCKBOX_S3_KEY
+    - env:DUCKBOX_S3_SECRET
+    - env:DUCKBOX_LAKE_CATALOG
 limits:
   handle_ttl_seconds: 300
   idle_evict_ms: 300000

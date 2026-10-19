@@ -45,9 +45,10 @@ public:
 		return static_cast<bool>(db_);
 	}
 
-	QueryOutput Execute(const std::string &sql);
-	QueryOutput ExecuteRewritten(const std::string &sql, std::vector<ddb::Value> params);
+	QueryOutput Execute(const std::string &sql); // rewrite + plan guard + single in-memory Arrow export
+	QueryOutput ExecuteRewritten(const std::string &sql, std::vector<ddb::Value> params); // re-validates handle SQL
 	std::vector<ColumnSchema> DescribeRewritten(const std::string &sql);
+	ddb::unique_ptr<ddb::LogicalOperator> ExtractPlan(const std::string &sql);
 
 	const Policy &GetPolicy() const {
 		return policy_;

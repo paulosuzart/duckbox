@@ -31,7 +31,7 @@ public:
 
 class EnvFileSecretResolver : public SecretResolver {
 public:
-	std::string Resolve(const SecretRef &ref, const std::string &field_path) const override;
+	std::string Resolve(const SecretRef &ref, const std::string &field_path) const override; // value never in the message
 };
 
 // env:NAME, file:/abs/path. Bare NAME (from *_env fields) is env:NAME.

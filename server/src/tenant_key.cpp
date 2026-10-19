@@ -2,6 +2,7 @@
 #include "duckbox/error.hpp"
 
 #include <cctype>
+#include <limits>
 #include <regex>
 #include <sstream>
 
@@ -49,7 +50,14 @@ void Finalize(TenantKey &k, const std::vector<std::string> &strip) {
 		k.vars["user"] = k.user;
 	}
 	if (LooksNumeric(k.tenant_id)) {
-		k.tenant_id_i32 = std::stoi(k.tenant_id);
+		try {
+			k.tenant_id_i64 = std::stoll(k.tenant_id);
+			if (k.tenant_id_i64 >= std::numeric_limits<int32_t>::min() &&
+			    k.tenant_id_i64 <= std::numeric_limits<int32_t>::max()) {
+				k.tenant_id_i32 = static_cast<int32_t>(k.tenant_id_i64);
+			}
+		} catch (...) {
+		}
 	}
 }
 

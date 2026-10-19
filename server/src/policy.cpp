@@ -1,9 +1,12 @@
 #include "duckbox/policy.hpp"
 #include "duckbox/crypto.hpp"
+#include "duckbox/lake.hpp"
 #include "duckbox/yaml.hpp"
+#include "duckbox/duckdb_layer.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -16,21 +19,12 @@ std::string Lower(std::string s) {
 	return s;
 }
 
-std::vector<std::string> StringList(const YamlNode *n) {
-	std::vector<std::string> out;
-	if (!n) {
-		return out;
-	}
-	if (n->kind == YamlNode::Kind::Seq) {
-		for (auto &item : n->seq) {
-			if (item.kind == YamlNode::Kind::Scalar) {
-				out.push_back(item.scalar);
-			}
-		}
-	} else if (n->kind == YamlNode::Kind::Scalar && !n->scalar.empty() && n->scalar != "[]") {
-		out.push_back(n->scalar);
-	}
-	return out;
+std::string ChildPath(const std::string &parent, const std::string &key) {
+	return parent.empty() ? key : parent + "." + key;
+}
+
+std::vector<std::string> StringList(const YamlNode *n, const std::string &path) {
+	return YamlStringList(n, path);
 }
 
 SecretRef OptionalRef(const YamlNode *parent, const char *ref_key, const char *env_key, const std::string &path) {
@@ -52,19 +46,21 @@ KeySpec LoadKeySpec(const YamlNode *n) {
 	if (!n) {
 		return k;
 	}
+	YamlRejectUnknownKeys(*n, {"patterns", "pattern", "strip_prefixes", "regex", "names", "regex_names", "split",
+	                           "split_names"});
 	k.regex = n->GetString("regex");
 	k.split = n->GetString("split");
-	k.regex_names = StringList(n->Get("names"));
+	k.regex_names = StringList(n->Get("names"), ChildPath(n->path, "names"));
 	if (k.regex_names.empty()) {
-		k.regex_names = StringList(n->Get("regex_names"));
+		k.regex_names = StringList(n->Get("regex_names"), ChildPath(n->path, "regex_names"));
 	}
-	k.split_names = StringList(n->Get("split_names"));
+	k.split_names = StringList(n->Get("split_names"), ChildPath(n->path, "split_names"));
 	if (k.split_names.empty() && k.regex.empty()) {
-		k.split_names = StringList(n->Get("names"));
+		k.split_names = StringList(n->Get("names"), ChildPath(n->path, "names"));
 	}
-	k.strip_prefixes = StringList(n->Get("strip_prefixes"));
+	k.strip_prefixes = StringList(n->Get("strip_prefixes"), ChildPath(n->path, "strip_prefixes"));
 	if (auto *pats = n->Get("patterns")) {
-		k.patterns = StringList(pats);
+		k.patterns = StringList(pats, ChildPath(n->path, "patterns"));
 	}
 	auto single = n->GetString("pattern");
 	if (!single.empty()) {
@@ -77,6 +73,9 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	if (!root.IsMap()) {
 		throw PolicyError("sandbox spec root must be a mapping: " + path);
 	}
+	YamlRejectUnknownKeys(root, {"id", "key", "name", "policy_class", "metrics_class", "auth", "resources", "lake",
+	                             "tables", "functions", "deny_table_functions", "require_prepared_statements",
+	                             "init_sql", "bootstrap_sql_inline", "handles", "attachments", "metrics"});
 	SandboxSpec p;
 	p.source_path = path;
 	p.yaml_body = body;
@@ -93,23 +92,28 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	}
 	if (p.policy_class.empty()) {
 		if (auto *m = root.Get("metrics")) {
+			YamlRejectUnknownKeys(*m, {"class"});
 			p.policy_class = m->GetString("class");
 		}
 	}
 	if (p.metrics_class.empty()) {
 		p.metrics_class = p.policy_class;
 	}
-	p.attachments = StringList(root.Get("attachments"));
+	p.attachments = StringList(root.Get("attachments"), "attachments");
 	if (auto *auth = root.Get("auth")) {
+		YamlRejectUnknownKeys(*auth, {"key"});
 		p.key = LoadKeySpec(auth->Get("key"));
 	}
 	if (auto *res = root.Get("resources")) {
+		YamlRejectUnknownKeys(*res, {"memory_limit", "threads", "query_timeout_ms", "max_result_rows"});
 		p.resources.memory_limit = res->GetString("memory_limit", p.resources.memory_limit);
 		p.resources.threads = res->GetInt("threads", p.resources.threads);
 		p.resources.query_timeout_ms = res->GetInt("query_timeout_ms", p.resources.query_timeout_ms);
 		p.resources.max_result_rows = res->GetInt("max_result_rows", p.resources.max_result_rows);
 	}
 	if (auto *lake = root.Get("lake")) {
+		YamlRejectUnknownKeys(*lake, {"kind", "alias", "catalog", "catalog_env", "catalog_ref", "data_path",
+		                              "read_only", "bootstrap_sql", "init_sql", "extensions", "s3"});
 		auto kind = Lower(lake->GetString("kind", "memory"));
 		if (kind == "ducklake") {
 			p.lake.kind = LakeKind::Ducklake;
@@ -128,8 +132,16 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 		if (p.lake.bootstrap_sql_path.empty()) {
 			p.lake.bootstrap_sql_path = lake->GetString("init_sql");
 		}
-		p.lake.extensions = StringList(lake->Get("extensions"));
+		if (p.lake.bootstrap_sql_path.find('\n') != std::string::npos ||
+		    ddb::StringUtil::StartsWith(ddb::StringUtil::Lower(p.lake.bootstrap_sql_path), "create") ||
+		    ddb::StringUtil::StartsWith(ddb::StringUtil::Lower(p.lake.bootstrap_sql_path), "insert")) {
+			p.lake.bootstrap_sql = p.lake.bootstrap_sql_path;
+			p.lake.bootstrap_sql_path.clear();
+		}
+		p.lake.extensions = StringList(lake->Get("extensions"), "lake.extensions");
 		if (auto *s3 = lake->Get("s3")) {
+			YamlRejectUnknownKeys(*s3, {"endpoint", "endpoint_env", "url_style", "use_ssl", "access_key",
+			                            "access_key_env", "secret_key", "secret_key_env", "region", "region_env"});
 			p.lake.s3.endpoint = s3->GetString("endpoint");
 			p.lake.s3.endpoint_env = s3->GetString("endpoint_env");
 			p.lake.s3.url_style = s3->GetString("url_style", "path");
@@ -142,25 +154,34 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	}
 	if (auto *tables = root.Get("tables")) {
 		if (!tables->IsMap()) {
-			throw PolicyError("tables must be a mapping");
+			throw PolicyError("tables: expected mapping");
 		}
 		for (auto &kv : tables->map) {
+			if (!kv.second.IsMap()) {
+				throw PolicyError("tables." + kv.first + ": expected mapping");
+			}
+			YamlRejectUnknownKeys(kv.second, {"columns", "filters", "tenant_column"});
 			TablePolicy t;
 			t.name = kv.first;
-			t.columns = StringList(kv.second.Get("columns"));
-			t.filters = StringList(kv.second.Get("filters"));
+			t.columns = StringList(kv.second.Get("columns"), ChildPath("tables." + kv.first, "columns"));
+			t.filters = StringList(kv.second.Get("filters"), ChildPath("tables." + kv.first, "filters"));
 			t.tenant_column = kv.second.GetString("tenant_column", "tenant_id");
 			p.tables.emplace(Lower(t.name), std::move(t));
 		}
 	}
 	p.functions.clear();
-	for (auto &fn : StringList(root.Get("functions"))) {
+	for (auto &fn : StringList(root.Get("functions"), "functions")) {
 		p.functions.insert(Lower(fn));
 	}
 	p.deny_table_functions = root.GetBool("deny_table_functions", true);
 	p.require_prepared_statements = root.GetBool("require_prepared_statements", false);
 	p.init_sql = root.GetString("init_sql");
+	auto inline_boot = root.GetString("bootstrap_sql_inline");
+	if (!inline_boot.empty()) {
+		p.lake.bootstrap_sql = inline_boot;
+	}
 	if (auto *h = root.Get("handles")) {
+		YamlRejectUnknownKeys(*h, {"stale_version_grace"});
 		p.handles.stale_version_grace_raw = h->GetString("stale_version_grace");
 		if (!p.handles.stale_version_grace_raw.empty()) {
 			int64_t ms = 0;
@@ -210,9 +231,12 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
 	os << spec.id << '\n' << spec.bound_key << '\n' << spec.name << '\n' << spec.require_prepared_statements << '\n';
 	os << spec.PolicyClass() << '\n';
 	os << static_cast<int>(spec.lake.kind) << '|' << spec.lake.alias << '|' << spec.lake.catalog << '|'
-	   << spec.lake.catalog_ref.Spec() << '|' << spec.lake.data_path << '|' << spec.lake.bootstrap_sql_path << '\n';
-	os << spec.lake.s3.endpoint_env << '|' << spec.lake.s3.access_key.Spec() << '|' << spec.lake.s3.secret_key.Spec()
-	   << '\n';
+	   << spec.lake.catalog_ref.Spec() << '|' << spec.lake.data_path << '|' << spec.lake.bootstrap_sql_path << '|'
+	   << spec.lake.bootstrap_sql << '|' << spec.lake.read_only << '\n';
+	os << spec.deny_table_functions << '\n';
+	os << spec.lake.s3.endpoint << '|' << spec.lake.s3.endpoint_env << '|' << spec.lake.s3.url_style << '|'
+	   << spec.lake.s3.use_ssl << '|' << spec.lake.s3.region << '|' << spec.lake.s3.access_key.Spec() << '|'
+	   << spec.lake.s3.secret_key.Spec() << '\n';
 	for (auto &e : spec.lake.extensions) {
 		os << "ext:" << e << '\n';
 	}
@@ -223,8 +247,18 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
 		os << "p:" << pat << '\n';
 	}
 	os << "re:" << spec.key.regex << '\n';
+	os << "split:" << spec.key.split << '\n';
+	for (auto &n : spec.key.regex_names) {
+		os << "rn:" << n << '\n';
+	}
+	for (auto &n : spec.key.split_names) {
+		os << "sn:" << n << '\n';
+	}
+	for (auto &n : spec.key.strip_prefixes) {
+		os << "sp:" << n << '\n';
+	}
 	for (auto &kv : spec.tables) {
-		os << kv.first << '|';
+		os << kv.first << '|' << kv.second.tenant_column << '|';
 		for (auto &c : kv.second.columns) {
 			os << c << ',';
 		}
@@ -338,7 +372,22 @@ SandboxSpec LoadSpecFile(const std::string &path) {
 	}
 	std::ostringstream os;
 	os << in.rdbuf();
-	return LoadSpecString(os.str(), path);
+	auto spec = LoadSpecString(os.str(), path);
+	if (!spec.lake.bootstrap_sql_path.empty() && spec.lake.bootstrap_sql.empty()) {
+		auto resolved = ResolvePath(std::filesystem::path(path).parent_path().string(), spec.lake.bootstrap_sql_path);
+		if (std::filesystem::path(resolved).is_absolute() &&
+		    spec.lake.bootstrap_sql_path.size() > 0 && spec.lake.bootstrap_sql_path[0] == '/') {
+			throw PolicyError("lake.bootstrap_sql must be a relative path or inlined SQL");
+		}
+		std::ifstream bin(resolved);
+		if (!bin) {
+			throw PolicyError("cannot read lake.bootstrap_sql " + resolved);
+		}
+		std::ostringstream body;
+		body << bin.rdbuf();
+		spec.lake.bootstrap_sql = body.str();
+	}
+	return spec;
 }
 
 } // namespace duckbox

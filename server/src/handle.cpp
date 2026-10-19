@@ -108,24 +108,31 @@ std::string HmacHandleSigner::Sign(const StatementHandle &h) const {
 		                           .count() +
 		                       ttl_seconds_;
 	}
+	// AEAD: the token carries rewritten SQL; HMAC alone left it readable.
 	auto payload = EncodePayload(copy);
-	auto mac = HmacSha256(secret_, payload);
-	return Base64UrlEncode(payload) + "." + Base64UrlEncode(mac);
+	auto sealed = AesGcmEncrypt(secret_, payload);
+	auto mac = HmacSha256(secret_, sealed);
+	return "DBX4." + Base64UrlEncode(sealed) + "." + Base64UrlEncode(mac);
 }
 
 StatementHandle HmacHandleSigner::Verify(const std::string &token) const {
-	auto dot = token.find('.');
-	if (dot == std::string::npos || dot == 0 || dot + 1 >= token.size()) {
+	if (token.rfind("DBX4.", 0) != 0) {
+		throw HandleError("unknown handle version");
+	}
+	auto rest = token.substr(5);
+	auto dot = rest.find('.');
+	if (dot == std::string::npos || dot == 0 || dot + 1 >= rest.size()) {
 		throw HandleError("malformed statement handle");
 	}
-	auto payload_b = Base64UrlDecode(token.substr(0, dot));
-	auto mac_b = Base64UrlDecode(token.substr(dot + 1));
-	std::string payload(payload_b.begin(), payload_b.end());
+	auto sealed_b = Base64UrlDecode(rest.substr(0, dot));
+	auto mac_b = Base64UrlDecode(rest.substr(dot + 1));
+	std::string sealed(sealed_b.begin(), sealed_b.end());
 	std::string mac(mac_b.begin(), mac_b.end());
-	auto expect = HmacSha256(secret_, payload);
+	auto expect = HmacSha256(secret_, sealed);
 	if (!ConstTimeEquals(mac, expect)) {
 		throw HandleError("invalid statement handle signature");
 	}
+	auto payload = AesGcmDecrypt(secret_, sealed);
 	auto h = DecodePayload(payload);
 	auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
 	               .count();

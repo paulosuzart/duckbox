@@ -9,6 +9,7 @@
 #include <functional>
 #include <iostream>
 #include <sstream>
+#include <unordered_set>
 
 namespace duckbox {
 namespace {
@@ -21,24 +22,14 @@ std::pair<std::string, int> ParseListen(const std::string &listen) {
 	return {listen.substr(0, colon), std::stoi(listen.substr(colon + 1))};
 }
 
-std::vector<std::string> StringList(const YamlNode *n) {
-	std::vector<std::string> out;
-	if (!n) {
-		return out;
-	}
-	if (n->IsSeq()) {
-		for (auto &item : n->seq) {
-			if (item.IsScalar() && !item.scalar.empty()) {
-				out.push_back(item.scalar);
-			}
-		}
-	} else if (n->IsScalar() && !n->scalar.empty() && n->scalar != "[]") {
-		out.push_back(n->scalar);
-	}
-	return out;
+std::vector<std::string> StringList(const YamlNode *n, const std::string &path) {
+	return YamlStringList(n, path);
 }
 
 } // namespace
+
+const std::unordered_set<std::string> kDefaultAllowedInitSettings = {
+    "memory_limit", "threads", "default_null_order", "default_order", "TimeZone", "calendar", "integer_division"};
 
 bool GlobMatch(const std::string &pattern, const std::string &value) {
 	std::function<bool(size_t, size_t)> rec = [&](size_t pi, size_t vi) -> bool {
@@ -85,9 +76,9 @@ void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity, const
 
 DaemonConfig DefaultDaemonConfig() {
 	DaemonConfig d;
+	d.allow_insecure_dev = true; // explicit local/dev helper; production YAML must set auth
 	d.handle_secret = "duckbox-dev-secret";
-	d.allowed_init_settings = {"memory_limit", "threads", "default_null_order", "default_order", "TimeZone",
-	                           "calendar",     "integer_division"};
+	d.allowed_init_settings = kDefaultAllowedInitSettings;
 	return d;
 }
 
@@ -96,7 +87,12 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 	if (!root.IsMap()) {
 		throw PolicyError("daemon config root must be a mapping: " + path);
 	}
-	auto d = DefaultDaemonConfig();
+	// Allowed-but-forbidden: lake/tables/policy/spec are rejected below, not as unknown keys.
+	YamlRejectUnknownKeys(root, {"name", "listen", "handle_secret", "handle_secret_env", "auth", "limits", "metrics",
+	                             "metrics_listen", "lake_allow", "lease", "debug_http", "lake", "tables", "policy",
+	                             "spec"});
+	DaemonConfig d;
+	d.allowed_init_settings = kDefaultAllowedInitSettings;
 	d.source_path = path;
 	d.name = root.GetString("name", d.name);
 	d.listen = root.GetString("listen", d.listen);
@@ -107,21 +103,20 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 	}
 	d.debug_http = root.GetString("debug_http");
 	if (auto *metrics = root.Get("metrics")) {
+		YamlRejectUnknownKeys(*metrics, {"listen", "policy_classes"});
 		d.metrics_listen = metrics->GetString("listen", d.metrics_listen);
-		if (auto *classes = metrics->Get("policy_classes")) {
-			d.metrics_policy_classes.clear();
-			if (classes->IsSeq()) {
-				for (auto &item : classes->seq) {
-					if (item.IsScalar() && !item.scalar.empty()) {
-						d.metrics_policy_classes.insert(item.scalar);
-					}
-				}
+		d.metrics_policy_classes.clear();
+		for (auto &item : StringList(metrics->Get("policy_classes"), "metrics.policy_classes")) {
+			if (!item.empty()) {
+				d.metrics_policy_classes.insert(item);
 			}
 		}
 	} else if (!root.GetString("metrics_listen").empty()) {
 		d.metrics_listen = root.GetString("metrics_listen");
 	}
 	if (auto *auth = root.Get("auth")) {
+		YamlRejectUnknownKeys(*auth, {"mode", "allow_insecure_dev", "jwt_secret", "jwt_secret_env", "bearer_secrets",
+		                              "callers"});
 		auto mode = auth->GetString("mode", "trusted");
 		for (char &c : mode) {
 			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -133,14 +128,50 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 		} else {
 			throw PolicyError("unknown auth.mode '" + mode + "'");
 		}
+		d.allow_insecure_dev = auth->GetBool("allow_insecure_dev", d.allow_insecure_dev);
+		auto jwt_env = auth->GetString("jwt_secret_env");
+		if (!jwt_env.empty()) {
+			d.jwt_secret = ResolveSecret(jwt_env, "", "auth.jwt_secret_env");
+		} else {
+			d.jwt_secret = auth->GetString("jwt_secret", d.jwt_secret);
+		}
+		if (auto *secrets = auth->Get("bearer_secrets")) {
+			if (!secrets->IsSeq()) {
+				throw PolicyError("auth.bearer_secrets: expected list");
+			}
+			for (size_t i = 0; i < secrets->seq.size(); i++) {
+				auto &item = secrets->seq[i];
+				if (!item.IsMap()) {
+					throw PolicyError("auth.bearer_secrets[" + std::to_string(i) + "]: expected mapping");
+				}
+				YamlRejectUnknownKeys(item, {"identity", "secret", "secret_env"});
+				BearerSecret b;
+				b.identity = item.GetString("identity");
+				auto raw = item.GetString("secret");
+				auto env = item.GetString("secret_env");
+				if (!env.empty()) {
+					raw = ResolveSecret(env, "", "auth.bearer_secrets.secret_env");
+				}
+				b.secret = raw;
+				if (b.identity.empty() || b.secret.empty()) {
+					throw PolicyError("auth.bearer_secrets[].identity and secret are required");
+				}
+				d.bearer_secrets.push_back(std::move(b));
+			}
+		}
 		if (auto *callers = auth->Get("callers")) {
 			if (!callers->IsSeq()) {
-				throw PolicyError("auth.callers must be a sequence");
+				throw PolicyError("auth.callers: expected list");
 			}
-			for (auto &item : callers->seq) {
+			for (size_t i = 0; i < callers->seq.size(); i++) {
+				auto &item = callers->seq[i];
+				if (!item.IsMap()) {
+					throw PolicyError("auth.callers[" + std::to_string(i) + "]: expected mapping");
+				}
+				YamlRejectUnknownKeys(item, {"identity", "keys"});
 				CallerRule rule;
 				rule.identity = item.GetString("identity");
-				rule.key_patterns = StringList(item.Get("keys"));
+				rule.key_patterns = StringList(item.Get("keys"), "auth.callers[" + std::to_string(i) + "].keys");
 				if (rule.identity.empty()) {
 					throw PolicyError("auth.callers[].identity is required");
 				}
@@ -149,12 +180,20 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 		}
 	}
 	if (auto *lim = root.Get("limits")) {
+		YamlRejectUnknownKeys(*lim, {"handle_ttl_seconds", "idle_evict_ms", "max_sandboxes", "init_sql_timeout_ms"});
 		d.handle_ttl_seconds = lim->GetInt("handle_ttl_seconds", d.handle_ttl_seconds);
 		d.idle_evict_ms = lim->GetInt("idle_evict_ms", d.idle_evict_ms);
 		d.max_sandboxes = static_cast<size_t>(lim->GetInt("max_sandboxes", static_cast<int64_t>(d.max_sandboxes)));
 		d.init_sql_timeout_ms = lim->GetInt("init_sql_timeout_ms", d.init_sql_timeout_ms);
 	}
+	if (auto *allow = root.Get("lake_allow")) {
+		YamlRejectUnknownKeys(*allow, {"s3_endpoints", "secret_refs"});
+		d.lake_allow.s3_endpoints = StringList(allow->Get("s3_endpoints"), "lake_allow.s3_endpoints");
+		d.lake_allow.secret_refs = StringList(allow->Get("secret_refs"), "lake_allow.secret_refs");
+	}
 	if (auto *lease = root.Get("lease")) {
+		YamlRejectUnknownKeys(*lease, {"endpoint", "endpoint_env", "bucket", "prefix", "access_key_env",
+		                               "secret_key_env", "skip_probe"});
 		d.lease.endpoint = lease->GetString("endpoint");
 		d.lease.endpoint_env = lease->GetString("endpoint_env");
 		d.lease.bucket = lease->GetString("bucket");
@@ -186,6 +225,15 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 	}
 	if (cfg.handle_secret.empty()) {
 		add("handle_secret", "required (or handle_secret_env)");
+	} else if (!cfg.allow_insecure_dev && static_cast<int>(cfg.handle_secret.size()) < kMinHandleSecretLen) {
+		add("handle_secret", "must be at least 16 characters unless auth.allow_insecure_dev");
+	}
+	if (!cfg.allow_insecure_dev && cfg.bearer_secrets.empty() && cfg.jwt_secret.empty() &&
+	    cfg.auth_mode != AuthMode::Token) {
+		add("auth", "require auth.bearer_secrets or auth.jwt_secret (or set auth.allow_insecure_dev)");
+	}
+	if (cfg.auth_mode == AuthMode::Token && cfg.jwt_secret.empty() && !cfg.allow_insecure_dev) {
+		add("auth.jwt_secret", "required for token mode");
 	}
 	if (cfg.handle_ttl_seconds <= 0) {
 		add("limits.handle_ttl_seconds", "must be > 0");

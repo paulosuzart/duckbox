@@ -18,6 +18,7 @@ namespace duckbox {
 
 enum class LakeKind { Memory, Ducklake };
 
+// Endpoint and credential refs only. Values are resolved at sandbox warmup.
 struct S3Settings {
 	std::string endpoint;
 	std::string endpoint_env;
@@ -29,6 +30,7 @@ struct S3Settings {
 	std::string region_env;
 };
 
+// Attach target for one sandbox DuckDB. bootstrap_sql is inlined; the daemon never reads host files at warmup.
 struct LakeSettings {
 	LakeKind kind = LakeKind::Memory;
 	std::string alias = "lake";
@@ -38,10 +40,12 @@ struct LakeSettings {
 	std::string data_path;
 	bool read_only = true;
 	std::string bootstrap_sql_path;
+	std::string bootstrap_sql; // inlined SQL; daemon never reads host files at warmup
 	S3Settings s3;
 	std::vector<std::string> extensions;
 };
 
+// Per-sandbox DuckDB resource caps. max_result_rows is always enforced (min with user LIMIT).
 struct Resources {
 	std::string memory_limit = "256MB";
 	int64_t threads = 2;
@@ -76,6 +80,7 @@ struct ColumnMeta {
 	std::string lake_type;
 };
 
+// Allowlisted table. filters are typed equalities (tenant_id, _deleted, …) verified on the bound plan.
 struct TablePolicy {
 	std::string name;
 	std::vector<std::string> columns;

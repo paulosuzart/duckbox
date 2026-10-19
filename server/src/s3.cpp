@@ -87,6 +87,9 @@ S3Object S3ControlClient::Request(const std::string &method, const std::string &
 	headers["host"] = host_hdr;
 	headers["x-amz-content-sha256"] = payload_hash;
 	headers["x-amz-date"] = amz_date;
+	if (method == "PUT") {
+		headers["content-type"] = "application/json";
+	}
 	for (auto &kv : extra) {
 		std::string k = kv.first;
 		for (char &c : k) {
@@ -121,9 +124,6 @@ S3Object S3ControlClient::Request(const std::string &method, const std::string &
 		if (kv.first == "host") {
 			continue;
 		}
-		hh.emplace(kv.first, kv.second);
-	}
-	for (auto &kv : extra) {
 		hh.emplace(kv.first, kv.second);
 	}
 

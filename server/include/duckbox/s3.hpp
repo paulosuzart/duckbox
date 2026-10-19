@@ -23,6 +23,7 @@ public:
 	explicit S3ControlClient(LeaseSettings lease);
 
 	S3Object Get(const std::string &key) const;
+	// SigV4 signs Content-Type; extra headers are not duplicated in the canonical request.
 	S3Object Put(const std::string &key, const std::string &body, const std::string &if_match = "",
 	             const std::string &if_none_match = "") const;
 	S3Object Delete(const std::string &key) const;

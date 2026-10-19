@@ -11,9 +11,13 @@ std::string Lower(const std::string &s) {
 	return ddb::StringUtil::Lower(s);
 }
 
-bool IsCte(const RewriteContext &ctx, const std::string &name) {
+bool IsCte(const RewriteContext &ctx, const ddb::BaseTableRef &base) {
+	// Qualified names never match a CTE; DuckDB's binder doesn't resolve CTEs for catalog.schema.table.
+	if (!base.schema_name.empty() || !base.catalog_name.empty()) {
+		return false;
+	}
 	for (auto it = ctx.cte_scope.rbegin(); it != ctx.cte_scope.rend(); ++it) {
-		if (it->count(Lower(name))) {
+		if (it->count(Lower(base.table_name))) {
 			return true;
 		}
 	}
@@ -69,10 +73,21 @@ void RewriteExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr, RewriteCont
 	    *expr, [&](ddb::unique_ptr<ddb::ParsedExpression> &child) { RewriteExpression(child, ctx); });
 }
 
-ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> base, const TablePolicy &spec) {
+ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> base, const TablePolicy &spec,
+                                                 const Policy &policy) {
 	auto inner_from = base->Copy();
 	inner_from->alias = "";
 	inner_from->column_name_alias.clear();
+	if (inner_from->type == ddb::TableReferenceType::BASE_TABLE) {
+		auto &b = inner_from->Cast<ddb::BaseTableRef>();
+		if (b.schema_name.empty()) {
+			b.schema_name = "main";
+		}
+		if (b.catalog_name.empty()) {
+			b.catalog_name = policy.lake.alias.empty() ? (policy.lake.kind == LakeKind::Memory ? "memory" : "lake")
+			                                           : policy.lake.alias;
+		}
+	}
 
 	auto inner = ddb::make_uniq<ddb::SelectNode>();
 	if (spec.columns.empty()) {
@@ -115,7 +130,7 @@ void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx) {
 	switch (ref->type) {
 	case ddb::TableReferenceType::BASE_TABLE: {
 		auto &base = ref->Cast<ddb::BaseTableRef>();
-		if (IsCte(ctx, base.table_name)) {
+		if (IsCte(ctx, base)) {
 			return;
 		}
 		auto *spec = ctx.policy->FindTable(base.table_name);
@@ -125,7 +140,7 @@ void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx) {
 		if (ref->alias.empty()) {
 			ref->alias = base.table_name;
 		}
-		ref = WrapFilteredTable(ref->Copy(), *spec);
+		ref = WrapFilteredTable(ref->Copy(), *spec, *ctx.policy);
 		return;
 	}
 	case ddb::TableReferenceType::SUBQUERY: {
@@ -142,7 +157,15 @@ void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx) {
 		RewriteExpression(join.condition, ctx);
 		return;
 	}
-	case ddb::TableReferenceType::EXPRESSION_LIST:
+	case ddb::TableReferenceType::EXPRESSION_LIST: {
+		auto &el = ref->Cast<ddb::ExpressionListRef>();
+		for (auto &row : el.values) {
+			for (auto &expr : row) {
+				RewriteExpression(expr, ctx);
+			}
+		}
+		return;
+	}
 	case ddb::TableReferenceType::EMPTY_FROM:
 		return;
 	default:
@@ -230,6 +253,13 @@ void BindTableRef(ddb::unique_ptr<ddb::TableRef> &ref, const ddb::case_insensiti
 		BindTableRef(join.left, values);
 		BindTableRef(join.right, values);
 		BindExpr(join.condition, values);
+	} else if (ref->type == ddb::TableReferenceType::EXPRESSION_LIST) {
+		auto &el = ref->Cast<ddb::ExpressionListRef>();
+		for (auto &row : el.values) {
+			for (auto &expr : row) {
+				BindExpr(expr, values);
+			}
+		}
 	}
 	ddb::ParsedExpressionIterator::EnumerateTableRefChildren(
 	    *ref, [&](ddb::unique_ptr<ddb::ParsedExpression> &child) { BindExpr(child, values); },
@@ -280,17 +310,39 @@ void RewriteSelect(ddb::SelectStatement &stmt, RewriteContext &ctx) {
 }
 
 void ApplyMaxRows(ddb::QueryNode &node, int64_t max_rows) {
+	// A user LIMIT must never disable the spec cap: rewritten limit is min(user, max_result_rows).
 	if (max_rows <= 0) {
 		return;
 	}
 	for (auto &mod : node.modifiers) {
-		if (mod->type == ddb::ResultModifierType::LIMIT_MODIFIER) {
-			return;
+		if (mod->type != ddb::ResultModifierType::LIMIT_MODIFIER) {
+			continue;
 		}
+		auto &lim = mod->Cast<ddb::LimitModifier>();
+		int64_t cap = max_rows;
+		if (lim.limit && lim.limit->GetExpressionClass() == ddb::ExpressionClass::CONSTANT) {
+			auto &c = lim.limit->Cast<ddb::ConstantExpression>();
+			if (!c.value.IsNull() && c.value.type().IsNumeric()) {
+				try {
+					auto user = c.value.GetValue<int64_t>();
+					if (user >= 0 && user < cap) {
+						cap = user;
+					}
+				} catch (...) {
+				}
+			}
+		}
+		lim.limit = ddb::make_uniq<ddb::ConstantExpression>(ddb::Value::BIGINT(cap));
+		return;
 	}
 	auto lim = ddb::make_uniq<ddb::LimitModifier>();
 	lim->limit = ddb::make_uniq<ddb::ConstantExpression>(ddb::Value::BIGINT(max_rows));
 	node.modifiers.push_back(std::move(lim));
+}
+
+void BindParsedExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr,
+                          const ddb::case_insensitive_map_t<ddb::Value> &values) {
+	BindExpr(expr, values);
 }
 
 void BindNamedParameters(ddb::ParsedExpression &expr, const ddb::case_insensitive_map_t<ddb::Value> &values) {
@@ -327,7 +379,11 @@ ddb::Value ValueFromKeyVar(const std::string &name, const std::string &raw) {
 		}
 	}
 	if (numeric && (name == "tenant_id" || ddb::StringUtil::EndsWith(name, "_id"))) {
-		return ddb::Value::INTEGER(std::stoi(raw));
+		try {
+			auto n = std::stoll(raw);
+			return ddb::Value::BIGINT(n);
+		} catch (...) {
+		}
 	}
 	return ddb::Value(raw);
 }
@@ -346,7 +402,7 @@ RewriteResult RewriteUserSqlDetailed(const std::string &sql, const Policy &polic
 		params[kv.first] = ValueFromKeyVar(kv.first, kv.second);
 	}
 	if (!key.tenant_id.empty() && params.find("tenant_id") == params.end()) {
-		params["tenant_id"] = ddb::Value::INTEGER(key.tenant_id_i32);
+		params["tenant_id"] = ddb::Value::BIGINT(key.tenant_id_i64);
 	}
 	BindNamedParametersInStatement(select, params);
 	RewriteResult out;

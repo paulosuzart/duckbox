@@ -27,6 +27,7 @@ public:
 
 class SqlValidator : public ISqlValidator {
 public:
+	// Qualified names are never CTEs. VALUES lists recurse into subqueries.
 	void Validate(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts, const Policy &policy) const override;
 };
 

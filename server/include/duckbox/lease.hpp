@@ -25,7 +25,7 @@ struct Lease {
 	bool owned_locally = false;
 };
 
-[[noreturn]] void SelfFence(const std::string &reason);
+[[noreturn]] void SelfFence(const std::string &reason); // structured log, then exit 3 so ops see a restart
 
 class ILeaseManager {
 public:

@@ -15,7 +15,8 @@ endif()
 
 if(NOT EXISTS "${DUCKBOX_DEPS}/duckdb/include/duckdb/parser/parser.hpp" OR
    NOT EXISTS "${DUCKBOX_DEPS}/duckdb/lib/libduckdb_static.a" OR
-   NOT EXISTS "${DUCKBOX_DEPS}/httplib/httplib.h")
+   NOT EXISTS "${DUCKBOX_DEPS}/httplib/httplib.h" OR
+   NOT EXISTS "${DUCKBOX_DEPS}/yaml-cpp-0.8.0/CMakeLists.txt")
   message(STATUS "Fetching DuckDB ${DUCKBOX_DUCKDB_VERSION} and httplib into ${DUCKBOX_DEPS}")
   execute_process(
     COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/fetch_deps.sh"
@@ -29,6 +30,23 @@ find_package(Arrow CONFIG REQUIRED)
 find_package(ArrowFlight CONFIG REQUIRED)
 find_package(ArrowFlightSql CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
+
+# yaml-cpp: specs and daemon config are security-relevant; never use a homemade parser.
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(YAML_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+if(EXISTS "${DUCKBOX_DEPS}/yaml-cpp-0.8.0/CMakeLists.txt")
+  add_subdirectory("${DUCKBOX_DEPS}/yaml-cpp-0.8.0" "${CMAKE_BINARY_DIR}/yaml-cpp" EXCLUDE_FROM_ALL)
+else()
+  include(FetchContent)
+  FetchContent_Declare(
+    yaml-cpp
+    URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/0.8.0.tar.gz
+    URL_HASH SHA256=fbe74bbdcee21d656715688706da3c8becfd946d92cd44705cc6098bb23b3a16)
+  FetchContent_MakeAvailable(yaml-cpp)
+endif()
 
 set(DUCKBOX_SOURCES
   server/src/yaml.cpp
@@ -69,7 +87,8 @@ target_link_libraries(duckbox_core PUBLIC
   Arrow::arrow_shared
   ArrowFlight::arrow_flight_shared
   ArrowFlightSql::arrow_flight_sql_shared
-  OpenSSL::Crypto)
+  OpenSSL::Crypto
+  yaml-cpp)
 
 set(_duckdb_libdir "${DUCKBOX_DEPS}/duckdb/lib")
 set(_duckdb_libs

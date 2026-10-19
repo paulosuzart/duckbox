@@ -6,9 +6,8 @@ Per-RPC headers:
 
 - `x-duckbox-sandbox` — named sandbox id (required for queries)
 - `x-duckbox-key` — optional per-query key for `auth.key` variable extraction; otherwise the definition’s bound key is used
-- `x-duckbox-caller` — trusted caller identity (default `local` / handshake peer)
-- `x-duckbox-spec-dir` — directory for spec-relative paths on Create/Update
-- `Authorization: Bearer …` — token mode (JWT stub)
+- `x-duckbox-caller` — trusted caller identity (default `local` / handshake peer). Ignored when `auth.bearer_secrets` or JWT is configured
+- `Authorization: Bearer …` — static bearer secret or HS256 JWT (`auth.jwt_secret`). Unsigned tokens are rejected
 
 CRUD `DoAction` types: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes`. Create/Update body is the spec YAML.
 

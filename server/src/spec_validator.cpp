@@ -111,7 +111,8 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 		varset.insert(ddb::StringUtil::Lower(v));
 	}
 
-	if (spec.lake.kind == LakeKind::Memory && spec.lake.bootstrap_sql_path.empty()) {
+	if (spec.lake.kind == LakeKind::Memory && spec.lake.bootstrap_sql.empty() &&
+	    spec.lake.bootstrap_sql_path.empty()) {
 		add("lake.bootstrap_sql", "required when lake.kind=memory");
 	}
 	if (spec.lake.kind == LakeKind::Ducklake) {

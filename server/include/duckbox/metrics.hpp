@@ -18,10 +18,11 @@
 
 namespace duckbox {
 
-const char *ClassifyRejection(const std::exception &e);
+const char *ClassifyRejection(const std::exception &e); // bounded reason label; never the SQL text
 const char *ClassifyLimit(const std::exception &e);
 std::string SanitizeMetricValue(const std::string &s, const std::string &fallback);
 
+// Process-wide counters/histograms. PolicyLabel maps unknown classes to "other".
 class IMetrics {
 public:
 	virtual ~IMetrics() = default;

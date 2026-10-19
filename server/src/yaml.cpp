@@ -1,178 +1,196 @@
 #include "duckbox/yaml.hpp"
 #include "duckbox/error.hpp"
 
+#include <yaml-cpp/eventhandler.h>
+#include <yaml-cpp/parser.h>
+#include <yaml-cpp/yaml.h>
+
 #include <cctype>
 #include <fstream>
+#include <set>
 #include <sstream>
+#include <vector>
 
 namespace duckbox {
 namespace {
 
-struct Line {
-	int indent = 0;
-	std::string text;
+std::string ChildPath(const std::string &parent, const std::string &key) {
+	return parent.empty() ? key : parent + "." + key;
+}
+
+std::string IndexPath(const std::string &parent, int i) {
+	return parent + "[" + std::to_string(i) + "]";
+}
+
+struct Frame {
+	enum Kind { Map, Seq };
+	Kind kind = Map;
+	bool expect_key = false;
+	std::string pending_key;
+	std::set<std::string> keys;
+	int seq_index = 0;
+	std::string path;
 };
 
-std::string StripComment(const std::string &in) {
-	bool in_single = false;
-	bool in_double = false;
-	for (size_t i = 0; i < in.size(); i++) {
-		char c = in[i];
-		if (c == '\'' && !in_double) {
-			in_single = !in_single;
-		} else if (c == '"' && !in_single) {
-			in_double = !in_double;
-		} else if (c == '#' && !in_single && !in_double) {
-			return in.substr(0, i);
+// yaml-cpp silently overwrites duplicate keys. Walk events and fail first.
+class DuplicateKeyHandler : public YAML::EventHandler {
+public:
+	void OnDocumentStart(const YAML::Mark &) override {
+	}
+	void OnDocumentEnd() override {
+	}
+	void OnNull(const YAML::Mark &mark, YAML::anchor_t) override {
+		FinishValue(mark);
+	}
+	void OnAlias(const YAML::Mark &mark, YAML::anchor_t) override {
+		FinishValue(mark);
+	}
+	void OnScalar(const YAML::Mark &mark, const std::string &, YAML::anchor_t, const std::string &value) override {
+		if (stack_.empty()) {
+			return;
 		}
+		auto &f = stack_.back();
+		if (f.kind == Frame::Map && f.expect_key) {
+			if (!f.keys.insert(value).second) {
+				throw PolicyError(ChildPath(f.path, value) + ": duplicate key");
+			}
+			f.pending_key = value;
+			f.expect_key = false;
+			return;
+		}
+		FinishValue(mark);
 	}
-	return in;
-}
+	void OnSequenceStart(const YAML::Mark &, const std::string &, YAML::anchor_t, YAML::EmitterStyle::value) override {
+		stack_.push_back(MakeChild(Frame::Seq));
+	}
+	void OnSequenceEnd() override {
+		PopContainer();
+	}
+	void OnMapStart(const YAML::Mark &, const std::string &, YAML::anchor_t, YAML::EmitterStyle::value) override {
+		auto child = MakeChild(Frame::Map);
+		child.expect_key = true;
+		stack_.push_back(std::move(child));
+	}
+	void OnMapEnd() override {
+		PopContainer();
+	}
 
-std::string Trim(const std::string &s) {
-	size_t a = 0;
-	while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) {
-		a++;
-	}
-	size_t b = s.size();
-	while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) {
-		b--;
-	}
-	return s.substr(a, b - a);
-}
-
-std::string Unquote(const std::string &s) {
-	if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') || (s.front() == '\'' && s.back() == '\''))) {
-		return s.substr(1, s.size() - 2);
-	}
-	return s;
-}
-
-int IndentOf(const std::string &raw) {
-	int n = 0;
-	for (char c : raw) {
-		if (c == ' ') {
-			n++;
-		} else if (c == '\t') {
-			n += 2;
+private:
+	Frame MakeChild(Frame::Kind kind) {
+		Frame child;
+		child.kind = kind;
+		if (stack_.empty()) {
+			child.path = "";
+			return child;
+		}
+		auto &p = stack_.back();
+		if (p.kind == Frame::Map) {
+			child.path = ChildPath(p.path, p.pending_key);
 		} else {
-			break;
+			child.path = IndexPath(p.path, p.seq_index);
+		}
+		return child;
+	}
+
+	void FinishValue(const YAML::Mark &) {
+		if (stack_.empty()) {
+			return;
+		}
+		auto &f = stack_.back();
+		if (f.kind == Frame::Map) {
+			f.expect_key = true;
+		} else {
+			f.seq_index++;
 		}
 	}
-	return n;
+
+	void PopContainer() {
+		if (!stack_.empty()) {
+			stack_.pop_back();
+		}
+		FinishValue(YAML::Mark());
+	}
+
+	std::vector<Frame> stack_;
+};
+
+void RejectDuplicateKeys(const std::string &text) {
+	std::istringstream in(text);
+	YAML::Parser parser(in);
+	DuplicateKeyHandler handler;
+	try {
+		parser.HandleNextDocument(handler);
+	} catch (const PolicyError &) {
+		throw;
+	} catch (const YAML::Exception &e) {
+		throw PolicyError(std::string("YAML: ") + e.what());
+	}
 }
 
-YamlNode ParseScalar(const std::string &s) {
-	YamlNode n;
-	n.kind = YamlNode::Kind::Scalar;
-	n.scalar = Unquote(s);
-	return n;
+YamlNode FromYamlCpp(const YAML::Node &n, const std::string &path) {
+	YamlNode out;
+	out.path = path;
+	if (!n || n.IsNull()) {
+		out.kind = YamlNode::Kind::Null;
+		return out;
+	}
+	if (n.IsScalar()) {
+		out.kind = YamlNode::Kind::Scalar;
+		out.scalar = n.Scalar();
+		return out;
+	}
+	if (n.IsSequence()) {
+		out.kind = YamlNode::Kind::Seq;
+		out.seq.reserve(n.size());
+		for (std::size_t i = 0; i < n.size(); i++) {
+			out.seq.push_back(FromYamlCpp(n[i], IndexPath(path, static_cast<int>(i))));
+		}
+		return out;
+	}
+	if (n.IsMap()) {
+		out.kind = YamlNode::Kind::Map;
+		for (auto it = n.begin(); it != n.end(); ++it) {
+			std::string key = it->first.Scalar();
+			out.map.emplace(key, FromYamlCpp(it->second, ChildPath(path, key)));
+		}
+		return out;
+	}
+	throw PolicyError((path.empty() ? std::string("<root>") : path) + ": unsupported YAML node");
 }
 
-YamlNode ParseBlock(const std::vector<Line> &lines, size_t &i, int min_indent);
-
-YamlNode ParseValue(const std::vector<Line> &lines, size_t &i, const std::string &inline_value, int key_indent) {
-	if (!inline_value.empty() && inline_value != "|" && inline_value != ">") {
-		if (inline_value == "[]") {
-			YamlNode n;
-			n.kind = YamlNode::Kind::Seq;
-			return n;
-		}
-		if (inline_value == "{}") {
-			YamlNode n;
-			n.kind = YamlNode::Kind::Map;
-			return n;
-		}
-		return ParseScalar(inline_value);
+int64_t ParseStrictInt64(const std::string &s, const std::string &path) {
+	if (s.empty()) {
+		throw PolicyError(path + ": expected integer");
 	}
-	if (inline_value == "|") {
-		std::ostringstream os;
-		int block_indent = -1;
-		while (i < lines.size() && lines[i].indent > key_indent) {
-			if (block_indent < 0) {
-				block_indent = lines[i].indent;
-			}
-			if (!os.str().empty()) {
-				os << '\n';
-			}
-			os << lines[i].text.substr(static_cast<size_t>(block_indent));
-			i++;
-		}
-		YamlNode n;
-		n.kind = YamlNode::Kind::Scalar;
-		n.scalar = os.str();
-		return n;
-	}
-	if (i >= lines.size() || lines[i].indent <= key_indent) {
-		YamlNode n;
-		n.kind = YamlNode::Kind::Scalar;
-		return n;
-	}
-	return ParseBlock(lines, i, key_indent + 1);
-}
-
-YamlNode ParseBlock(const std::vector<Line> &lines, size_t &i, int min_indent) {
-	if (i >= lines.size()) {
-		return {};
-	}
-	int indent = lines[i].indent;
-	if (indent < min_indent) {
-		return {};
-	}
-	bool is_seq = !lines[i].text.empty() && lines[i].text[0] == '-';
-	if (is_seq) {
-		YamlNode node;
-		node.kind = YamlNode::Kind::Seq;
-		while (i < lines.size() && lines[i].indent == indent && !lines[i].text.empty() && lines[i].text[0] == '-') {
-			std::string rest = Trim(lines[i].text.substr(1));
-			i++;
-			if (rest.empty()) {
-				node.seq.push_back(ParseBlock(lines, i, indent + 1));
-				continue;
-			}
-			auto colon = rest.find(':');
-			bool quoted = !rest.empty() && (rest.front() == '"' || rest.front() == '\'');
-			if (!quoted && colon != std::string::npos && colon > 0) {
-				YamlNode map;
-				map.kind = YamlNode::Kind::Map;
-				std::string key = Trim(rest.substr(0, colon));
-				std::string val = Trim(rest.substr(colon + 1));
-				map.map.emplace(key, ParseValue(lines, i, val, indent));
-				while (i < lines.size() && lines[i].indent > indent &&
-				       (lines[i].text.empty() || lines[i].text[0] != '-')) {
-					auto inner = ParseBlock(lines, i, indent + 1);
-					if (inner.kind == YamlNode::Kind::Map) {
-						for (auto &kv : inner.map) {
-							map.map[kv.first] = std::move(kv.second);
-						}
-					} else {
-						break;
-					}
-				}
-				node.seq.push_back(std::move(map));
-			} else {
-				node.seq.push_back(ParseScalar(rest));
-			}
-		}
-		return node;
-	}
-	YamlNode node;
-	node.kind = YamlNode::Kind::Map;
-	while (i < lines.size() && lines[i].indent == indent) {
-		const std::string &text = lines[i].text;
-		if (text.empty() || text[0] == '-') {
-			break;
-		}
-		auto colon = text.find(':');
-		if (colon == std::string::npos) {
-			throw PolicyError("YAML: expected key: value at '" + text + "'");
-		}
-		std::string key = Trim(text.substr(0, colon));
-		std::string val = Trim(text.substr(colon + 1));
+	size_t i = 0;
+	if (s[i] == '-') {
 		i++;
-		node.map[key] = ParseValue(lines, i, val, indent);
 	}
-	return node;
+	if (i >= s.size()) {
+		throw PolicyError(path + ": expected integer");
+	}
+	for (; i < s.size(); i++) {
+		if (!std::isdigit(static_cast<unsigned char>(s[i]))) {
+			throw PolicyError(path + ": expected integer, got '" + s + "'");
+		}
+	}
+	try {
+		return std::stoll(s);
+	} catch (const std::out_of_range &) {
+		throw PolicyError(path + ": integer out of int64 range");
+	} catch (const std::exception &) {
+		throw PolicyError(path + ": expected integer, got '" + s + "'");
+	}
+}
+
+bool ParseStrictBool(const std::string &s, const std::string &path) {
+	if (s == "true" || s == "True" || s == "TRUE") {
+		return true;
+	}
+	if (s == "false" || s == "False" || s == "FALSE") {
+		return false;
+	}
+	throw PolicyError(path + ": expected boolean true/false, got '" + s + "'");
 }
 
 } // namespace
@@ -190,51 +208,86 @@ const YamlNode *YamlNode::Get(const std::string &key) const {
 
 std::string YamlNode::GetString(const std::string &key, const std::string &def) const {
 	auto *n = Get(key);
-	if (!n || n->kind != Kind::Scalar) {
+	if (!n || n->IsNull()) {
 		return def;
+	}
+	if (!n->IsScalar()) {
+		throw PolicyError((n->path.empty() ? ChildPath(path, key) : n->path) + ": expected scalar");
 	}
 	return n->scalar;
 }
 
 bool YamlNode::GetBool(const std::string &key, bool def) const {
-	auto s = GetString(key);
-	if (s.empty()) {
+	auto *n = Get(key);
+	if (!n || n->IsNull()) {
 		return def;
 	}
-	return s == "true" || s == "True" || s == "yes" || s == "1";
+	if (!n->IsScalar()) {
+		throw PolicyError((n->path.empty() ? ChildPath(path, key) : n->path) + ": expected boolean true/false");
+	}
+	return ParseStrictBool(n->scalar, n->path.empty() ? ChildPath(path, key) : n->path);
 }
 
 int64_t YamlNode::GetInt(const std::string &key, int64_t def) const {
-	auto s = GetString(key);
-	if (s.empty()) {
+	auto *n = Get(key);
+	if (!n || n->IsNull()) {
 		return def;
 	}
-	return std::stoll(s);
+	if (!n->IsScalar()) {
+		throw PolicyError((n->path.empty() ? ChildPath(path, key) : n->path) + ": expected integer");
+	}
+	return ParseStrictInt64(n->scalar, n->path.empty() ? ChildPath(path, key) : n->path);
+}
+
+std::vector<std::string> YamlStringList(const YamlNode *n, const std::string &path) {
+	std::vector<std::string> out;
+	if (!n || n->IsNull()) {
+		return out;
+	}
+	if (!n->IsSeq()) {
+		throw PolicyError(path + ": expected list");
+	}
+	for (size_t i = 0; i < n->seq.size(); i++) {
+		auto &item = n->seq[i];
+		if (!item.IsScalar()) {
+			throw PolicyError(IndexPath(path, static_cast<int>(i)) + ": expected scalar");
+		}
+		out.push_back(item.scalar);
+	}
+	return out;
+}
+
+void YamlRejectUnknownKeys(const YamlNode &n, std::initializer_list<const char *> allowed) {
+	if (!n.IsMap()) {
+		throw PolicyError((n.path.empty() ? std::string("<root>") : n.path) + ": expected mapping");
+	}
+	for (auto &kv : n.map) {
+		bool ok = false;
+		for (auto *a : allowed) {
+			if (kv.first == a) {
+				ok = true;
+				break;
+			}
+		}
+		if (!ok) {
+			throw PolicyError(ChildPath(n.path, kv.first) + ": unknown key");
+		}
+	}
 }
 
 YamlNode ParseYaml(const std::string &text) {
-	std::vector<Line> lines;
-	std::istringstream in(text);
-	std::string raw;
-	while (std::getline(in, raw)) {
-		if (!raw.empty() && raw.back() == '\r') {
-			raw.pop_back();
-		}
-		auto stripped = StripComment(raw);
-		auto trimmed = Trim(stripped);
-		if (trimmed.empty()) {
-			continue;
-		}
-		Line l;
-		l.indent = IndentOf(stripped);
-		l.text = trimmed;
-		lines.push_back(std::move(l));
-	}
-	size_t i = 0;
-	if (lines.empty()) {
+	if (text.empty()) {
 		return {};
 	}
-	return ParseBlock(lines, i, 0);
+	try {
+		RejectDuplicateKeys(text);
+		YAML::Node root = YAML::Load(text);
+		return FromYamlCpp(root, "");
+	} catch (const PolicyError &) {
+		throw;
+	} catch (const YAML::Exception &e) {
+		throw PolicyError(std::string("YAML: ") + e.what());
+	}
 }
 
 YamlNode LoadYamlFile(const std::string &path) {

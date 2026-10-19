@@ -3,8 +3,9 @@ name: memory-dev
 listen: 127.0.0.1:4747
 auth:
   mode: trusted
-  # Empty callers = allow all (local/dev). Production should list identities
-  # and the tenant-key globs each may use.
+  # Local/dev only. Production must unset this and set auth.bearer_secrets
+  # or auth.jwt_secret (min handle_secret length 16).
+  allow_insecure_dev: true
 limits:
   handle_ttl_seconds: 300
   idle_evict_ms: 300000

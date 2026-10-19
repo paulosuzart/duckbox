@@ -23,11 +23,13 @@ DEFAULT_KEY = "tenant_21:user_sergio"
 
 
 def repo_root() -> Path:
+    """Repository root (examples/python/../..). Used to find default specs."""
     here = Path(__file__).resolve().parent
     return here.parent.parent
 
 
 def default_spec_path() -> Path:
+    """DUCKBOX_SPEC or policies/ducklake/analyst.yaml under the repo root."""
     override = os.environ.get("DUCKBOX_SPEC")
     if override:
         return Path(override)
@@ -54,6 +56,7 @@ class Duckbox:
         self.key = key
 
     def query(self, sql: str, params: Optional[Sequence[Any]] = None) -> pd.DataFrame:
+        """Run one SELECT against this named sandbox. Optional `?` params are bound, not interpolated."""
         with self._conn.cursor() as cur:
             if params is None:
                 cur.execute(sql)
@@ -73,6 +76,7 @@ class Duckbox:
 
 
 def _flight_headers(sandbox: str, key: str = "", caller: str = "local") -> list[tuple[str, str]]:
+    """Per-RPC headers. There is no x-duckbox-spec-dir; bootstrap SQL is inlined in the spec body."""
     headers = [
         ("x-duckbox-sandbox", sandbox),
         ("x-duckbox-caller", caller),
@@ -97,13 +101,20 @@ def create_sandbox(
     yaml_text = spec_path.read_text()
     if not yaml_text.startswith("id:"):
         yaml_text = f"id: {sandbox}\nkey: {key}\n" + yaml_text
+    # Inline relative lake.bootstrap_sql so the daemon never reads host files.
+    for line in yaml_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("bootstrap_sql:") and "bootstrap_sql_inline" not in yaml_text:
+            raw = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+            if raw and not raw.startswith("CREATE") and "\n" not in raw:
+                boot = (spec_path.parent / raw).resolve()
+                if boot.is_file():
+                    indented = "\n".join("  " + ln for ln in boot.read_text().splitlines())
+                    yaml_text += "\nbootstrap_sql_inline: |\n" + indented + "\n"
+            break
     client = flight.FlightClient(url)
     options = flight.FlightCallOptions(
-        headers=[
-            (k.encode(), v.encode())
-            for k, v in _flight_headers(sandbox, key, caller)
-            + [("x-duckbox-spec-dir", str(spec_path.resolve().parent))]
-        ]
+        headers=[(k.encode(), v.encode()) for k, v in _flight_headers(sandbox, key, caller)]
     )
     action = flight.Action("CreateSandbox", yaml_text.encode("utf-8"))
     chunks = list(client.do_action(action, options))
@@ -116,6 +127,7 @@ def connect(
     url: Optional[str] = None,
     retries: int = 20,
 ) -> Duckbox:
+    """ADBC Flight SQL connection to a named sandbox. Retries only connection-refused."""
     url = url or os.environ.get("DUCKBOX_URL", DEFAULT_URL)
     sandbox = os.environ.get("DUCKBOX_SANDBOX", sandbox)
     kwargs = {
@@ -148,5 +160,6 @@ def query(
     key: str = "",
     url: Optional[str] = None,
 ) -> pd.DataFrame:
+    """One-shot connect + SELECT. Prefer `connect()` when issuing several queries."""
     with connect(sandbox=sandbox, key=key, url=url) as db:
         return db.query(sql, params)

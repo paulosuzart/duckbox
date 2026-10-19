@@ -6,6 +6,7 @@
 #include "duckbox/plan_check.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/spec_validator.hpp"
+#include "duckbox/validator.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -50,7 +51,18 @@ void TenantSandbox::Warmup(bool validate_lake) {
 	con_ = std::make_unique<ddb::Connection>(*db_);
 	ExecOrThrow(*con_, "SET autoinstall_known_extensions=false");
 	ExecOrThrow(*con_, "SET autoload_known_extensions=false");
-	AttachLakeFromSpec(*con_, policy_, spec_dir_, *secrets_);
+	AttachLakeFromSpec(*con_, policy_, spec_dir_, *secrets_, daemon_);
+	try {
+		ExecOrThrow(*con_, "SET enable_external_access=false");
+	} catch (const std::exception &) {
+		// lock_configuration / older builds; still refuse COPY via validator + plan guard
+	}
+	if (!policy_.lake.data_path.empty()) {
+		try {
+			ExecOrThrow(*con_, "SET allowed_paths=['" + EscapeSqlString(policy_.lake.data_path) + "']");
+		} catch (const std::exception &) {
+		}
+	}
 	if (validate_lake) {
 		auto v0 = std::chrono::steady_clock::now();
 		SpecValidator v;
@@ -66,7 +78,7 @@ void TenantSandbox::Warmup(bool validate_lake) {
 		}
 	}
 	auto i0 = std::chrono::steady_clock::now();
-	RunInitSql(*con_, init_sql_, daemon_, policy_);
+	RunInitSql(*con_, init_sql_, daemon_, policy_, &key_);
 	Metrics().ObserveInitSql(std::chrono::duration<double>(std::chrono::steady_clock::now() - i0).count());
 	auto &r = policy_.resources;
 	ExecOrThrow(*con_, "SET memory_limit='" + EscapeSqlString(r.memory_limit) + "'");
@@ -106,17 +118,9 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
 	};
 	try {
 		QueryOutput out;
+		std::unique_ptr<ddb::QueryResult> result;
 		if (params.empty()) {
-			auto result = con_->Query(sql);
-			if (result->HasError()) {
-				finish_watchdog();
-				if (timed_out) {
-					throw Error("query timeout");
-				}
-				throw Error(result->GetError());
-			}
-			out.text_table = result->ToString();
-			out.row_count = static_cast<int64_t>(result->RowCount());
+			result = con_->Query(sql);
 		} else {
 			auto ps = con_->Prepare(sql);
 			if (ps->HasError()) {
@@ -124,20 +128,21 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
 				throw Error(ps->GetError());
 			}
 			auto dparams = ToDuckValues(params);
-			auto result = ps->Execute(dparams, false);
-			if (result->HasError()) {
-				finish_watchdog();
-				if (timed_out) {
-					throw Error("query timeout");
-				}
-				throw Error(result->GetError());
-			}
-			out.text_table = result->ToString();
-			if (result->type == ddb::QueryResultType::MATERIALIZED_RESULT) {
-				out.row_count = static_cast<int64_t>(result->Cast<ddb::MaterializedQueryResult>().RowCount());
-			}
+			result = ps->Execute(dparams, false);
 		}
-		out.arrow_ipc = QueryToArrowIpc(*con_, sql, params);
+		if (result->HasError()) {
+			finish_watchdog();
+			if (timed_out) {
+				throw Error("query timeout");
+			}
+			throw Error(result->GetError());
+		}
+		out.text_table = result->ToString();
+		if (result->type == ddb::QueryResultType::MATERIALIZED_RESULT) {
+			auto &mat = result->Cast<ddb::MaterializedQueryResult>();
+			out.row_count = static_cast<int64_t>(mat.RowCount());
+			out.arrow_ipc = MaterializedToArrowIpc(mat);
+		}
 		finish_watchdog();
 		if (timed_out) {
 			throw Error("query timeout");
@@ -202,6 +207,8 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql, std::vector<
 		Warmup(false);
 		std::lock_guard<std::mutex> hold(mu_);
 		Touch();
+		auto parser = ParseSql(sql);
+		ValidateStatements(parser->statements, policy_);
 		auto out = RunTimed(sql, std::move(params));
 		FinishQuery(policy_, key_, cold, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
 		            out);
@@ -211,6 +218,13 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql, std::vector<
 		               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 		throw;
 	}
+}
+
+ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::string &sql) {
+	Warmup(false);
+	std::lock_guard<std::mutex> hold(mu_);
+	Touch();
+	return con_->ExtractPlan(sql);
 }
 
 std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sql) {

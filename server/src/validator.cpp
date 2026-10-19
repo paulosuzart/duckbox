@@ -17,9 +17,13 @@ const std::unordered_set<std::string> *CurrentCtes(const ValidationContext &ctx)
 	return &ctx.cte_scope.back();
 }
 
-bool IsCte(const ValidationContext &ctx, const std::string &name) {
+bool IsCte(const ValidationContext &ctx, const ddb::BaseTableRef &base) {
+	// Binder does not resolve CTEs for qualified names (catalog/schema).
+	if (!base.schema_name.empty() || !base.catalog_name.empty()) {
+		return false;
+	}
 	for (auto it = ctx.cte_scope.rbegin(); it != ctx.cte_scope.rend(); ++it) {
-		if (it->count(Lower(name))) {
+		if (it->count(Lower(base.table_name))) {
 			return true;
 		}
 	}
@@ -93,7 +97,7 @@ void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx) {
 	switch (ref.type) {
 	case ddb::TableReferenceType::BASE_TABLE: {
 		auto &base = ref.Cast<ddb::BaseTableRef>();
-		if (IsCte(ctx, base.table_name)) {
+		if (IsCte(ctx, base)) {
 			break;
 		}
 		auto looks_like_path = [](const std::string &name) {
@@ -147,7 +151,17 @@ void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx) {
 		}
 		break;
 	}
-	case ddb::TableReferenceType::EXPRESSION_LIST:
+	case ddb::TableReferenceType::EXPRESSION_LIST: {
+		auto &el = ref.Cast<ddb::ExpressionListRef>();
+		for (auto &row : el.values) {
+			for (auto &expr : row) {
+				if (expr) {
+					ValidateExpression(*expr, ctx);
+				}
+			}
+		}
+		break;
+	}
 	case ddb::TableReferenceType::EMPTY_FROM:
 		break;
 	case ddb::TableReferenceType::PIVOT:

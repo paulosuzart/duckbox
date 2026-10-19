@@ -34,6 +34,7 @@ public:
 
 class SqlRewriter : public ISqlRewriter {
 public:
+	// Validates then wraps allowlisted tables; VALUES subqueries are rewritten.
 	RewriteResult Rewrite(const std::string &sql, const Policy &policy, const TenantKey &key) const override;
 };
 
@@ -43,6 +44,9 @@ void BindNamedParameters(ddb::ParsedExpression &expr, const ddb::case_insensitiv
 void BindNamedParametersInStatement(ddb::SQLStatement &stmt, const ddb::case_insensitive_map_t<ddb::Value> &values);
 
 ddb::unique_ptr<ddb::ParsedExpression> ParsePolicyFilter(const std::string &filter_sql);
+ddb::Value ValueFromKeyVar(const std::string &name, const std::string &raw);
+void BindParsedExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr,
+                          const ddb::case_insensitive_map_t<ddb::Value> &values);
 
 std::string RewriteUserSql(const std::string &sql, const Policy &policy, const TenantKey &key);
 RewriteResult RewriteUserSqlDetailed(const std::string &sql, const Policy &policy, const TenantKey &key);

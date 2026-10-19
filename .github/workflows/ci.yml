@@ -27,7 +27,7 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-${{ runner.os }}-${{ runner.arch }}
       - name: Build
         run: make build CXX=g++
       - name: Enforcement tests
@@ -49,7 +49,7 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-ducklake-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-ducklake-${{ runner.os }}-${{ runner.arch }}
       - name: Build
         run: make build CXX=g++
       - name: Start Postgres + RustFS

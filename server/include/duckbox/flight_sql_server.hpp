@@ -106,8 +106,12 @@ private:
 	std::shared_ptr<SandboxRuntime> runtime_;
 	std::shared_ptr<IHandleSigner> signer_;
 	std::shared_ptr<ISqlRewriter> rewriter_;
+	void RememberBind(const std::string &key, const std::string &ipc) const;
+
 	mutable std::mutex bind_mu_;
 	mutable std::unordered_map<std::string, std::string> bind_cache_;
+	mutable std::vector<std::string> bind_order_;
+	static constexpr size_t kMaxBindCache = 256;
 };
 
 class DuckboxFlightServer : public arrow::flight::FlightServerBase {
@@ -134,7 +138,7 @@ private:
 	std::unique_ptr<DuckboxFlightSqlServer> sql_;
 };
 
-int RunServer(const ServerOptions &opt);
+int RunServer(const ServerOptions &opt); // ValidateDaemonOrThrow then listen; returns process exit code
 int RunLocalQuery(const DaemonConfig &daemon, const std::string &spec_path, const std::string &key,
                   const std::string &sql, const std::string &init_sql);
 int RunSandboxCli(const std::string &op, const std::string &url, const std::string &spec_path, const std::string &id,
@@ -142,12 +146,17 @@ int RunSandboxCli(const std::string &op, const std::string &url, const std::stri
 void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
                     std::shared_ptr<SandboxRuntime> runtime);
 
+// Handshake token is a bearer secret or JWT, never an unsigned spec payload.
 class HandshakeAuthHandler : public arrow::flight::ServerAuthHandler {
 public:
+	explicit HandshakeAuthHandler(DaemonConfig daemon);
 	arrow::Status Authenticate(const arrow::flight::ServerCallContext &context, arrow::flight::ServerAuthSender *outgoing,
 	                           arrow::flight::ServerAuthReader *incoming) override;
 	arrow::Status IsValid(const arrow::flight::ServerCallContext &context, const std::string &token,
 	                      std::string *peer_identity) override;
+
+private:
+	DaemonConfig daemon_;
 };
 
 } // namespace duckbox

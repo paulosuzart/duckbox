@@ -1,11 +1,9 @@
 #pragma once
 
-// Independent optimizer-extension plan guard. After DuckDB optimizes, refuse
-// tenant-table scans that lack tenant equality and refuse file-scan functions.
-// ducklake_scan / postgres_scan are accepted only as internal scans of the
-// spec's attached DuckLake catalog (not a blanket name allowlist). Every
-// ducklake_scan of a spec tenant table still requires the tenant equality
-// filter. User/initSQL cannot name these functions (deny_table_functions).
+// Optimizer-extension plan guard. Scan functions are an allowlist
+// (seq_scan / ducklake_scan / postgres_scan / pragma_table_info). Bound tables
+// come from GetTable()/ParentCatalog(), never AST or DSN strings. Mandatory
+// filters are typed ConstantFilter / BoundComparison on the named column.
 
 #include "duckbox/policy.hpp"
 #include "duckbox/tenant_key.hpp"

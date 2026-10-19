@@ -18,7 +18,7 @@ struct AuthRequest {
 	std::string sandbox_id;
 };
 
-TenantKey Authenticate(const Policy &policy, const AuthRequest &req);
+TenantKey Authenticate(const Policy &policy, const AuthRequest &req); // AuthError if key missing/unparseable
 // Prefer the definition's bound key. A per-query key is only used when it
 // parses with auth.key (variable extraction) and matches the bound tenant.
 TenantKey AuthenticateSandbox(const Policy &policy, const std::string &bound_key, const AuthRequest &req);

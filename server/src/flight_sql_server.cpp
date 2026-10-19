@@ -52,16 +52,6 @@ std::string Hdr(const ServerCallContext &ctx, std::initializer_list<const char *
 	return "";
 }
 
-std::string SpecDirOf(const SandboxSpec &spec) {
-	if (!spec.source_path.empty() && spec.source_path[0] != '<') {
-		return std::filesystem::path(spec.source_path).parent_path().string();
-	}
-	if (const char *d = std::getenv("DUCKBOX_SPEC_DIR")) {
-		return d;
-	}
-	return std::filesystem::current_path().string();
-}
-
 std::shared_ptr<arrow::DataType> MapType(const std::string &t) {
 	auto u = t;
 	for (char &c : u) {
@@ -180,17 +170,29 @@ arrow::Result<std::unique_ptr<FlightInfo>> MakeInfo(const FlightDescriptor &desc
 
 } // namespace
 
+HandshakeAuthHandler::HandshakeAuthHandler(DaemonConfig daemon) : daemon_(std::move(daemon)) {
+}
+
 arrow::Status HandshakeAuthHandler::Authenticate(const ServerCallContext &, arrow::flight::ServerAuthSender *outgoing,
                                                  arrow::flight::ServerAuthReader *incoming) {
 	std::string token;
 	ARROW_RETURN_NOT_OK(incoming->Read(&token));
-	return outgoing->Write(token);
+	try {
+		auto id = AuthenticateCallerIdentity(daemon_, token, token, "");
+		return outgoing->Write(id);
+	} catch (const std::exception &e) {
+		return Status::Invalid(e.what());
+	}
 }
 
 arrow::Status HandshakeAuthHandler::IsValid(const ServerCallContext &, const std::string &token,
                                             std::string *peer_identity) {
-	*peer_identity = token;
-	return Status::OK();
+	try {
+		*peer_identity = AuthenticateCallerIdentity(daemon_, token, token, "");
+		return Status::OK();
+	} catch (const std::exception &e) {
+		return Status::Invalid(e.what());
+	}
 }
 
 DuckboxFlightSqlServer::DuckboxFlightSqlServer(DaemonConfig daemon, std::shared_ptr<SandboxRegistry> defs,
@@ -209,15 +211,28 @@ DuckboxFlightSqlServer::DuckboxFlightSqlServer(DaemonConfig daemon, std::shared_
 	                static_cast<int32_t>(sql::SqlInfoOptions::SQL_SUPPORTED_TRANSACTION_NONE));
 }
 
+void DuckboxFlightSqlServer::RememberBind(const std::string &key, const std::string &ipc) const {
+	std::lock_guard<std::mutex> g(bind_mu_);
+	if (bind_cache_.find(key) == bind_cache_.end()) {
+		bind_order_.push_back(key);
+	}
+	bind_cache_[key] = ipc;
+	while (bind_cache_.size() > kMaxBindCache && !bind_order_.empty()) {
+		auto old = bind_order_.front();
+		bind_order_.erase(bind_order_.begin());
+		bind_cache_.erase(old);
+	}
+}
+
 std::string DuckboxFlightSqlServer::CallerOf(const ServerCallContext &context) const {
-	auto caller = Hdr(context, {"x-duckbox-caller", "X-Duckbox-Caller"});
-	if (caller.empty()) {
-		caller = context.peer_identity();
+	auto bearer = Hdr(context, {"authorization", "Authorization"});
+	const std::string prefix = "Bearer ";
+	std::string token;
+	if (bearer.size() > prefix.size() && bearer.compare(0, prefix.size(), prefix) == 0) {
+		token = bearer.substr(prefix.size());
 	}
-	if (caller.empty()) {
-		caller = "local";
-	}
-	return caller;
+	return AuthenticateCallerIdentity(daemon_, context.peer_identity(), token,
+	                                  Hdr(context, {"x-duckbox-caller", "X-Duckbox-Caller"}));
 }
 
 DuckboxFlightSqlServer::CallCtx DuckboxFlightSqlServer::Auth(const ServerCallContext &context) const {
@@ -249,7 +264,7 @@ DuckboxFlightSqlServer::CallCtx DuckboxFlightSqlServer::Auth(const ServerCallCon
 		req.sandbox_id = sandbox_id;
 		c.key = AuthenticateSandbox(c.spec, c.rec.key, req);
 		c.init_sql = c.spec.init_sql;
-		c.spec_dir = c.rec.spec_dir.empty() ? SpecDirOf(c.spec) : c.rec.spec_dir;
+		c.spec_dir = c.rec.spec_dir;
 		return c;
 	} catch (const std::exception &e) {
 		ObserveFailure(Metrics(), c.spec.name.empty() ? nullptr : &c.spec, c.key.raw.empty() ? nullptr : &c.key, e,
@@ -436,11 +451,8 @@ Status DuckboxFlightSqlServer::DoPutPreparedStatementQuery(const ServerCallConte
 		}
 		h.params_ipc.assign(reinterpret_cast<const char *>(ipc_buf->data()), static_cast<size_t>(ipc_buf->size()));
 		auto token = signer_->Sign(h);
-		{
-			std::lock_guard<std::mutex> g(bind_mu_);
-			bind_cache_[command.prepared_statement_handle] = h.params_ipc;
-			bind_cache_[token] = h.params_ipc;
-		}
+		RememberBind(command.prepared_statement_handle, h.params_ipc);
+		RememberBind(token, h.params_ipc);
 		auto packed = EncodeDoPutHandle(token);
 		auto md = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t *>(packed.data()),
 		                                          static_cast<int64_t>(packed.size()));
@@ -461,9 +473,10 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 			if (it != bind_cache_.end()) {
 				h.params_ipc = it->second;
 			}
-			token = signer_->Sign(h);
-			bind_cache_[token] = h.params_ipc;
 		}
+		token = signer_->Sign(h);
+		RememberBind(token, h.params_ipc);
+		AuthorizeCaller(daemon_, CallerOf(context), defs_->Get(h.sandbox_id).key);
 		auto rec = ResolveHandleVersion(*defs_, defs_->Get(h.sandbox_id), h.version);
 		auto box = runtime_->Get(rec);
 		auto schema = SchemaFromCols(box->DescribeRewritten(h.rewritten_sql));
@@ -671,10 +684,7 @@ arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContex
 			if (!rec.key.empty()) {
 				spec.bound_key = rec.key;
 			}
-			rec = RecordFromSpec(spec, SpecDirOf(spec));
-			if (!Hdr(context, {"x-duckbox-spec-dir"}).empty()) {
-				rec.spec_dir = Hdr(context, {"x-duckbox-spec-dir"});
-			}
+			rec = RecordFromSpec(spec, "");
 		};
 		if (action.type == "CreateSandbox" || action.type == "UpdateSandbox") {
 			SandboxRecord rec;
@@ -814,7 +824,7 @@ int RunServer(const ServerOptions &opt) {
 		return 1;
 	}
 	arrow::flight::FlightServerOptions fopt(*loc_res);
-	fopt.auth_handler = std::make_shared<HandshakeAuthHandler>();
+	fopt.auth_handler = std::make_shared<HandshakeAuthHandler>(opt.daemon);
 	auto st = server->Init(fopt);
 	if (!st.ok()) {
 		std::cerr << "flight init failed: " << st.ToString() << "\n";
@@ -893,14 +903,18 @@ int RunSandboxCli(const std::string &op, const std::string &url, const std::stri
 		}
 		body = spec.yaml_body;
 		if (!id.empty() || !key.empty()) {
-			// Prefer live fields; YAML may omit id/key. Re-serialize via RecordFromSpec.
-			auto rec = RecordFromSpec(spec, std::filesystem::path(spec_path).parent_path().string());
-			body = rec.spec.yaml_body;
 			if (body.find("\nid:") == std::string::npos && body.rfind("id:", 0) != 0) {
 				body = "id: " + spec.id + "\nkey: " + spec.bound_key + "\n" + body;
 			}
 		}
-		opt.headers.emplace_back("x-duckbox-spec-dir", std::filesystem::path(spec_path).parent_path().string());
+		if (!spec.lake.bootstrap_sql.empty() && body.find("bootstrap_sql_inline:") == std::string::npos) {
+			body += "\nbootstrap_sql_inline: |\n";
+			std::istringstream in(spec.lake.bootstrap_sql);
+			std::string line;
+			while (std::getline(in, line)) {
+				body += "  " + line + "\n";
+			}
+		}
 		action_type = op == "create" ? "CreateSandbox" : "UpdateSandbox";
 	} else if (op == "get" || op == "delete") {
 		if (id.empty()) {

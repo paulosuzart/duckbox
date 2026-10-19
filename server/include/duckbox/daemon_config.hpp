@@ -15,6 +15,18 @@ namespace duckbox {
 
 enum class AuthMode { Trusted, Token };
 
+// Static caller credential. Compared in constant time; identity is the trusted caller name.
+struct BearerSecret {
+	std::string secret;
+	std::string identity;
+};
+
+// Spec lake.s3.endpoint and env:/file: refs must match these lists outside allow_insecure_dev.
+struct LakeAllow {
+	std::vector<std::string> s3_endpoints;
+	std::vector<std::string> secret_refs;
+};
+
 struct LeaseSettings {
 	std::string endpoint;
 	std::string endpoint_env;
@@ -44,13 +56,26 @@ struct DaemonConfig {
 	std::unordered_set<std::string> allowed_init_settings;
 	LeaseSettings lease;
 	std::vector<CallerRule> callers;
+	std::vector<BearerSecret> bearer_secrets;
+	std::string jwt_secret;
+	bool allow_insecure_dev = false;
+	LakeAllow lake_allow;
 	std::string debug_http;
 	std::string metrics_listen = "127.0.0.1:9477";
 	std::unordered_set<std::string> metrics_policy_classes;
 };
 
-DaemonConfig LoadDaemonFile(const std::string &path);
+constexpr int kMinHandleSecretLen = 16;
+
+// Bearer secret, then JWT HS256, else x-duckbox-caller only when allow_insecure_dev.
+// Throws AuthError; never treats an unsigned token as a spec payload.
+std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::string &peer_identity,
+                                       const std::string &bearer, const std::string &caller_header);
+
+DaemonConfig LoadDaemonFile(const std::string &path); // unknown/duplicate YAML keys are errors
+// Local helper: sets allow_insecure_dev. Production must LoadDaemonFile + ValidateDaemonOrThrow.
 DaemonConfig DefaultDaemonConfig();
+// Refuses empty/short handle_secret unless allow_insecure_dev; requires bearer or JWT otherwise.
 void ValidateDaemonOrThrow(const DaemonConfig &cfg);
 
 bool GlobMatch(const std::string &pattern, const std::string &value);

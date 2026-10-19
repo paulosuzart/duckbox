@@ -37,35 +37,108 @@ void ExecOrThrow(ddb::Connection &con, const std::string &sql) {
 	}
 }
 
+void CheckBootstrapSql(const std::string &sql) {
+	if (sql.empty()) {
+		return;
+	}
+	ddb::Parser parser;
+	parser.ParseQuery(sql);
+	for (auto &st : parser.statements) {
+		auto type = st->type;
+		if (type == ddb::StatementType::CREATE_STATEMENT || type == ddb::StatementType::INSERT_STATEMENT) {
+			continue;
+		}
+		throw SqlRejected("memory bootstrap SQL only allows CREATE/INSERT, not " + ddb::StatementTypeToString(type));
+	}
+}
+
+void ConstrainLakeAgainstDaemon(const SandboxSpec &spec, const DaemonConfig &daemon) {
+	if (daemon.allow_insecure_dev && daemon.lake_allow.s3_endpoints.empty() && daemon.lake_allow.secret_refs.empty()) {
+		return;
+	}
+	if (spec.lake.kind != LakeKind::Ducklake) {
+		return;
+	}
+	auto endpoint = spec.lake.s3.endpoint;
+	if (!spec.lake.s3.endpoint_env.empty()) {
+		endpoint = spec.lake.s3.endpoint_env;
+	}
+	if (!daemon.lake_allow.s3_endpoints.empty()) {
+		bool ok = false;
+		for (auto &a : daemon.lake_allow.s3_endpoints) {
+			if (a == endpoint || a == spec.lake.s3.endpoint) {
+				ok = true;
+				break;
+			}
+		}
+		if (!ok) {
+			throw PolicyError("lake.s3.endpoint is not on daemon lake_allow.s3_endpoints");
+		}
+	} else if (!daemon.allow_insecure_dev) {
+		throw PolicyError("daemon lake_allow.s3_endpoints is required");
+	}
+	auto check_ref = [&](const SecretRef &ref, const std::string &field) {
+		if (ref.Empty()) {
+			return;
+		}
+		if (daemon.lake_allow.secret_refs.empty()) {
+			if (!daemon.allow_insecure_dev) {
+				throw PolicyError("daemon lake_allow.secret_refs is required");
+			}
+			return;
+		}
+		for (auto &a : daemon.lake_allow.secret_refs) {
+			if (a == ref.Spec()) {
+				return;
+			}
+		}
+		throw PolicyError(field + " is not on daemon lake_allow.secret_refs");
+	};
+	check_ref(spec.lake.s3.access_key, "lake.s3.access_key");
+	check_ref(spec.lake.s3.secret_key, "lake.s3.secret_key");
+	check_ref(spec.lake.catalog_ref, "lake.catalog");
+}
+
+void LoadExtension(ddb::Connection &con, const std::string &name) {
+	auto lower = ddb::StringUtil::Lower(name);
+	if (lower.empty() || lower == "[]") {
+		return;
+	}
+	if (lower.find('\'') != std::string::npos || lower.find(';') != std::string::npos) {
+		throw PolicyError("lake.extensions contains an invalid name");
+	}
+	auto load = con.Query("LOAD " + lower);
+	if (!load->HasError()) {
+		return;
+	}
+	if (lower == "nanoarrow") {
+		ExecOrThrow(con, "INSTALL nanoarrow FROM community; LOAD nanoarrow;");
+		return;
+	}
+	ExecOrThrow(con, "INSTALL " + lower + "; LOAD " + lower + ";");
+}
+
 void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std::string &spec_dir,
-                        const SecretResolver &secrets) {
-	ExecOrThrow(con, "INSTALL nanoarrow FROM community; LOAD nanoarrow;");
+                        const SecretResolver &secrets, const DaemonConfig &daemon) {
+	(void)spec_dir;
+	ConstrainLakeAgainstDaemon(spec, daemon);
+	LoadExtension(con, "nanoarrow");
 
 	for (auto &ext : spec.lake.extensions) {
 		auto lower = ddb::StringUtil::Lower(ext);
 		if (lower.empty() || lower == "nanoarrow" || lower == "[]") {
 			continue;
 		}
-		if (lower.find('\'') != std::string::npos || lower.find(';') != std::string::npos ||
-		    lower.find('[') != std::string::npos || lower.find(']') != std::string::npos) {
-			throw PolicyError("lake.extensions contains an invalid name");
-		}
 		std::clog << "sandbox: LOAD extension '" << lower << "' (from spec)\n";
-		ExecOrThrow(con, "INSTALL " + lower + "; LOAD " + lower + ";");
+		LoadExtension(con, lower);
 	}
 
 	if (spec.lake.kind == LakeKind::Memory) {
-		if (spec.lake.bootstrap_sql_path.empty()) {
+		if (spec.lake.bootstrap_sql.empty()) {
 			throw PolicyError("lake.bootstrap_sql is required when lake.kind=memory");
 		}
-		auto path = ResolvePath(spec_dir, spec.lake.bootstrap_sql_path);
-		std::ifstream in(path);
-		if (!in) {
-			throw Error("cannot read lake.bootstrap_sql " + path);
-		}
-		std::ostringstream os;
-		os << in.rdbuf();
-		ExecOrThrow(con, os.str());
+		CheckBootstrapSql(spec.lake.bootstrap_sql);
+		ExecOrThrow(con, spec.lake.bootstrap_sql);
 		return;
 	}
 

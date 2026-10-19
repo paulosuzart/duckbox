@@ -1,11 +1,16 @@
 #include "duckbox/init_sql.hpp"
 #include "duckbox/error.hpp"
 #include "duckbox/lake.hpp"
+#include "duckbox/rewriter.hpp"
 #include "duckbox/validator.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <sstream>
+#include <thread>
 #include <unordered_set>
 
 namespace duckbox {
@@ -25,14 +30,48 @@ const std::unordered_set<std::string> kDeniedSet = {
 bool ExtAllowed(const SandboxSpec &spec, const std::string &name) {
 	auto want = Lower(name);
 	for (auto &e : spec.lake.extensions) {
-		if (Lower(e) == want || want.find(Lower(e)) != std::string::npos) {
+		if (Lower(e) == want) {
 			return true;
 		}
 	}
 	return want == "nanoarrow";
 }
 
-void CheckOne(const ddb::SQLStatement &stmt, const DaemonConfig &daemon, const SandboxSpec &spec) {
+void RewriteInitBody(ValidationContext &ctx, const TenantKey *key, ddb::SelectStatement *sel,
+                     ddb::unique_ptr<ddb::ParsedExpression> *expr, ddb::unique_ptr<ddb::QueryNode> *node) {
+	if (sel) {
+		ValidateSelect(*sel, ctx);
+		if (key) {
+			RewriteContext rctx;
+			rctx.policy = ctx.policy;
+			rctx.key = *key;
+			RewriteSelect(*sel, rctx);
+			ddb::case_insensitive_map_t<ddb::Value> params;
+			for (auto &kv : key->vars) {
+				params[kv.first] = ValueFromKeyVar(kv.first, kv.second);
+			}
+			if (!key->tenant_id.empty() && params.find("tenant_id") == params.end()) {
+				params["tenant_id"] = ddb::Value::BIGINT(key->tenant_id_i64);
+			}
+			BindNamedParametersInStatement(*sel, params);
+		}
+	}
+	if (expr && *expr) {
+		ValidateExpression(**expr, ctx);
+		if (key) {
+			RewriteContext rctx;
+			rctx.policy = ctx.policy;
+			rctx.key = *key;
+			// subquery expressions inside the macro
+		}
+	}
+	if (node && *node) {
+		ValidateQueryNode(**node, ctx);
+	}
+	(void)expr;
+}
+
+void CheckOne(const ddb::SQLStatement &stmt, const DaemonConfig &daemon, const SandboxSpec &spec, const TenantKey *key) {
 	auto type = stmt.type;
 	if (type == ddb::StatementType::SET_STATEMENT) {
 		auto rendered = stmt.ToString();
@@ -45,8 +84,8 @@ void CheckOne(const ddb::SQLStatement &stmt, const DaemonConfig &daemon, const S
 		if (kDeniedSet.count(name)) {
 			throw SqlRejected("initSQL must not change security setting '" + set.name + "'");
 		}
-		if (!daemon.allowed_init_settings.empty() && !daemon.allowed_init_settings.count(set.name) &&
-		    !daemon.allowed_init_settings.count(name)) {
+		if (daemon.allowed_init_settings.empty() ||
+		    (!daemon.allowed_init_settings.count(set.name) && !daemon.allowed_init_settings.count(name))) {
 			throw SqlRejected("initSQL SET '" + set.name + "' is not on the daemon allowlist");
 		}
 		return;
@@ -71,12 +110,12 @@ void CheckOne(const ddb::SQLStatement &stmt, const DaemonConfig &daemon, const S
 		if (ct == ddb::CatalogType::VIEW_ENTRY) {
 			auto &info = cr.info->Cast<ddb::CreateViewInfo>();
 			if (info.query) {
-				ValidateSelect(*info.query, ctx);
+				RewriteInitBody(ctx, key, info.query.get(), nullptr, nullptr);
 			}
 		} else if (ct == ddb::CatalogType::TABLE_ENTRY) {
 			auto &info = cr.info->Cast<ddb::CreateTableInfo>();
 			if (info.query) {
-				ValidateSelect(*info.query, ctx);
+				RewriteInitBody(ctx, key, info.query.get(), nullptr, nullptr);
 			}
 		} else {
 			auto &info = cr.info->Cast<ddb::CreateMacroInfo>();
@@ -91,7 +130,7 @@ void CheckOne(const ddb::SQLStatement &stmt, const DaemonConfig &daemon, const S
 					}
 				} else if (macro->type == ddb::MacroType::TABLE_MACRO) {
 					auto &tm = macro->Cast<ddb::TableMacroFunction>();
-					if (tm.query_node) {
+						if (tm.query_node) {
 						ValidateQueryNode(*tm.query_node, ctx);
 					}
 				}
@@ -124,28 +163,64 @@ void CheckOne(const ddb::SQLStatement &stmt, const DaemonConfig &daemon, const S
 	throw SqlRejected("initSQL statement not allowlisted: " + ddb::StatementTypeToString(type));
 }
 
-} // namespace
-
-void InitSqlGuard::Check(const std::string &sql, const DaemonConfig &daemon, const SandboxSpec &spec) const {
+std::string SerializedInitSql(const std::string &sql, const DaemonConfig &daemon, const SandboxSpec &spec,
+                              const TenantKey *key) {
 	if (sql.empty()) {
-		return;
+		return sql;
 	}
-	auto parser = std::make_unique<ddb::Parser>();
-	parser->ParseQuery(sql);
-	if (parser->statements.empty()) {
-		return;
+	ddb::Parser parser;
+	parser.ParseQuery(sql);
+	std::ostringstream os;
+	for (auto &st : parser.statements) {
+		CheckOne(*st, daemon, spec, key);
+		os << st->ToString() << ";\n";
 	}
-	for (auto &st : parser->statements) {
-		CheckOne(*st, daemon, spec);
-	}
+	return os.str();
 }
 
-void RunInitSql(ddb::Connection &con, const std::string &sql, const DaemonConfig &daemon, const SandboxSpec &spec) {
+} // namespace
+
+void InitSqlGuard::Check(const std::string &sql, const DaemonConfig &daemon, const SandboxSpec &spec,
+                        const TenantKey *key) const {
+	(void)SerializedInitSql(sql, daemon, spec, key);
+}
+
+void RunInitSql(ddb::Connection &con, const std::string &sql, const DaemonConfig &daemon, const SandboxSpec &spec,
+                const TenantKey *key) {
 	if (sql.empty()) {
 		return;
 	}
-	InitSqlGuard{}.Check(sql, daemon, spec);
-	ExecOrThrow(con, sql);
+	auto rewritten = SerializedInitSql(sql, daemon, spec, key);
+	if (daemon.init_sql_timeout_ms <= 0) {
+		ExecOrThrow(con, rewritten);
+		return;
+	}
+	std::mutex mu;
+	std::condition_variable cv;
+	bool done = false;
+	std::thread wd([&] {
+		std::unique_lock<std::mutex> lk(mu);
+		if (!cv.wait_for(lk, std::chrono::milliseconds(daemon.init_sql_timeout_ms), [&] { return done; })) {
+			con.Interrupt();
+		}
+	});
+	try {
+		ExecOrThrow(con, rewritten);
+	} catch (...) {
+		{
+			std::lock_guard<std::mutex> lk(mu);
+			done = true;
+		}
+		cv.notify_all();
+		wd.join();
+		throw;
+	}
+	{
+		std::lock_guard<std::mutex> lk(mu);
+		done = true;
+	}
+	cv.notify_all();
+	wd.join();
 }
 
 } // namespace duckbox

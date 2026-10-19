@@ -41,9 +41,10 @@ struct SandboxRecord {
 class SandboxRegistry {
 public:
 	virtual ~SandboxRegistry() = default;
+	// Same content is idempotent; different content on an existing id is ConflictError.
 	virtual SandboxRecord Create(SandboxRecord rec) = 0;
-	virtual SandboxRecord Get(const std::string &id) = 0;
-	virtual SandboxRecord Update(SandboxRecord rec) = 0;
+	virtual SandboxRecord Get(const std::string &id) = 0; // NotFoundError / hides tombstones
+	virtual SandboxRecord Update(SandboxRecord rec) = 0;  // bumps version; ConflictError on CAS fail
 	virtual SandboxRecord Delete(const std::string &id) = 0;
 	virtual std::vector<SandboxRecord> List() = 0;
 	virtual void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) = 0;

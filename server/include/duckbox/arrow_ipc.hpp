@@ -1,7 +1,7 @@
 #pragma once
 
-// Exports a rewritten SELECT as Arrow IPC stream via DuckDB COPY (FORMAT ARROWS).
-// Parameter values are bound, never interpolated into SQL.
+// Export a query result as an Arrow IPC stream in memory via the Arrow C data
+// interface. No temp files. The query is not re-executed here.
 
 #include "duckbox/duckdb_layer.hpp"
 
@@ -11,6 +11,7 @@
 
 namespace duckbox {
 
+std::vector<uint8_t> MaterializedToArrowIpc(ddb::MaterializedQueryResult &result); // in-memory; no /tmp file
 std::vector<uint8_t> QueryToArrowIpc(ddb::Connection &con, const std::string &select_sql);
 std::vector<uint8_t> QueryToArrowIpc(ddb::Connection &con, const std::string &select_sql,
                                     std::vector<ddb::Value> &params);

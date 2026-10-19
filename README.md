@@ -99,7 +99,7 @@ Daemon startup validates **only** daemon config (listen, limits, optional lease 
 
 Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap.
 
-**initSQL**: SET of permitted names, `CREATE [OR REPLACE] TEMP VIEW|MACRO|TABLE`, `USE`, `LOAD` of spec-listed extensions. Reject `ATTACH`/`DETACH`, `COPY`/`EXPORT`, `INSTALL`, external access, security settings. Objects it creates are visible to user SQL **only if the spec whitelists them**.
+**initSQL**: SET of permitted names (empty allowlist is deny-all), `CREATE [OR REPLACE] TEMP VIEW|MACRO|TABLE`, `USE`, `LOAD` of spec-listed extensions (exact name). Reject `ATTACH`/`DETACH`, `COPY`/`EXPORT`, `INSTALL`, security settings. VIEW/MACRO bodies are rewritten with the tenant key and AST-checked. Objects it creates are visible to user SQL **only if the spec whitelists them**. After lake attach, `enable_external_access` is false (allowed_directories/paths cover the lake only).
 
 ### Metrics
 
@@ -111,8 +111,8 @@ v1 wire protocol. JDBC and ADBC work. Headers:
 
 - `x-duckbox-sandbox` — named sandbox id (required for queries)
 - `x-duckbox-key` — optional; definition key is used otherwise
-- `x-duckbox-caller` — trusted caller identity (default `local`)
-- handshake: peer identity used as caller when the header is absent
+- `x-duckbox-caller` — trusted caller identity; used only when `auth.allow_insecure_dev` is set and no bearer/JWT is configured
+- `Authorization: Bearer` — static `auth.bearer_secrets` or HS256 JWT (`auth.jwt_secret`). Unsigned tokens are rejected
 
 CRUD actions: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes` (body is spec YAML or id).
 
@@ -126,7 +126,7 @@ Linux (CI): `bash scripts/install_arrow.sh` (Apache Arrow APT, including Flight 
 macOS: `brew install apache-arrow openssl cmake` (recent formulae enable Flight SQL).
 
 ```bash
-bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs
+bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
 cmake --build build --parallel
 ./build/duckbox_tests
@@ -162,6 +162,6 @@ Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match)
 
 ## Stubbed
 
-- JWT signature/claims (`token` mode)
+- mTLS caller certs (bearer secrets and HS256 JWT are implemented)
 - Multi-node S3 leases with fencing epoch (`S3ConditionalLeaseManager`)
 - Per-process cgroup/seccomp

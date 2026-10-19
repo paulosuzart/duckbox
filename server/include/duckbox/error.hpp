@@ -8,6 +8,7 @@
 
 namespace duckbox {
 
+// Base for every duckbox failure; Flight SQL maps these to Status codes.
 class Error : public std::runtime_error {
 public:
 	explicit Error(const std::string &msg) : std::runtime_error(msg) {
