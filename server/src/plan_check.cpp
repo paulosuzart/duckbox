@@ -453,6 +453,18 @@ bool DsnMatchesAttach(const std::string &got_raw, const Policy &policy) {
 	return want.count("host") || want.count("dbname");
 }
 
+bool HasAnyDsnParam(ddb::LogicalGet &get) {
+	for (auto &p : get.parameters) {
+		if (p.IsNull()) {
+			continue;
+		}
+		if (LooksLikeDsn(StripQuotes(p.ToString()))) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool UnboundPostgresDsnAllowed(ddb::LogicalGet &get, const Policy &policy) {
 	for (auto &p : get.parameters) {
 		if (p.IsNull()) {
@@ -493,6 +505,11 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 			return;
 		}
 		if (UnboundPostgresDsnAllowed(get, policy)) {
+			return;
+		}
+		// DuckLake snapshot/metadata SQL is postgres_query on the already-attached
+		// session (parameters are SQL, not a DSN). A foreign DSN is still denied.
+		if (fname == "postgres_query" && !HasAnyDsnParam(get)) {
 			return;
 		}
 		throw PlanRejected("unbound " + get.function.name + " is denied (DSN is not the spec's attached catalog)");

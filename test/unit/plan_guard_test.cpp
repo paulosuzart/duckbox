@@ -37,8 +37,12 @@ void duckbox::test::RunPlanGuardTests() {
 	}
 	{
 		auto get = MakeScan("postgres_query", {"SELECT 1"});
+		ExpectPlanOk(*get, lake, key_a, "DuckLake snapshot postgres_query uses the attached session (SQL, no DSN)");
+	}
+	{
+		auto get = MakeScan("postgres_query", {"dbname=evil host=attacker", "SELECT 1"});
 		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "unbound",
-		                    "K3 postgres_query without the spec DSN is denied");
+		                    "K3 postgres_query with a foreign DSN is denied");
 	}
 	{
 		auto get = MakeScan("postgres_scan_pushdown", {"dbname=x", "public", "deals"});
