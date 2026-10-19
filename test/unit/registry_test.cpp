@@ -228,5 +228,8 @@ void duckbox::test::RunRegistryTests() {
 		extra["not_a_field"] = true;
 		ExpectThrowContains([&] { SandboxRecord::FromJson(extra.dump()); }, "unknown",
 		                    "unknown field is rejected");
+		auto dup = std::string("{\"id\":\"forged\",") + dumped.substr(1);
+		ExpectThrowContains([&] { SandboxRecord::FromJson(dup); }, "duplicate",
+		                    "duplicate JSON keys are rejected");
 	}
 }

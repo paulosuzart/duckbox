@@ -9,6 +9,7 @@
 
 #include <set>
 #include <string>
+#include <vector>
 
 namespace duckbox {
 
@@ -17,8 +18,26 @@ using Json = nlohmann::json;
 inline Json ParseJsonObject(const std::string &raw, const char *what) {
 	Json j;
 	try {
-		j = Json::parse(raw);
-	} catch (const std::exception &e) {
+		std::vector<std::set<std::string>> objects;
+		auto cb = [&](int, Json::parse_event_t event, Json &parsed) -> bool {
+			if (event == Json::parse_event_t::object_start) {
+				objects.emplace_back();
+			} else if (event == Json::parse_event_t::object_end) {
+				if (!objects.empty()) {
+					objects.pop_back();
+				}
+			} else if (event == Json::parse_event_t::key) {
+				auto key = parsed.get_ref<const Json::string_t &>();
+				if (!objects.empty() && !objects.back().insert(key).second) {
+					throw PolicyError(std::string(what) + " duplicate key '" + std::string(key) + "'");
+				}
+			}
+			return true;
+		};
+		j = Json::parse(raw, cb);
+	} catch (const PolicyError &) {
+		throw;
+	} catch (const std::exception &) {
 		throw PolicyError(std::string(what) + " is not JSON");
 	}
 	if (!j.is_object()) {
