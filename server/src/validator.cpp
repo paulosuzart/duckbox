@@ -124,12 +124,9 @@ void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx) {
 		break;
 	}
 	case ddb::TableReferenceType::TABLE_FUNCTION: {
-		if (ctx.policy->deny_table_functions) {
-			auto &tf = ref.Cast<ddb::TableFunctionRef>();
-			std::string fname = tf.function ? tf.function->ToString() : "table function";
-			throw SqlRejected("table functions are denied (including replacement scans): " + fname);
-		}
-		break;
+		auto &tf = ref.Cast<ddb::TableFunctionRef>();
+		std::string fname = tf.function ? tf.function->ToString() : "table function";
+		throw SqlRejected("table functions are denied (including replacement scans): " + fname);
 	}
 	case ddb::TableReferenceType::SUBQUERY: {
 		auto &sq = ref.Cast<ddb::SubqueryRef>();

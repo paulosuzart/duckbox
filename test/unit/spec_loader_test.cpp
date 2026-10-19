@@ -118,10 +118,37 @@ void duckbox::test::RunSpecLoaderTests() {
 	Expect(ducklake_spec.lake.catalog_env == "DUCKBOX_LAKE_CATALOG", "catalog via env name, not inline");
 	Expect(ducklake_spec.lake.s3.access_key.Spec() == "env:DUCKBOX_S3_KEY", "s3 key is a reference");
 
+	ExpectThrowContains(
+	    [&] {
+		    std::string s = mini;
+		    auto pos = s.find("deny_table_functions: true");
+		    s.replace(pos, std::string("deny_table_functions: true").size(), "deny_table_functions: false");
+		    LoadSpecString(s, "<deny-tf>");
+	    },
+	    "always denied", "load rejects deny_table_functions: false");
+	ExpectThrowContains(
+	    [&] {
+		    std::string s = mini;
+		    auto pos = s.find("functions: [count]");
+		    s.replace(pos, std::string("functions: [count]").size(), "functions: [count, postgres_query]");
+		    LoadSpecString(s, "<pg-fn>");
+	    },
+	    "never allowlisted", "load rejects postgres_query in functions");
+	ExpectThrowContains(
+	    [&] {
+		    std::string s = mini;
+		    auto pos = s.find("functions: [count]");
+		    s.replace(pos, std::string("functions: [count]").size(), "functions: [duckdb_tables]");
+		    LoadSpecString(s, "<duckdb-fn>");
+	    },
+	    "never allowlisted", "load rejects duckdb_tables in functions");
+
 	auto policy = TestPolicy();
 	auto p2 = policy;
 	p2.deny_table_functions = false;
 	Expect(FingerprintSpec(p2) != FingerprintSpec(policy), "fingerprint includes deny_table_functions");
+	Expect(DefaultDaemonConfig().handle_secret != "duckbox-dev-secret" && DefaultDaemonConfig().handle_secret.empty(),
+	       "DefaultDaemonConfig does not bake in duckbox-dev-secret");
 	p2 = policy;
 	p2.resources.max_result_rows = 7;
 	Expect(FingerprintSpec(p2) != FingerprintSpec(policy), "fingerprint includes resources");

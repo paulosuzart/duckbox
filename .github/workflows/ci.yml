@@ -41,6 +41,26 @@ jobs:
       - name: Validate memory spec
         run: make validate
 
+  coverage:
+    name: Line coverage (gcovr)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Arrow Flight SQL + build tools
+        run: bash scripts/install_arrow.sh
+      - name: Cache DuckDB deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            .deps
+            ~/.duckdb
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp080-${{ runner.os }}-${{ runner.arch }}
+      - name: Coverage (gcovr, server/src >= 75%)
+        run: make coverage
+
   ducklake-e2e:
     name: DuckLake + S3 emulator (Flight SQL / ADBC)
     runs-on: ubuntu-latest

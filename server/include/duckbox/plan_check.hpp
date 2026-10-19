@@ -1,16 +1,14 @@
 #pragma once
 
 // Optimizer-extension plan guard. Last line of defense after rewrite: a CTE
-// name must not become a lake scan. Scan functions are an allowlist
-// (seq_scan / ducklake_scan / postgres_* / duckdb_* on a ducklake spec /
-// pragma_table_info). Bound tables come from GetTable()/ParentCatalog().
-// Bound postgres_* must match the spec alias or __ducklake_metadata_<alias>
-// exactly. Unbound postgres_scan is allowed only when a parameter DSN matches
-// the spec attach. Unbound postgres_query with no DSN is DuckLake snapshot SQL
-// on the attached session. ducklake_scan of a spec table still needs typed
-// tenant filters (from the bound key, not a spec literal). User table
-// functions are denied at the AST, including ExecuteRewritten handle SQL.
-// Mandatory filters are typed ConstantFilter / BoundComparison.
+// name must not become a lake scan. User statements are marked on the
+// ClientContext; nested DuckLake catalog I/O (a deeper optimizer invocation
+// on the same context, or a context without the marker) is not run through
+// the user guard. The user plan allowlists seq_scan / ducklake_scan of spec
+// tables with typed tenant filters. postgres_*/duckdb_*/ducklake_* (except
+// ducklake_scan of a spec table) are denied in the user plan unconditionally
+// — origin, not function-name DuckLake allowances. Mandatory filters are
+// typed ConstantFilter / BoundComparison.
 
 #include "duckbox/policy.hpp"
 #include "duckbox/tenant_key.hpp"
@@ -47,5 +45,18 @@ void RegisterPlanGuard(ddb::DBConfig &config, const Policy &policy, const Tenant
 // Exact catalog name: spec alias, memory/main, or `__ducklake_metadata_<alias>`.
 // Never a substring match (`evil_ducklake` is not the lake).
 bool CatalogIsAttachedLake(const std::string &catalog, const Policy &policy);
+
+// Marks this ClientContext as executing user SQL. Nested optimizer callbacks
+// (DuckLake metadata I/O) see a deeper depth and skip the user plan guard.
+class UserStatementScope {
+public:
+	explicit UserStatementScope(ddb::ClientContext &ctx);
+	~UserStatementScope();
+	UserStatementScope(const UserStatementScope &) = delete;
+	UserStatementScope &operator=(const UserStatementScope &) = delete;
+
+private:
+	ddb::ClientContextState *state_ = nullptr;
+};
 
 } // namespace duckbox

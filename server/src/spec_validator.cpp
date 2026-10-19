@@ -200,8 +200,13 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 			                             "' must be constrained by a key variable (e.g. tenant_id = :tenant_id)");
 		}
 	}
+	if (!spec.deny_table_functions) {
+		add("deny_table_functions", "false is refused (table functions are always denied)");
+	}
 	for (auto &fn : spec.functions) {
-		if (!ValidIdent(fn) && fn != "count_star") {
+		if (IsAlwaysDeniedTableFunction(fn)) {
+			add("functions", "table function '" + fn + "' is never allowlisted");
+		} else if (!ValidIdent(fn) && fn != "count_star") {
 			add("functions", "not a valid function identifier: " + fn);
 		}
 	}
@@ -299,16 +304,16 @@ int RunValidateCommand(const DaemonConfig &daemon, const std::string &spec_path)
 		std::cerr << "duckbox validate: --spec is required\n";
 		return 1;
 	}
-	auto spec = LoadSpecFile(spec_path);
-	namespace fs = std::filesystem;
-	auto dir = fs::path(spec_path).parent_path().string();
-	SpecValidator v;
-	auto st = v.ValidateStatic(spec);
-	if (!st.empty()) {
-		std::cerr << spec_path << ": " << SpecError::Format(st) << "\n";
-		return 1;
-	}
 	try {
+		auto spec = LoadSpecFile(spec_path);
+		namespace fs = std::filesystem;
+		auto dir = fs::path(spec_path).parent_path().string();
+		SpecValidator v;
+		auto st = v.ValidateStatic(spec);
+		if (!st.empty()) {
+			std::cerr << spec_path << ": " << SpecError::Format(st) << "\n";
+			return 1;
+		}
 		auto key = ParseTenantKey("tenant_0:validate", spec.key);
 		TenantSandbox box(daemon, spec, key, spec.init_sql, dir);
 		box.Warmup(/*validate_lake=*/true);

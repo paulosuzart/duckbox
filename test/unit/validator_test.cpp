@@ -76,4 +76,31 @@ void duckbox::test::RunValidatorTests() {
 		           has_path(validator.ValidateStatic(lit), "tables.deals.filters", "key variable"),
 		       "K2 spec tenant filter with a literal is rejected");
 	}
+
+	{
+		auto bypass = loaded;
+		bypass.deny_table_functions = false;
+		Expect(has_path(validator.ValidateStatic(bypass), "deny_table_functions", "always denied"),
+		       "ValidateStatic rejects deny_table_functions: false");
+		bypass = loaded;
+		bypass.functions.insert("postgres_query");
+		Expect(has_path(validator.ValidateStatic(bypass), "functions", "never allowlisted") ||
+		           has_path(validator.ValidateStatic(bypass), "functions", "postgres_query"),
+		       "ValidateStatic rejects postgres_query in functions");
+		bypass = loaded;
+		bypass.functions.insert("duckdb_secrets");
+		bypass.functions.insert("ducklake_snapshots");
+		auto iss = validator.ValidateStatic(bypass);
+		Expect(has_path(iss, "functions", "duckdb_secrets") || has_path(iss, "functions", "never allowlisted"),
+		       "ValidateStatic rejects duckdb_secrets in functions");
+		Expect(IsAlwaysDeniedTableFunction("postgres_query") && IsAlwaysDeniedTableFunction("duckdb_tables") &&
+		           IsAlwaysDeniedTableFunction("ducklake_scan") && IsAlwaysDeniedTableFunction("read_csv") &&
+		           IsAlwaysDeniedTableFunction("glob") && IsAlwaysDeniedTableFunction("generate_series") &&
+		           !IsAlwaysDeniedTableFunction("count"),
+		       "table-function names are banned from the functions allowlist");
+	}
+
+	Expect(RunValidateCommand(TestDaemon(), "") == 1, "validate without --spec fails");
+	Expect(RunValidateCommand(TestDaemon(), MemoryAnalystPath()) == 0, "validate memory analyst spec + lake");
+	Expect(RunValidateCommand(TestDaemon(), "/tmp/duckbox-no-such-spec.yaml") != 0, "validate missing file fails");
 }

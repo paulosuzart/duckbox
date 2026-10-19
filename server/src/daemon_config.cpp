@@ -81,7 +81,6 @@ void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity, const
 DaemonConfig DefaultDaemonConfig() {
 	DaemonConfig d;
 	d.allow_insecure_dev = true; // explicit local/dev helper; production YAML must set auth
-	d.handle_secret = "duckbox-dev-secret";
 	d.allowed_init_settings = kDefaultAllowedInitSettings;
 	return d;
 }

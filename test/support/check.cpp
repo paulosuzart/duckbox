@@ -55,7 +55,9 @@ int ReportAndExit(const char *suite) {
 }
 
 DaemonConfig TestDaemon() {
-	return DefaultDaemonConfig();
+	auto d = DefaultDaemonConfig();
+	d.handle_secret = "duckbox-dev-secret";
+	return d;
 }
 
 std::string MemorySpecDir() {

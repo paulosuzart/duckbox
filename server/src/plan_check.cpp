@@ -4,11 +4,8 @@
 
 #include "duckdb/common/enum_util.hpp"
 
-#include <cctype>
 #include <functional>
 #include <iostream>
-#include <map>
-#include <unordered_set>
 
 namespace duckbox {
 
@@ -37,37 +34,21 @@ bool CatalogIsAttachedLake(const std::string &catalog, const Policy &policy) {
 
 namespace {
 
-const char *kAllowedScans[] = {"seq_scan", "ducklake_scan", "postgres_scan", "postgres_scan_pushdown",
-                               "postgres_query", "pragma_table_info"};
+const char *kUserStmtState = "duckbox.user_statement";
 
-bool IsAllowedScan(const std::string &lower) {
-	for (auto *a : kAllowedScans) {
-		if (lower == a) {
-			return true;
-		}
+struct UserStatementGuardState : ddb::ClientContextState {
+	int scopes = 0;
+	int optimizer_depth = 0;
+};
+
+// User-plan denylist. DuckLake internals never reach CheckGet: they run without
+// UserStatementScope or at optimizer_depth > 1.
+bool IsUserDeniedTableScan(const std::string &lower) {
+	if (ddb::StringUtil::StartsWith(lower, "postgres_") || ddb::StringUtil::StartsWith(lower, "duckdb_") ||
+	    lower == "pg_clear_cache" || ddb::StringUtil::StartsWith(lower, "pragma_")) {
+		return true;
 	}
-	return false;
-}
-
-bool IsDucklakeScan(const std::string &lower) {
-	return lower == "ducklake_scan";
-}
-
-// DuckLake catalog I/O uses postgres_scan, postgres_scan_pushdown, postgres_query,
-// and occasionally postgres_execute / pg_clear_cache. User SQL naming any of these
-// is denied at the AST (deny_table_functions).
-bool IsPostgresCatalogScan(const std::string &lower) {
-	return ddb::StringUtil::StartsWith(lower, "postgres_") || lower == "pg_clear_cache";
-}
-
-bool IsDuckdbCatalogScan(const std::string &lower) {
-	if (!ddb::StringUtil::StartsWith(lower, "duckdb_")) {
-		return false;
-	}
-	// DuckLake 1.5.6 metadata probe uses duckdb_secrets (and duckdb_tables,
-	// duckdb_columns, …) against the instance it just attached. User SQL
-	// naming these is still denied at the AST (deny_table_functions).
-	return true;
+	return ddb::StringUtil::StartsWith(lower, "ducklake_") && lower != "ducklake_scan";
 }
 
 bool ValuesEqual(const ddb::Value &got, const ddb::Value &want) {
@@ -301,20 +282,6 @@ bool ScanHasTypedPred(ddb::LogicalGet &get, const MandatoryPred &pred, const std
 	return false;
 }
 
-bool LooksLikeDucklakeCatalogTable(const std::string &tname) {
-	auto lower = ddb::StringUtil::Lower(tname);
-	// ducklake_metadata, ducklake_inlined_data_*, ducklake_inlined_delete_*.
-	// User SQL naming these is rejected at the AST; DuckLake may seq_scan them internally.
-	return ddb::StringUtil::StartsWith(lower, "ducklake_");
-}
-
-std::string BoundCatalogName(ddb::LogicalGet &get) {
-	if (auto table = get.GetTable()) {
-		return table->ParentCatalog().GetName();
-	}
-	return "";
-}
-
 std::string BoundTableName(ddb::LogicalGet &get) {
 	if (auto table = get.GetTable()) {
 		return table->name;
@@ -322,203 +289,13 @@ std::string BoundTableName(ddb::LogicalGet &get) {
 	return "";
 }
 
-std::string StripQuotes(std::string s) {
-	if (s.size() >= 2 && ((s.front() == '\'' && s.back() == '\'') || (s.front() == '"' && s.back() == '"'))) {
-		return s.substr(1, s.size() - 2);
-	}
-	return s;
-}
-
-std::string PostgresAttachDsn(const Policy &policy) {
-	auto c = policy.lake.catalog;
-	auto lower = ddb::StringUtil::Lower(c);
-	const char *markers[] = {"ducklake:postgres:", "postgres:"};
-	for (auto *m : markers) {
-		auto pos = lower.find(m);
-		if (pos != std::string::npos) {
-			return c.substr(pos + std::char_traits<char>::length(m));
-		}
-	}
-	return c;
-}
-
-std::map<std::string, std::string> ParseConnKv(const std::string &dsn) {
-	std::map<std::string, std::string> out;
-	std::string cur;
-	auto flush = [&]() {
-		auto eq = cur.find('=');
-		if (eq != std::string::npos && eq > 0) {
-			out[ddb::StringUtil::Lower(cur.substr(0, eq))] = cur.substr(eq + 1);
-		}
-		cur.clear();
-	};
-	for (char ch : dsn) {
-		if (std::isspace(static_cast<unsigned char>(ch))) {
-			flush();
-		} else {
-			cur.push_back(ch);
-		}
-	}
-	flush();
-	return out;
-}
-
-bool LooksLikeDsn(const std::string &s) {
-	auto lower = ddb::StringUtil::Lower(s);
-	return lower.find("host=") != std::string::npos || lower.find("dbname=") != std::string::npos ||
-	       lower.find("port=") != std::string::npos || lower.find("postgres://") != std::string::npos ||
-	       lower.find("postgresql://") != std::string::npos;
-}
-
-void ParsePostgresUri(const std::string &raw, std::map<std::string, std::string> &out) {
-	auto s = StripQuotes(raw);
-	auto lower = ddb::StringUtil::Lower(s);
-	size_t start = std::string::npos;
-	for (auto *sc : {"postgresql://", "postgres://"}) {
-		auto pos = lower.find(sc);
-		if (pos != std::string::npos) {
-			start = pos + std::char_traits<char>::length(sc);
-			break;
-		}
-	}
-	if (start == std::string::npos) {
-		return;
-	}
-	auto rest = s.substr(start);
-	auto at = rest.rfind('@');
-	std::string hostpart = rest;
-	if (at != std::string::npos) {
-		auto userinfo = rest.substr(0, at);
-		hostpart = rest.substr(at + 1);
-		auto colon = userinfo.find(':');
-		out["user"] = colon == std::string::npos ? userinfo : userinfo.substr(0, colon);
-	}
-	auto slash = hostpart.find('/');
-	std::string hostport = slash == std::string::npos ? hostpart : hostpart.substr(0, slash);
-	if (slash != std::string::npos) {
-		auto db = hostpart.substr(slash + 1);
-		auto q = db.find('?');
-		if (q != std::string::npos) {
-			db = db.substr(0, q);
-		}
-		if (!db.empty()) {
-			out["dbname"] = db;
-		}
-	}
-	auto colon = hostport.rfind(':');
-	if (colon != std::string::npos && hostport.find(']') == std::string::npos) {
-		out["host"] = hostport.substr(0, colon);
-		out["port"] = hostport.substr(colon + 1);
-	} else if (!hostport.empty()) {
-		out["host"] = hostport;
-	}
-}
-
-std::map<std::string, std::string> ParsePostgresConn(const std::string &raw) {
-	auto s = StripQuotes(raw);
-	auto kv = ParseConnKv(s);
-	if (kv.empty() || (!kv.count("host") && !kv.count("dbname"))) {
-		ParsePostgresUri(s, kv);
-	}
-	return kv;
-}
-
-bool DsnMatchesAttach(const std::string &got_raw, const Policy &policy) {
-	auto want_dsn = PostgresAttachDsn(policy);
-	if (want_dsn.empty()) {
-		return false;
-	}
-	auto got = ParsePostgresConn(got_raw);
-	auto want = ParsePostgresConn(want_dsn);
-	if (want.empty() || got.empty()) {
-		return false;
-	}
-	for (auto *k : {"host", "dbname"}) {
-		auto it = want.find(k);
-		if (it == want.end()) {
-			continue;
-		}
-		auto git = got.find(k);
-		if (git == got.end() || git->second != it->second) {
-			return false;
-		}
-	}
-	for (auto *k : {"port", "user"}) {
-		auto it = want.find(k);
-		auto git = got.find(k);
-		if (it != want.end() && git != got.end() && git->second != it->second) {
-			return false;
-		}
-	}
-	return want.count("host") || want.count("dbname");
-}
-
-bool HasAnyDsnParam(ddb::LogicalGet &get) {
-	for (auto &p : get.parameters) {
-		if (p.IsNull()) {
-			continue;
-		}
-		if (LooksLikeDsn(StripQuotes(p.ToString()))) {
-			return true;
-		}
-	}
-	return false;
-}
-
-bool UnboundPostgresDsnAllowed(ddb::LogicalGet &get, const Policy &policy) {
-	for (auto &p : get.parameters) {
-		if (p.IsNull()) {
-			continue;
-		}
-		auto s = StripQuotes(p.ToString());
-		if (LooksLikeDsn(s) && DsnMatchesAttach(s, policy)) {
-			return true;
-		}
-	}
-	return false;
-}
-
 void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, const std::vector<BoundEq> &inherited) {
 	auto fname = ddb::StringUtil::Lower(get.function.name);
 	auto table = get.GetTable();
 	auto tname = BoundTableName(get);
-	auto catalog = BoundCatalogName(get);
 
-	if (fname == "pragma_table_info" || ddb::StringUtil::StartsWith(fname, "pragma_")) {
-		return;
-	}
-
-	// Residual risk: a rewrite/AST skip could still name postgres_scan in SQL.
-	// Users cannot: ExecuteRewritten re-runs the AST; initSQL VIEW/MACRO bodies
-	// and replacement scans are denied. Unbound postgres_* is allowed only when
-	// a parameter DSN matches the spec attach (host/port/dbname/user). Bound
-	// scans must use the spec alias or __ducklake_metadata_<alias> exactly.
-	// Throwing here aborts the postgres transaction; RecoverAfterFailure rolls it back.
-	if (IsPostgresCatalogScan(fname)) {
-		if (policy.lake.kind != LakeKind::Ducklake) {
-			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
-		}
-		if (table) {
-			if (!CatalogIsAttachedLake(catalog, policy)) {
-				throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
-			}
-			return;
-		}
-		if (UnboundPostgresDsnAllowed(get, policy)) {
-			return;
-		}
-		// DuckLake snapshot/metadata SQL is postgres_query on the already-attached
-		// session (parameters are SQL, not a DSN). A foreign DSN is still denied.
-		if (fname == "postgres_query" && !HasAnyDsnParam(get)) {
-			return;
-		}
-		throw PlanRejected("unbound " + get.function.name + " is denied (DSN is not the spec's attached catalog)");
-	}
-	if (policy.lake.kind == LakeKind::Ducklake && IsDuckdbCatalogScan(fname)) {
-		return;
-	}
-	if (!IsAllowedScan(fname)) {
-		throw PlanRejected("plan contains denied scan function: " + get.function.name);
+	if (IsUserDeniedTableScan(fname)) {
+		throw PlanRejected(get.function.name + " is denied in user SQL");
 	}
 	auto require_preds = [&](const TablePolicy &spec, const std::string &shown) {
 		for (auto &pred : PredicatesFor(spec, key)) {
@@ -527,9 +304,9 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 			}
 		}
 	};
-	if (IsDucklakeScan(fname)) {
+	if (fname == "ducklake_scan") {
 		if (policy.lake.kind != LakeKind::Ducklake) {
-			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
+			throw PlanRejected(get.function.name + " is denied in user SQL");
 		}
 		std::string shown = tname;
 		if (shown.empty()) {
@@ -538,7 +315,7 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 					continue;
 				}
 				auto s = p.ToString();
-				if (policy.FindTable(s) || LooksLikeDucklakeCatalogTable(s)) {
+				if (policy.FindTable(s)) {
 					shown = s;
 					break;
 				}
@@ -548,37 +325,22 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 			}
 		}
 		auto *spec = shown.empty() ? nullptr : policy.FindTable(shown);
-		if (spec) {
-			require_preds(*spec, shown);
-			return;
+		if (!spec) {
+			throw PlanRejected("scan of table not allowlisted: " + (shown.empty() ? get.function.name : shown));
 		}
-		if (LooksLikeDucklakeCatalogTable(shown) || LooksLikeDucklakeCatalogTable(tname) ||
-		    CatalogIsAttachedLake(catalog, policy)) {
-			return;
-		}
-		if (!shown.empty()) {
-			throw PlanRejected("scan of table not allowlisted: " + shown);
-		}
-		// Empty-param ducklake_scan is a catalog probe. User ducklake_scan(...) is AST-denied.
+		require_preds(*spec, shown);
 		return;
 	}
-
-	// seq_scan of a bound catalog table
+	if (fname != "seq_scan") {
+		throw PlanRejected("plan contains denied scan function: " + get.function.name);
+	}
 	if (table) {
-		if (LooksLikeDucklakeCatalogTable(tname)) {
-			return;
-		}
 		auto *spec = policy.FindTable(tname);
-		if (spec) {
-			require_preds(*spec, tname);
-			return;
+		if (!spec) {
+			throw PlanRejected("scan of table not allowlisted: " + tname);
 		}
-		// DuckLake probes information_schema / pg_catalog via seq_scan of the
-		// attached postgres metadata catalog. Spec tables still need tenant preds.
-		if (policy.lake.kind == LakeKind::Ducklake && CatalogIsAttachedLake(catalog, policy)) {
-			return;
-		}
-		throw PlanRejected("scan of table not allowlisted: " + tname);
+		require_preds(*spec, tname);
+		return;
 	}
 	// seq_scan without a catalog entry is a CTE / VALUES materialization — no lake table.
 }
@@ -613,6 +375,22 @@ void PlanChecker::Register(ddb::DBConfig &config, const Policy &policy, const Te
 	RegisterPlanGuard(config, policy, key);
 }
 
+UserStatementScope::UserStatementScope(ddb::ClientContext &ctx) {
+	auto st = ctx.registered_state->GetOrCreate<UserStatementGuardState>(kUserStmtState);
+	st->scopes++;
+	state_ = st.get();
+}
+
+UserStatementScope::~UserStatementScope() {
+	if (!state_) {
+		return;
+	}
+	auto &st = state_->Cast<UserStatementGuardState>();
+	if (st.scopes > 0) {
+		st.scopes--;
+	}
+}
+
 void RegisterPlanGuard(ddb::DBConfig &config, const Policy &policy, const TenantKey &key) {
 	ddb::OptimizerExtension ext;
 	auto info = ddb::make_shared_ptr<PlanGuardInfo>();
@@ -621,6 +399,22 @@ void RegisterPlanGuard(ddb::DBConfig &config, const Policy &policy, const Tenant
 	ext.optimizer_info = info;
 	ext.optimize_function = [](ddb::OptimizerExtensionInput &input, ddb::unique_ptr<ddb::LogicalOperator> &plan) {
 		auto *info = static_cast<PlanGuardInfo *>(input.info.get());
+		auto st = input.context.registered_state->Get<UserStatementGuardState>(kUserStmtState);
+		if (!st || st->scopes <= 0) {
+			return;
+		}
+		struct Depth {
+			int &d;
+			explicit Depth(int &d) : d(d) {
+				++d;
+			}
+			~Depth() {
+				--d;
+			}
+		} depth(st->optimizer_depth);
+		if (st->optimizer_depth != 1) {
+			return;
+		}
 		try {
 			CheckLogicalPlan(*plan, info->policy, info->key);
 		} catch (const PlanRejected &e) {

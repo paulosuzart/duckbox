@@ -125,6 +125,57 @@ void duckbox::test::RunSandboxExecTests() {
 	}
 
 	{
+		auto projected = policy;
+		projected.tables["deals"].columns = {"id", "title", "amount"};
+		TenantSandbox box_proj(daemon, projected, key_a, "", spec_dir);
+		auto forged = box_proj.ExecuteRewritten("SELECT * FROM deals", {});
+		Expect(forged.row_count == 1 && forged.text_table.find("alpha deal") != std::string::npos,
+		       "ExecuteRewritten reapplies spec filters (bound tenant, live rows)");
+		Expect(forged.text_table.find("tenant_id") == std::string::npos &&
+		           forged.text_table.find("_deleted") == std::string::npos,
+		       "ExecuteRewritten reapplies spec projection (SELECT * does not leak tenant_id/_deleted)");
+		Expect(forged.text_table.find("bravo") == std::string::npos &&
+		           forged.text_table.find("alpha deleted") == std::string::npos,
+		       "ExecuteRewritten of SELECT * still applies tenant/_deleted filters");
+		auto with_preds = box_a.ExecuteRewritten(
+		    "SELECT * FROM deals WHERE tenant_id = 21 AND _deleted = false", {});
+		Expect(with_preds.row_count == 1 && with_preds.text_table.find("alpha deal") != std::string::npos,
+		       "forged handle with typed filters still returns the bound tenant");
+		Expect(with_preds.text_table.find("alpha deleted") == std::string::npos,
+		       "forged SELECT * with typed filters is re-wrapped so _deleted stays filtered");
+	}
+
+	{
+		auto bypass = policy;
+		bypass.deny_table_functions = false;
+		bypass.functions.insert("postgres_query");
+		bypass.functions.insert("duckdb_tables");
+		TenantSandbox box_bypass(daemon, bypass, key_a, "", spec_dir);
+		ExpectThrowContains(
+		    [&] {
+			    box_bypass.Execute(
+			        "SELECT * FROM postgres_query('__ducklake_metadata_lake', "
+			        "'SELECT * FROM ducklake_inlined_data_1_1')");
+		    },
+		    "table functions", "AST still denies postgres_query when deny_table_functions is false");
+		ExpectThrowContains([&] { box_bypass.ExtractPlan("SELECT * FROM duckdb_tables()"); }, "denied in user SQL",
+		                    "plan guard denies duckdb_tables even if the spec allowlisted it");
+		try {
+			box_bypass.ExtractPlan(
+			    "SELECT * FROM postgres_query('__ducklake_metadata_lake', "
+			    "'SELECT * FROM ducklake_inlined_data_1_1')");
+			Expect(false, "postgres_query inlined-data ExtractPlan must throw");
+		} catch (const std::exception &e) {
+			std::string w = e.what();
+			Expect(w.find("denied") != std::string::npos || w.find("postgres_query") != std::string::npos ||
+			           w.find("table function") != std::string::npos,
+			       "plan or binder denies the postgres_query inlined-data repro");
+		}
+		auto after = box_bypass.Execute("SELECT id FROM deals ORDER BY id");
+		Expect(after.row_count == 1, "plan-deny of table functions does not poison the next Execute");
+	}
+
+	{
 		auto paths = policy;
 		paths.lake.data_path = "/tmp/duckbox-a4-allowed-paths";
 		std::filesystem::create_directories(paths.lake.data_path);

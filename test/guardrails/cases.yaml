@@ -96,6 +96,52 @@ cases:
     reason: table functions
     stage: both
 
+  - id: postgres_query_ducklake_inlined
+    sql: "SELECT * FROM postgres_query('__ducklake_metadata_lake', 'SELECT * FROM ducklake_inlined_data_1_1')"
+    expect: deny
+    reason: table functions
+    stage: both
+
+  - id: plan_postgres_query_ducklake_inlined
+    sql: "SELECT * FROM postgres_query('__ducklake_metadata_lake', 'SELECT * FROM ducklake_inlined_data_1_1')"
+    expect: deny
+    stage: plan
+
+  - id: plan_duckdb_tables
+    sql: "SELECT * FROM duckdb_tables()"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+
+  - id: plan_duckdb_secrets
+    sql: "SELECT * FROM duckdb_secrets()"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+
+  - id: spec_deny_table_functions_false
+    sql: "SELECT 1"
+    expect: deny
+    reason: always denied
+    stage: spec
+    deny_table_functions: false
+
+  - id: spec_postgres_query_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: never allowlisted
+    stage: spec
+    extra_functions:
+      - postgres_query
+
+  - id: spec_duckdb_tables_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: never allowlisted
+    stage: spec
+    extra_functions:
+      - duckdb_tables
+
   - id: initsql_view_postgres_scan_pushdown
     sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_scan_pushdown('dbname=x', 'public', 'deals')"
     expect: deny

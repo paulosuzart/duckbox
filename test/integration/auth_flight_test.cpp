@@ -330,8 +330,31 @@ void duckbox::test::RunAuthFlightTests() {
 		}
 		auto schemas = sql_client.GetDbSchemas(qopt, nullptr, nullptr);
 		Expect(schemas.ok(), "Flight SQL GetDbSchemas");
-		auto tables = sql_client.GetTables(qopt, nullptr, nullptr, nullptr, false, nullptr);
+		if (schemas.ok()) {
+			auto info = std::move(schemas).ValueOrDie();
+			if (!info->endpoints().empty()) {
+				auto stream_res = raw_client->DoGet(qopt, info->endpoints()[0].ticket);
+				Expect(stream_res.ok(), "DoGet db schemas ticket");
+			}
+		}
+		auto tables = sql_client.GetTables(qopt, nullptr, nullptr, nullptr, true, nullptr);
 		Expect(tables.ok(), "Flight SQL GetTables");
+		if (tables.ok()) {
+			auto info = std::move(tables).ValueOrDie();
+			if (!info->endpoints().empty()) {
+				auto stream_res = raw_client->DoGet(qopt, info->endpoints()[0].ticket);
+				Expect(stream_res.ok(), "DoGet tables ticket");
+			}
+		}
+		auto ttypes = sql_client.GetTableTypes(qopt);
+		Expect(ttypes.ok(), "Flight SQL GetTableTypes");
+		if (ttypes.ok()) {
+			auto info = std::move(ttypes).ValueOrDie();
+			if (!info->endpoints().empty()) {
+				auto stream_res = raw_client->DoGet(qopt, info->endpoints()[0].ticket);
+				Expect(stream_res.ok(), "DoGet table types ticket");
+			}
+		}
 		auto info_res = sql_client.Execute(qopt, "SELECT id, title, amount FROM deals ORDER BY id");
 		Expect(info_res.ok(), "Flight SQL Execute");
 		if (info_res.ok()) {
@@ -345,6 +368,26 @@ void duckbox::test::RunAuthFlightTests() {
 				Expect(tbl.ok() && (*tbl)->num_rows() == 1, "Flight SQL tenant 21 sees 1 row");
 			}
 		}
+		auto denied = sql_client.Execute(qopt, "SELECT * FROM secrets");
+		Expect(!denied.ok(), "Flight SQL Execute denies secrets");
+		auto prep_res = sql_client.Prepare(qopt, "SELECT id, title FROM deals");
+		Expect(prep_res.ok(), "Flight SQL Prepare");
+		if (prep_res.ok()) {
+			auto ps = std::move(prep_res).ValueOrDie();
+			auto ex = ps->Execute(qopt);
+			Expect(ex.ok(), "prepared Execute");
+			if (ex.ok()) {
+				auto info = std::move(ex).ValueOrDie();
+				if (!info->endpoints().empty()) {
+					auto stream_res = raw_client->DoGet(qopt, info->endpoints()[0].ticket);
+					Expect(stream_res.ok(), "DoGet prepared statement ticket");
+				}
+			}
+			Expect(ps->Close(qopt).ok(), "ClosePreparedStatement");
+		}
+		Expect(RunLocalQuery(daemon, MemoryAnalystPath(), "tenant_21:user_sergio",
+		                     "SELECT id, title FROM deals ORDER BY id", "") == 0,
+		       "RunLocalQuery executes a rewritten SELECT");
 
 		(void)server->Shutdown();
 		(void)server->Wait();

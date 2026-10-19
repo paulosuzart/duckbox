@@ -1,7 +1,8 @@
 #pragma once
 
 // AST validator: deny-by-default SELECT-only check against the sandbox spec
-// (table/column allowlists, function allowlist, no table functions). Runs on
+// (table/column allowlists, function allowlist). Table functions are always
+// denied (deny_table_functions is not a spec knob). Runs on
 // CreatePreparedStatement and ad-hoc CommandStatementQuery before rewrite.
 
 #include "duckbox/policy.hpp"

@@ -77,7 +77,8 @@ std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::strin
                                        const std::string &bearer, const std::string &caller_header);
 
 DaemonConfig LoadDaemonFile(const std::string &path); // unknown/duplicate YAML keys are errors
-// Local helper: sets allow_insecure_dev. Production must LoadDaemonFile + ValidateDaemonOrThrow.
+// Local helper: sets allow_insecure_dev. Does not bake in duckbox-dev-secret
+// (tests set it via TestDaemon). Production must LoadDaemonFile + ValidateDaemonOrThrow.
 DaemonConfig DefaultDaemonConfig();
 // Refuses empty/short handle_secret unless allow_insecure_dev; requires bearer or JWT otherwise.
 void ValidateDaemonOrThrow(const DaemonConfig &cfg);

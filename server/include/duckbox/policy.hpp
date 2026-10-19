@@ -132,6 +132,10 @@ struct SandboxSpec {
 	bool FunctionAllowed(const std::string &name) const;
 };
 
+// Table functions are never a spec `functions` allowlist entry. postgres_*/duckdb_*/
+// ducklake_* and known table-function names are rejected at load and ValidateStatic.
+bool IsAlwaysDeniedTableFunction(const std::string &name);
+
 using Policy = SandboxSpec;
 
 // Relative lake.bootstrap_sql is inlined here so the daemon never reads host files at warmup.

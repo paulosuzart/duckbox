@@ -48,7 +48,7 @@ public:
 	}
 
 	QueryOutput Execute(const std::string &sql); // rewrite + plan guard; failures ROLLBACK so the next query can run
-	QueryOutput ExecuteRewritten(const std::string &sql, std::vector<ddb::Value> params); // re-validates handle SQL
+	QueryOutput ExecuteRewritten(const std::string &sql, std::vector<ddb::Value> params); // re-rewrites handle SQL (projection + filters + AST)
 	std::vector<ColumnSchema> DescribeRewritten(const std::string &sql);
 	ddb::unique_ptr<ddb::LogicalOperator> ExtractPlan(const std::string &sql); // tests: real bound plans
 

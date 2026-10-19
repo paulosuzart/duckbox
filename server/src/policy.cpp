@@ -11,6 +11,7 @@
 #include <fstream>
 #include <limits>
 #include <sstream>
+#include <unordered_set>
 
 namespace duckbox {
 namespace {
@@ -172,9 +173,18 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	}
 	p.functions.clear();
 	for (auto &fn : StringList(root.Get("functions"), "functions")) {
-		p.functions.insert(Lower(fn));
+		auto lower = Lower(fn);
+		if (IsAlwaysDeniedTableFunction(lower)) {
+			throw PolicyError("functions: table function '" + fn + "' is never allowlisted");
+		}
+		p.functions.insert(lower);
 	}
-	p.deny_table_functions = root.GetBool("deny_table_functions", true);
+	if (root.Get("deny_table_functions")) {
+		if (!root.GetBool("deny_table_functions", true)) {
+			throw PolicyError("deny_table_functions: false is refused (table functions are always denied)");
+		}
+	}
+	p.deny_table_functions = true;
 	p.require_prepared_statements = root.GetBool("require_prepared_statements", false);
 	p.init_sql = root.GetString("init_sql");
 	auto inline_boot = root.GetString("bootstrap_sql_inline");
@@ -239,6 +249,21 @@ const TablePolicy *SandboxSpec::FindTable(const std::string &name) const {
 
 bool SandboxSpec::FunctionAllowed(const std::string &name) const {
 	return functions.count(Lower(name)) > 0;
+}
+
+bool IsAlwaysDeniedTableFunction(const std::string &name) {
+	auto n = Lower(name);
+	if (ddb::StringUtil::StartsWith(n, "postgres_") || ddb::StringUtil::StartsWith(n, "duckdb_") ||
+	    ddb::StringUtil::StartsWith(n, "ducklake_") || ddb::StringUtil::StartsWith(n, "pragma_") ||
+	    ddb::StringUtil::StartsWith(n, "sqlite_") || ddb::StringUtil::StartsWith(n, "mysql_") ||
+	    ddb::StringUtil::StartsWith(n, "read_") || ddb::StringUtil::EndsWith(n, "_scan")) {
+		return true;
+	}
+	static const std::unordered_set<std::string> kExact = {
+	    "glob",        "range",          "generate_series", "repeat",   "unnest",
+	    "query",       "query_table",    "pg_clear_cache",  "sniff_csv", "which_secret",
+	    "sql_auto_complete", "from_substrait"};
+	return kExact.count(n) > 0;
 }
 
 bool ValidSandboxId(const std::string &id) {

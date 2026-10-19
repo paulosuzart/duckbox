@@ -142,6 +142,7 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
 	if (con_ && con_->HasActiveTransaction()) {
 		RecoverAfterFailure();
 	}
+	UserStatementScope user(*con_->context);
 	std::mutex wait_mu;
 	std::condition_variable cv;
 	bool finished = false;
@@ -260,9 +261,8 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql, std::vector<
 		Warmup(false);
 		std::lock_guard<std::mutex> hold(mu_);
 		Touch();
-		auto parser = ParseSql(sql);
-		ValidateStatements(parser->statements, policy_);
-		auto out = RunTimed(sql, std::move(params));
+		auto rewritten = RewriteUserSql(sql, policy_, key_);
+		auto out = RunTimed(rewritten, std::move(params));
 		FinishQuery(policy_, key_, cold, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
 		            out);
 		return out;
@@ -282,6 +282,7 @@ ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::stri
 		RecoverAfterFailure();
 	}
 	try {
+		UserStatementScope user(*con_->context);
 		return con_->ExtractPlan(sql);
 	} catch (...) {
 		RecoverAfterFailure();
@@ -297,7 +298,9 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
 		RecoverAfterFailure();
 	}
 	try {
-		auto ps = con_->Prepare(sql);
+		UserStatementScope user(*con_->context);
+		auto rewritten = RewriteUserSql(sql, policy_, key_);
+		auto ps = con_->Prepare(rewritten);
 		if (ps->HasError()) {
 			throw Error(ps->GetError());
 		}

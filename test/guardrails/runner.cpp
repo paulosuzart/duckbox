@@ -4,6 +4,7 @@
 #include "duckbox/policy.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/sandbox.hpp"
+#include "duckbox/spec_validator.hpp"
 #include "duckbox/tenant_key.hpp"
 #include "duckbox/yaml.hpp"
 
@@ -68,7 +69,8 @@ int main() {
 			continue;
 		}
 		YamlRejectUnknownKeys(node, {"id", "sql", "expect", "reason", "stage", "contains", "not_contains", "key",
-		                             "init_sql", "rewrite_contains", "rewrite_not_contains"});
+		                             "init_sql", "rewrite_contains", "rewrite_not_contains", "extra_functions",
+		                             "deny_table_functions", "spec_yaml"});
 		auto id = node.GetString("id");
 		auto sql = Trim(node.GetString("sql"));
 		auto expect = node.GetString("expect");
@@ -78,17 +80,19 @@ int main() {
 		if (key_raw.empty()) {
 			key_raw = "tenant_21:user_sergio";
 		}
-		if (id.empty() || sql.empty() || (expect != "allow" && expect != "deny")) {
+		if (stage.empty()) {
+			stage = expect == "deny" ? "rewrite" : "execute";
+		}
+		if (id.empty() || (sql.empty() && stage != "spec") || (expect != "allow" && expect != "deny")) {
 			g_failed++;
 			std::cerr << "FAIL: case '" << id << "' needs id, sql, expect allow|deny\n";
 			continue;
 		}
-		if (stage.empty()) {
-			stage = expect == "deny" ? "rewrite" : "execute";
-		}
 		bool do_initsql = stage == "initsql";
 		bool do_rewrite = stage == "rewrite" || stage == "both";
 		bool do_execute = stage == "execute" || stage == "both";
+		bool do_plan = stage == "plan";
+		bool do_spec = stage == "spec";
 		auto init_sql = Trim(node.GetString("init_sql"));
 		auto key = ParseTenantKey(key_raw, policy.key);
 		auto contains = YamlStringList(node.Get("contains"), node.path + ".contains");
@@ -128,6 +132,70 @@ int main() {
 				}
 			} catch (const std::exception &e) {
 				record_deny(e, "initSQL");
+			}
+		}
+
+		if (do_spec) {
+			try {
+				std::string yaml = node.GetString("spec_yaml");
+				if (yaml.empty()) {
+					yaml = LoadSpecFile(duckbox::test::MemoryAnalystPath()).yaml_body;
+				}
+				auto deny_tf = node.GetString("deny_table_functions");
+				if (!deny_tf.empty()) {
+					auto pos = yaml.find("deny_table_functions:");
+					if (pos != std::string::npos) {
+						auto end = yaml.find('\n', pos);
+						yaml.replace(pos, (end == std::string::npos ? yaml.size() : end) - pos,
+						             "deny_table_functions: " + deny_tf);
+					} else {
+						yaml += "\ndeny_table_functions: " + deny_tf + "\n";
+					}
+				}
+				auto extra = YamlStringList(node.Get("extra_functions"), node.path + ".extra_functions");
+				if (!extra.empty()) {
+					auto marker = yaml.find("functions:");
+					if (marker == std::string::npos) {
+						yaml += "\nfunctions:\n";
+						marker = yaml.find("functions:");
+					}
+					auto insert_at = yaml.find('\n', marker);
+					if (insert_at == std::string::npos) {
+						insert_at = yaml.size();
+					} else {
+						insert_at++;
+					}
+					std::string added;
+					for (auto &fn : extra) {
+						added += "  - " + fn + "\n";
+					}
+					yaml.insert(insert_at, added);
+				}
+				auto spec = LoadSpecString(yaml, "<guardrail>");
+				SpecValidator v;
+				v.ThrowIf(v.ValidateStatic(spec));
+				if (expect == "deny") {
+					g_failed++;
+					std::cerr << "FAIL: " << id << " expected spec validation deny\n";
+				} else {
+					g_passed++;
+				}
+			} catch (const std::exception &e) {
+				record_deny(e, "spec");
+			}
+		}
+
+		if (do_plan) {
+			try {
+				box_for(key_raw, init_sql).ExtractPlan(sql);
+				if (expect == "deny") {
+					g_failed++;
+					std::cerr << "FAIL: " << id << " expected plan deny of " << sql << "\n";
+				} else {
+					g_passed++;
+				}
+			} catch (const std::exception &e) {
+				record_deny(e, "plan");
 			}
 		}
 
