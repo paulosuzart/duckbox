@@ -20,7 +20,6 @@ std::string Sha256Hex(const std::string &data);
 std::string HexEncode(const std::string &raw);
 // Length-mismatch returns false; comparison is constant-time when lengths match.
 bool ConstTimeEquals(const std::string &a, const std::string &b);
-std::string UriEncode(const std::string &s, bool encode_slash);
 
 // AES-256-GCM. The passphrase is SHA-256'd to the key. Blob is nonce||ciphertext||tag.
 // `aad` is authenticated but not encrypted (sandbox id / version / tenant).

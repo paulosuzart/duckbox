@@ -9,7 +9,6 @@
 #include <openssl/sha.h>
 
 #include <chrono>
-#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <system_error>
@@ -132,22 +131,6 @@ std::string HexEncode(const std::string &raw) {
 
 std::string Sha256Hex(const std::string &data) {
 	return HexEncode(Sha256Raw(data));
-}
-
-std::string UriEncode(const std::string &s, bool encode_slash) {
-	std::string out;
-	out.reserve(s.size() * 3);
-	for (unsigned char c : s) {
-		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
-		    c == '.' || c == '~' || (c == '/' && !encode_slash)) {
-			out.push_back(static_cast<char>(c));
-		} else {
-			char buf[4];
-			std::snprintf(buf, sizeof(buf), "%%%02X", c);
-			out.append(buf);
-		}
-	}
-	return out;
 }
 
 bool ConstTimeEquals(const std::string &a, const std::string &b) {
