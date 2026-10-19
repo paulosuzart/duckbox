@@ -38,6 +38,8 @@ struct DaemonConfig {
 	std::unordered_set<std::string> allowed_init_settings;
 	LeaseSettings lease;
 	std::string debug_http;
+	std::string metrics_listen = "127.0.0.1:9477";
+	std::unordered_set<std::string> metrics_policy_classes;
 };
 
 DaemonConfig LoadDaemonFile(const std::string &path);

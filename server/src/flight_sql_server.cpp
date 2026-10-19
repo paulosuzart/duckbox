@@ -1,6 +1,7 @@
 #include "duckbox/flight_sql_server.hpp"
 #include "duckbox/auth.hpp"
 #include "duckbox/lake.hpp"
+#include "duckbox/metrics.hpp"
 #include "duckbox/spec_validator.hpp"
 
 #include <arrow/array.h>
@@ -13,7 +14,9 @@
 #include <arrow/table.h>
 #include <arrow/type.h>
 
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -188,6 +191,7 @@ DuckboxFlightSqlServer::DuckboxFlightSqlServer(DaemonConfig daemon, std::shared_
 
 DuckboxFlightSqlServer::CallCtx DuckboxFlightSqlServer::Auth(const ServerCallContext &context) const {
 	CallCtx c;
+	auto t0 = std::chrono::steady_clock::now();
 	auto key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
 	auto spec_yaml = Hdr(context, {"x-duckbox-spec", "x-duckbox-policy", "X-Duckbox-Policy", "x-duckbox-spec-b64"});
 	c.init_sql = Hdr(context, {"x-duckbox-init-sql", "X-Duckbox-Init-Sql"});
@@ -198,35 +202,48 @@ DuckboxFlightSqlServer::CallCtx DuckboxFlightSqlServer::Auth(const ServerCallCon
 	if (bearer.size() > prefix.size() && bearer.compare(0, prefix.size(), prefix) == 0) {
 		token = bearer.substr(prefix.size());
 	}
-	if (daemon_.auth_mode == AuthMode::Token) {
-		if (token.empty()) {
-			throw AuthError("token mode requires Authorization: Bearer (JWT stub)");
-		}
-		// STUB: treat bearer as JSON {"key":"...","policy":"...","init_sql":"..."}.
-		try {
+	try {
+		if (daemon_.auth_mode == AuthMode::Token) {
+			if (token.empty()) {
+				throw AuthError("token mode requires Authorization: Bearer (JWT stub)");
+			}
+			// STUB: treat bearer as JSON {"key":"...","policy":"...","init_sql":"..."}.
 			if (spec_yaml.empty()) {
 				spec_yaml = token;
 			}
-		} catch (...) {
+		} else if (spec_yaml.empty()) {
+			throw AuthError("trusted mode requires x-duckbox-spec / x-duckbox-policy (inline YAML)");
 		}
-	} else if (spec_yaml.empty()) {
-		throw AuthError("trusted mode requires x-duckbox-spec / x-duckbox-policy (inline YAML)");
+		c.spec = LoadSpecString(spec_yaml, "<header>");
+		SpecValidator v;
+		auto v0 = std::chrono::steady_clock::now();
+		auto issues = v.ValidateStatic(c.spec);
+		try {
+			v.ThrowIf(issues);
+			Metrics().ObservePolicyValidation(
+			    std::chrono::duration<double>(std::chrono::steady_clock::now() - v0).count(), "ok");
+		} catch (...) {
+			Metrics().ObservePolicyValidation(
+			    std::chrono::duration<double>(std::chrono::steady_clock::now() - v0).count(), "error");
+			throw;
+		}
+		AuthRequest req;
+		req.key_header = key;
+		req.bearer_token = token;
+		if (req.key_header.empty()) {
+			req.key_header = context.peer_identity();
+		}
+		c.key = Authenticate(c.spec, req);
+		if (c.init_sql.empty()) {
+			c.init_sql = c.spec.init_sql;
+		}
+		c.spec_dir = spec_dir_hdr.empty() ? SpecDirOf(c.spec) : spec_dir_hdr;
+		return c;
+	} catch (const std::exception &e) {
+		ObserveFailure(Metrics(), c.spec.name.empty() ? nullptr : &c.spec, c.key.raw.empty() ? nullptr : &c.key, e,
+		               false, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+		throw;
 	}
-	c.spec = LoadSpecString(spec_yaml, "<header>");
-	SpecValidator v;
-	v.ThrowIf(v.ValidateStatic(c.spec));
-	AuthRequest req;
-	req.key_header = key;
-	req.bearer_token = token;
-	if (req.key_header.empty()) {
-		req.key_header = context.peer_identity();
-	}
-	c.key = Authenticate(c.spec, req);
-	if (c.init_sql.empty()) {
-		c.init_sql = c.spec.init_sql;
-	}
-	c.spec_dir = spec_dir_hdr.empty() ? SpecDirOf(c.spec) : spec_dir_hdr;
-	return c;
 }
 
 std::shared_ptr<TenantSandbox> DuckboxFlightSqlServer::Box(const CallCtx &c) const {
@@ -274,7 +291,15 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 		if (c.spec.require_prepared_statements) {
 			return Status::Invalid("this spec requires prepared statements");
 		}
-		auto rw = rewriter_->Rewrite(command.query, c.spec, c.key);
+		RewriteResult rw;
+		auto t0 = std::chrono::steady_clock::now();
+		try {
+			rw = rewriter_->Rewrite(command.query, c.spec, c.key);
+		} catch (const std::exception &e) {
+			ObserveFailure(Metrics(), &c.spec, &c.key, e, false,
+			               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+			throw;
+		}
 		StatementHandle h;
 		h.rewritten_sql = rw.sql;
 		h.tenant_raw = c.key.raw;
@@ -295,7 +320,13 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetStatement(
     const ServerCallContext &context, const sql::StatementQueryTicket &command) {
 	try {
-		auto h = signer_->Verify(command.statement_handle);
+		StatementHandle h;
+		try {
+			h = signer_->Verify(command.statement_handle);
+		} catch (const std::exception &e) {
+			ObserveFailure(Metrics(), nullptr, nullptr, e, false, 0);
+			throw;
+		}
 		Policy spec = LoadSpecString(h.policy_yaml, "<handle>");
 		if (spec.version != h.spec_version && FingerprintSpec(spec) != h.spec_version) {
 			throw HandleError("policy hash mismatch");
@@ -341,7 +372,15 @@ arrow::Result<sql::ActionCreatePreparedStatementResult> DuckboxFlightSqlServer::
     const ServerCallContext &context, const sql::ActionCreatePreparedStatementRequest &request) {
 	try {
 		auto c = Auth(context);
-		auto rw = rewriter_->Rewrite(request.query, c.spec, c.key);
+		RewriteResult rw;
+		auto t0 = std::chrono::steady_clock::now();
+		try {
+			rw = rewriter_->Rewrite(request.query, c.spec, c.key);
+		} catch (const std::exception &e) {
+			ObserveFailure(Metrics(), &c.spec, &c.key, e, false,
+			               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+			throw;
+		}
 		StatementHandle h;
 		h.rewritten_sql = rw.sql;
 		h.tenant_raw = c.key.raw;
@@ -594,15 +633,34 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetTa
 
 int RunServer(const ServerOptions &opt) {
 	ValidateDaemonOrThrow(opt.daemon);
-	auto leases = std::make_shared<SingleNodeLeaseManager>();
+	auto metrics = std::make_shared<MetricsRegistry>(opt.daemon.name, opt.daemon.metrics_policy_classes);
+	SetMetrics(metrics);
+	StartMetricsHttp(opt.daemon.metrics_listen, metrics);
+	auto leases = std::make_shared<SingleNodeLeaseManager>(metrics);
+	auto router = std::make_shared<LocalRouter>(metrics);
 	if (!opt.daemon.lease.endpoint.empty() || !opt.daemon.lease.endpoint_env.empty()) {
 		std::clog << "daemon: lease endpoint configured; using SingleNodeLeaseManager in this draft "
 		             "(S3ConditionalLeaseManager TODO: If-None-Match / fencing epoch)\n";
 	}
-	auto registry = std::make_shared<SandboxRegistry>(opt.daemon, leases);
+	auto registry = std::make_shared<SandboxRegistry>(opt.daemon, leases, router);
 	auto signer = std::make_shared<HmacHandleSigner>(opt.daemon.handle_secret, opt.daemon.handle_ttl_seconds);
 	auto rewriter = std::make_shared<SqlRewriter>();
 	auto server = std::make_unique<DuckboxFlightSqlServer>(opt.daemon, registry, signer, rewriter);
+	std::atomic<bool> running{true};
+	std::thread renew([&]() {
+		Lease node;
+		node.tenant_key = "__node__";
+		while (running.load()) {
+			try {
+				leases->Renew(node);
+			} catch (const std::exception &e) {
+				SelfFence(std::string("lease_renew:") + e.what());
+			}
+			for (int i = 0; i < 50 && running.load(); i++) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			}
+		}
+	});
 
 	auto listen = opt.daemon.listen;
 	auto colon = listen.rfind(':');
@@ -630,6 +688,12 @@ int RunServer(const ServerOptions &opt) {
 	st = server->SetShutdownOnSignals({SIGINT, SIGTERM});
 	(void)st;
 	st = server->Serve();
+	running = false;
+	StopMetricsHttp();
+	if (renew.joinable()) {
+		renew.join();
+	}
+	SetMetrics(nullptr);
 	if (!st.ok()) {
 		std::cerr << "serve failed: " << st.ToString() << "\n";
 		return 1;

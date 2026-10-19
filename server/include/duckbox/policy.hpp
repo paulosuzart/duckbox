@@ -86,6 +86,8 @@ struct SandboxSpec {
 	std::string init_sql;
 	std::string version;
 	std::string yaml_body;
+	// Bounded Prometheus `policy` label. Operator-declared class, not a hash.
+	std::string metrics_class;
 
 	const TablePolicy *FindTable(const std::string &name) const;
 	bool FunctionAllowed(const std::string &name) const;

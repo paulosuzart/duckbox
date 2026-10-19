@@ -2,12 +2,14 @@
 #include "duckbox/arrow_ipc.hpp"
 #include "duckbox/init_sql.hpp"
 #include "duckbox/lake.hpp"
+#include "duckbox/metrics.hpp"
 #include "duckbox/plan_check.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/spec_validator.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <thread>
 
@@ -20,13 +22,17 @@ TenantSandbox::TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key, 
 }
 
 TenantSandbox::~TenantSandbox() {
-	Passivate();
+	Passivate("shutdown");
 }
 
-void TenantSandbox::Passivate() {
+void TenantSandbox::Passivate(const char *reason) {
 	std::lock_guard<std::mutex> hold(mu_);
+	bool was_warm = static_cast<bool>(db_);
 	con_.reset();
 	db_.reset();
+	if (was_warm) {
+		Metrics().IncPassivation(reason ? reason : "shutdown");
+	}
 }
 
 void TenantSandbox::Warmup(bool validate_lake) {
@@ -35,6 +41,7 @@ void TenantSandbox::Warmup(bool validate_lake) {
 		Touch();
 		return;
 	}
+	auto t0 = std::chrono::steady_clock::now();
 	ddb::DBConfig config;
 	RegisterPlanGuard(config, policy_, key_);
 	db_ = std::make_unique<ddb::DuckDB>(nullptr, &config);
@@ -43,17 +50,30 @@ void TenantSandbox::Warmup(bool validate_lake) {
 	ExecOrThrow(*con_, "SET autoload_known_extensions=false");
 	AttachLakeFromSpec(*con_, policy_, spec_dir_);
 	if (validate_lake) {
+		auto v0 = std::chrono::steady_clock::now();
 		SpecValidator v;
 		auto issues = v.ValidateLake(policy_, *con_);
-		v.ThrowIf(issues);
+		try {
+			v.ThrowIf(issues);
+			Metrics().ObservePolicyValidation(
+			    std::chrono::duration<double>(std::chrono::steady_clock::now() - v0).count(), "ok");
+		} catch (...) {
+			Metrics().ObservePolicyValidation(
+			    std::chrono::duration<double>(std::chrono::steady_clock::now() - v0).count(), "error");
+			throw;
+		}
 	}
+	auto i0 = std::chrono::steady_clock::now();
 	RunInitSql(*con_, init_sql_, daemon_, policy_);
+	Metrics().ObserveInitSql(std::chrono::duration<double>(std::chrono::steady_clock::now() - i0).count());
 	auto &r = policy_.resources;
 	ExecOrThrow(*con_, "SET memory_limit='" + EscapeSqlString(r.memory_limit) + "'");
 	ExecOrThrow(*con_, "SET threads=" + std::to_string(r.threads));
 	ExecOrThrow(*con_, "SET lock_configuration=true");
 	warmup_count_++;
 	Touch();
+	Metrics().IncColdStart();
+	Metrics().ObserveWarmup(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
 QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Value> params) {
@@ -130,19 +150,65 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
 	}
 }
 
+namespace {
+
+struct QueryActive {
+	QueryActive() {
+		Metrics().AddQueriesActive(1);
+	}
+	~QueryActive() {
+		Metrics().AddQueriesActive(-1);
+	}
+};
+
+void FinishQuery(const Policy &policy, const TenantKey &key, bool cold, double seconds, const QueryOutput &out) {
+	auto cls = Metrics().PolicyLabel(policy.metrics_class);
+	if (policy.resources.max_result_rows > 0 && out.row_count >= policy.resources.max_result_rows) {
+		Metrics().IncLimit(cls, "rows");
+	}
+	Metrics().ObserveQuery(cls, "ok", cold, seconds, out.row_count, static_cast<int64_t>(out.arrow_ipc.size()));
+	WriteAuditLog(key, policy, seconds, out.row_count, static_cast<int64_t>(out.arrow_ipc.size()), "ok", nullptr);
+}
+
+} // namespace
+
 QueryOutput TenantSandbox::Execute(const std::string &sql) {
-	Warmup(false);
-	std::lock_guard<std::mutex> hold(mu_);
-	Touch();
-	auto rewritten = RewriteUserSql(sql, policy_, key_);
-	return RunTimed(rewritten, {});
+	QueryActive active;
+	bool cold = !Warm();
+	auto t0 = std::chrono::steady_clock::now();
+	try {
+		Warmup(false);
+		std::lock_guard<std::mutex> hold(mu_);
+		Touch();
+		auto rewritten = RewriteUserSql(sql, policy_, key_);
+		auto out = RunTimed(rewritten, {});
+		FinishQuery(policy_, key_, cold, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+		            out);
+		return out;
+	} catch (const std::exception &e) {
+		ObserveFailure(Metrics(), &policy_, &key_, e, cold,
+		               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+		throw;
+	}
 }
 
 QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql, std::vector<ddb::Value> params) {
-	Warmup(false);
-	std::lock_guard<std::mutex> hold(mu_);
-	Touch();
-	return RunTimed(sql, std::move(params));
+	QueryActive active;
+	bool cold = !Warm();
+	auto t0 = std::chrono::steady_clock::now();
+	try {
+		Warmup(false);
+		std::lock_guard<std::mutex> hold(mu_);
+		Touch();
+		auto out = RunTimed(sql, std::move(params));
+		FinishQuery(policy_, key_, cold, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+		            out);
+		return out;
+	} catch (const std::exception &e) {
+		ObserveFailure(Metrics(), &policy_, &key_, e, cold,
+		               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+		throw;
+	}
 }
 
 std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sql) {
@@ -162,8 +228,19 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
 	return out;
 }
 
-SandboxRegistry::SandboxRegistry(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases)
-    : daemon_(std::move(daemon)), leases_(std::move(leases)) {
+SandboxRegistry::SandboxRegistry(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases,
+                                 std::shared_ptr<IRouter> router)
+    : daemon_(std::move(daemon)), leases_(std::move(leases)), router_(std::move(router)) {
+}
+
+void SandboxRegistry::PublishResidentLocked() {
+	size_t warm = 0;
+	for (auto &kv : boxes_) {
+		if (kv.second->Warm()) {
+			warm++;
+		}
+	}
+	Metrics().SetResident(warm, boxes_.size() - warm);
 }
 
 std::shared_ptr<TenantSandbox> SandboxRegistry::Get(Policy policy, const TenantKey &key, std::string init_sql,
@@ -171,12 +248,20 @@ std::shared_ptr<TenantSandbox> SandboxRegistry::Get(Policy policy, const TenantK
 	if (init_sql.empty()) {
 		init_sql = policy.init_sql;
 	}
+	if (router_) {
+		router_->Decide(key);
+	} else {
+		Metrics().IncRoute("local");
+	}
 	auto id = SandboxInstanceId(key.raw, policy, init_sql);
 	std::lock_guard<std::mutex> hold(mu_);
 	EvictIdleLocked();
 	auto cached = lake_ok_.find(policy.version);
 	if (cached != lake_ok_.end()) {
 		policy.tables = cached->second.tables;
+		Metrics().IncValidationCache("hit");
+	} else {
+		Metrics().IncValidationCache("miss");
 	}
 	auto it = boxes_.find(id);
 	if (it != boxes_.end()) {
@@ -188,9 +273,13 @@ std::shared_ptr<TenantSandbox> SandboxRegistry::Get(Policy policy, const TenantK
 			}
 		}
 		it->second->Touch();
+		PublishResidentLocked();
 		return it->second;
 	}
 	PassivateOverflowForKeyLocked(key.raw, id);
+	if (boxes_.size() >= daemon_.max_sandboxes) {
+		Metrics().IncLimit(Metrics().PolicyLabel(policy.metrics_class), "sandbox_cap");
+	}
 	while (boxes_.size() >= daemon_.max_sandboxes && !boxes_.empty()) {
 		auto oldest = boxes_.begin();
 		for (auto b = boxes_.begin(); b != boxes_.end(); ++b) {
@@ -201,10 +290,11 @@ std::shared_ptr<TenantSandbox> SandboxRegistry::Get(Policy policy, const TenantK
 		if (oldest->second.use_count() != 1) {
 			break;
 		}
-		oldest->second->Passivate();
+		oldest->second->Passivate("evict");
 		boxes_.erase(oldest);
 	}
 	leases_->Acquire(key);
+	auto t0 = std::chrono::steady_clock::now();
 	auto box = std::make_shared<TenantSandbox>(daemon_, policy, key, init_sql, spec_dir);
 	bool need_lake = lake_ok_.count(policy.version) == 0;
 	box->Warmup(need_lake);
@@ -212,6 +302,8 @@ std::shared_ptr<TenantSandbox> SandboxRegistry::Get(Policy policy, const TenantK
 		lake_ok_[policy.version] = box->GetPolicy();
 	}
 	boxes_.emplace(id, box);
+	Metrics().ObserveInstantiate(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+	PublishResidentLocked();
 	return box;
 }
 
@@ -238,7 +330,7 @@ void SandboxRegistry::PassivateOverflowForKeyLocked(const std::string &tenant_ra
 		if (victim.empty()) {
 			break;
 		}
-		boxes_[victim]->Passivate();
+		boxes_[victim]->Passivate("evict");
 		same.erase(std::remove(same.begin(), same.end(), victim), same.end());
 	}
 }
@@ -251,7 +343,7 @@ void SandboxRegistry::EvictIdleLocked() {
 	for (auto it = boxes_.begin(); it != boxes_.end(); ++it) {
 		auto idle = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second->last_used()).count();
 		if (idle >= daemon_.idle_evict_ms && it->second.use_count() == 1 && it->second->Warm()) {
-			it->second->Passivate();
+			it->second->Passivate("idle");
 		}
 	}
 }

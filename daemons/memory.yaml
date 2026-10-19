@@ -10,3 +10,7 @@ limits:
   max_sandboxes_per_key: 3
   init_sql_timeout_ms: 5000
 handle_secret: duckbox-dev-secret
+metrics:
+  listen: 127.0.0.1:9477
+  policy_classes:
+    - analyst

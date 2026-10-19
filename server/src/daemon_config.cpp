@@ -45,6 +45,21 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 		d.handle_secret = ResolveSecret(secret_env, "", "handle_secret_env");
 	}
 	d.debug_http = root.GetString("debug_http");
+	if (auto *metrics = root.Get("metrics")) {
+		d.metrics_listen = metrics->GetString("listen", d.metrics_listen);
+		if (auto *classes = metrics->Get("policy_classes")) {
+			d.metrics_policy_classes.clear();
+			if (classes->IsSeq()) {
+				for (auto &item : classes->seq) {
+					if (item.IsScalar() && !item.scalar.empty()) {
+						d.metrics_policy_classes.insert(item.scalar);
+					}
+				}
+			}
+		}
+	} else if (!root.GetString("metrics_listen").empty()) {
+		d.metrics_listen = root.GetString("metrics_listen");
+	}
 	if (auto *auth = root.Get("auth")) {
 		auto mode = auth->GetString("mode", "trusted");
 		for (char &c : mode) {
@@ -104,6 +119,16 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 	}
 	if (cfg.handle_ttl_seconds <= 0) {
 		add("limits.handle_ttl_seconds", "must be > 0");
+	}
+	if (!cfg.metrics_listen.empty() && cfg.metrics_listen != "off" && cfg.metrics_listen != "false") {
+		try {
+			auto mp = ParseListen(cfg.metrics_listen);
+			if (mp.second <= 0 || mp.second > 65535) {
+				add("metrics.listen", "port out of range");
+			}
+		} catch (const std::exception &e) {
+			add("metrics.listen", e.what());
+		}
 	}
 
 	std::string endpoint = cfg.lease.endpoint;

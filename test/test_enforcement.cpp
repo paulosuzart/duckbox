@@ -3,6 +3,7 @@
 #include "duckbox/error.hpp"
 #include "duckbox/handle.hpp"
 #include "duckbox/init_sql.hpp"
+#include "duckbox/metrics.hpp"
 #include "duckbox/plan_check.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/rewriter.hpp"
@@ -94,6 +95,7 @@ void ExpectPlanOk(duckdb::LogicalGet &get, const duckbox::Policy &policy, const 
 duckbox::Policy TestPolicy() {
 	duckbox::Policy p;
 	p.name = "analyst";
+	p.metrics_class = "analyst";
 	p.resources.max_result_rows = 100;
 	p.lake.kind = duckbox::LakeKind::Memory;
 	p.lake.alias = "memory";
@@ -129,6 +131,8 @@ int main() {
 		ValidateDaemonOrThrow(daemon);
 		auto loaded_daemon = LoadDaemonFile(std::string(DUCKBOX_SOURCE_DIR) + "/daemons/memory.yaml");
 		Expect(loaded_daemon.listen.find("4747") != std::string::npos, "daemon yaml listen");
+		Expect(loaded_daemon.metrics_listen.find("9477") != std::string::npos, "daemon yaml metrics listen");
+		Expect(loaded_daemon.metrics_policy_classes.count("analyst") == 1, "daemon yaml policy class allowlist");
 		Expect(loaded_daemon.lease.bucket.empty(), "memory daemon has no lease/lake credentials");
 		auto bad_path = "/tmp/duckbox-bad-daemon-lake.yaml";
 		{
@@ -364,6 +368,11 @@ int main() {
 			ExpectPlanOk(*get, lake, key_a, "postgres_scan of the attached catalog DSN is allowed");
 		}
 		{
+			auto get = MakeScan("postgres_scan", {});
+			ExpectPlanOk(*get, lake, key_a,
+			             "ducklake catalog postgres_scan with DSN in bind_data (not plan params) is allowed");
+		}
+		{
 			auto get = MakeScan("ducklake_scan", {"deals"});
 			ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "tenant",
 			                    "ducklake_scan of deals still requires tenant equality");
@@ -399,6 +408,49 @@ int main() {
 		auto b = reg.Get(p2, key_a, "", spec_dir);
 		Expect(a.get() != b.get(), "different policy hash is a separate sandbox");
 		Expect(reg.Size() >= 2, "registry holds both policy hashes");
+	}
+
+	Expect(loaded.metrics_class == "analyst", "memory spec metrics_class");
+	Expect(ducklake_spec.metrics_class == "analyst", "ducklake spec metrics_class");
+
+	{
+		MetricsRegistry reg("node-a", {"analyst"});
+		Expect(reg.PolicyLabel("analyst") == "analyst", "declared policy class is used");
+		Expect(reg.PolicyLabel("") == "other", "missing class falls back to other");
+		Expect(reg.PolicyLabel("tenant-hash-xyz") == "other", "non-allowlisted class is other");
+		reg.ObserveQuery("analyst", "ok", false, 0.02, 3, 128);
+		reg.ObserveQuery("analyst", "rejected", true, 0.001, 0, 0);
+		reg.IncRejection("analyst", "table_function");
+		reg.IncLimit("analyst", "timeout");
+		reg.IncPassivation("idle");
+		reg.IncRoute("local");
+		reg.IncLeaseRenewal("ok");
+		reg.SetLeaseRenewalTimestamp(1700000000);
+		reg.IncOwnershipAcquired("new");
+		reg.SetOwnedKeys(1);
+		reg.SetResident(1, 0);
+		auto text = reg.Render();
+		Expect(text.find("# TYPE duckbox_query_duration_seconds histogram") != std::string::npos,
+		       "exposition declares query histogram");
+		Expect(text.find("duckbox_query_duration_seconds_bucket{") != std::string::npos, "histogram buckets present");
+		Expect(text.find("le=\"0.025\"") != std::string::npos, "0.025s bucket");
+		Expect(text.find("le=\"+Inf\"") != std::string::npos, "+Inf bucket");
+		Expect(text.find("policy=\"analyst\"") != std::string::npos, "policy class label");
+		Expect(text.find("node=\"node-a\"") != std::string::npos, "node label");
+		Expect(text.find("outcome=\"ok\"") != std::string::npos, "ok outcome");
+		Expect(text.find("cold=\"false\"") != std::string::npos, "cold label");
+		Expect(text.find("duckbox_query_rejections_total{") != std::string::npos, "rejections counter");
+		Expect(text.find("reason=\"table_function\"") != std::string::npos, "rejection reason");
+		Expect(text.find("duckbox_queries_active{node=\"node-a\"}") != std::string::npos, "active gauge");
+		Expect(text.find("tenant=\"") == std::string::npos, "no tenant label");
+		Expect(text.find("user=\"") == std::string::npos, "no user label");
+		Expect(text.find(",key=\"") == std::string::npos && text.find("{key=\"") == std::string::npos,
+		       "no key label");
+		Expect(ClassifyRejection(SqlRejected("table functions are denied")) == std::string("table_function"),
+		       "classify table_function");
+		Expect(ClassifyRejection(PlanRejected("scan")) == std::string("plan"), "classify plan");
+		Expect(ClassifyRejection(AuthError("missing tenant key")) == std::string("auth"), "classify auth");
+		Expect(std::string(ClassifyLimit(Error("query timeout"))) == "timeout", "classify timeout");
 	}
 
 	std::cout << "passed=" << g_passed << " failed=" << g_failed << "\n";

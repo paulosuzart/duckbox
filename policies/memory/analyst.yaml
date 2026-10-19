@@ -1,4 +1,5 @@
 name: analyst
+metrics_class: analyst
 auth:
   key:
     patterns:

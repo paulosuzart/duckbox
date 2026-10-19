@@ -16,7 +16,7 @@ void Usage() {
 	    << "and initSQL arrive per connection (or via --spec on run/validate).\n"
 	    << "\n"
 	    << "Usage:\n"
-	    << "  duckbox serve --daemon FILE [--listen HOST:PORT] [--debug-http HOST:PORT]\n"
+	    << "  duckbox serve --daemon FILE [--listen HOST:PORT] [--metrics HOST:PORT] [--debug-http HOST:PORT]\n"
 	    << "  duckbox run --daemon FILE --spec FILE --key KEY --sql SQL [--init-sql SQL]\n"
 	    << "  duckbox validate --spec FILE [--daemon FILE]\n"
 	    << "  duckbox query --url grpc://HOST:PORT --key KEY --spec FILE --sql SQL\n"
@@ -62,6 +62,13 @@ int main(int argc, char **argv) {
 			auto dbg = Arg(argc, argv, "--debug-http");
 			if (!dbg.empty()) {
 				opt.daemon.debug_http = dbg;
+			}
+			auto metrics = Arg(argc, argv, "--metrics");
+			if (!metrics.empty()) {
+				opt.daemon.metrics_listen = metrics;
+			}
+			if (HasFlag(argc, argv, "--no-metrics")) {
+				opt.daemon.metrics_listen.clear();
 			}
 			auto secret = Arg(argc, argv, "--handle-secret");
 			if (!secret.empty()) {

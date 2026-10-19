@@ -42,6 +42,7 @@ set(DUCKBOX_SOURCES
   server/src/rewriter.cpp
   server/src/plan_check.cpp
   server/src/lease.cpp
+  server/src/metrics.cpp
   server/src/lake.cpp
   server/src/init_sql.cpp
   server/src/spec_validator.cpp

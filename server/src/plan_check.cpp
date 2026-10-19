@@ -73,6 +73,12 @@ std::string ScanBlob(ddb::LogicalGet &get) {
 			blob += ddb::StringUtil::Lower(p.ToString());
 		}
 	}
+	for (auto &kv : get.named_parameters) {
+		if (!kv.second.IsNull()) {
+			blob += " ";
+			blob += ddb::StringUtil::Lower(kv.second.ToString());
+		}
+	}
 	return blob;
 }
 
@@ -134,6 +140,32 @@ bool BlobMatchesAttachedCatalog(const std::string &blob, const std::string &cata
 	return host.empty() || blob.find("host=" + host) != std::string::npos;
 }
 
+bool BlobHasConnectionInfo(const std::string &blob) {
+	return blob.find("dbname=") != std::string::npos || blob.find("host=") != std::string::npos ||
+	       blob.find("://") != std::string::npos;
+}
+
+bool PostgresScanLooksForeign(const std::string &blob, const std::string &catalog) {
+	if (!BlobHasConnectionInfo(blob)) {
+		return false;
+	}
+	if (BlobMatchesAttachedCatalog(blob, catalog)) {
+		return false;
+	}
+	auto cat = ddb::StringUtil::Lower(catalog);
+	auto dbn = KvFromCatalog(cat, "dbname");
+	auto host = KvFromCatalog(cat, "host");
+	auto blob_db = KvFromCatalog(blob, "dbname");
+	auto blob_host = KvFromCatalog(blob, "host");
+	if (!blob_db.empty() && !dbn.empty() && blob_db != dbn) {
+		return true;
+	}
+	if (!blob_host.empty() && !host.empty() && blob_host != host) {
+		return true;
+	}
+	return BlobHasConnectionInfo(blob);
+}
+
 bool AttachedToSpecLake(ddb::LogicalGet &get, const Policy &policy, const std::string &tname) {
 	if (policy.lake.kind != LakeKind::Ducklake) {
 		return false;
@@ -144,12 +176,20 @@ bool AttachedToSpecLake(ddb::LogicalGet &get, const Policy &policy, const std::s
 		return true;
 	}
 	auto blob = ScanBlob(get);
-	if (BlobMatchesAttachedCatalog(blob, ResolvedCatalogDsn(policy))) {
+	auto catalog = ResolvedCatalogDsn(policy);
+	if (BlobMatchesAttachedCatalog(blob, catalog)) {
 		return true;
 	}
+	auto fname = ddb::StringUtil::Lower(get.function.name);
 	// ducklake_scan of a spec table is the attached lake's data scan (GetTable
 	// may be null on a synthetic/unbound plan; the table name still ties it).
-	if (IsDucklakeScan(ddb::StringUtil::Lower(get.function.name)) && policy.FindTable(tname)) {
+	if (IsDucklakeScan(fname) && policy.FindTable(tname)) {
+		return true;
+	}
+	// DuckLake catalog probes use postgres_scan with the DSN in bind_data, so
+	// the plan blob often has no connection string. Allow those; still reject
+	// a postgres_scan whose plan names a different DSN.
+	if (IsPostgresScan(fname) && !PostgresScanLooksForeign(blob, catalog)) {
 		return true;
 	}
 	return false;

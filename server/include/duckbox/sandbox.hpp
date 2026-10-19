@@ -38,7 +38,7 @@ public:
 	~TenantSandbox();
 
 	void Warmup(bool validate_lake);
-	void Passivate();
+	void Passivate(const char *reason = "shutdown");
 	bool Warm() const {
 		return static_cast<bool>(db_);
 	}
@@ -96,7 +96,8 @@ public:
 
 class SandboxRegistry : public ISandboxRegistry {
 public:
-	SandboxRegistry(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases);
+	SandboxRegistry(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases,
+	                std::shared_ptr<IRouter> router = nullptr);
 
 	std::shared_ptr<TenantSandbox> Get(Policy policy, const TenantKey &key, std::string init_sql,
 	                                   const std::string &spec_dir) override;
@@ -110,8 +111,11 @@ private:
 	void EvictIdleLocked();
 	void PassivateOverflowForKeyLocked(const std::string &tenant_raw, const std::string &keep_id);
 
+	void PublishResidentLocked();
+
 	DaemonConfig daemon_;
 	std::shared_ptr<ILeaseManager> leases_;
+	std::shared_ptr<IRouter> router_;
 	mutable std::mutex mu_;
 	std::unordered_map<std::string, std::shared_ptr<TenantSandbox>> boxes_;
 	std::unordered_map<std::string, Policy> lake_ok_; // policy hash -> validated spec

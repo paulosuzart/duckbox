@@ -50,6 +50,8 @@ duckbox validate --daemon ./daemons/memory.yaml --spec ./policies/memory/analyst
 
 `--debug-http HOST:PORT` enables the old `POST /v1/query` **debug** endpoint (off by default). v1 is **Arrow Flight SQL**.
 
+Each node also serves Prometheus **text** on `/metrics` (default `127.0.0.1:9477`, `metrics.listen` in the daemon YAML, `--metrics HOST:PORT` / `--no-metrics`). Separate from debug HTTP. Labels are only `node` plus a bounded `policy` class (`metrics_class` on the spec, allowlisted in `metrics.policy_classes`, else `other`). Never tenant/user/key — those go to the structured per-query audit log on stderr.
+
 Trusted callers may send inline spec YAML. In `auth.mode: token`, the spec must come from the signed JWT (inline YAML or hash). JWT verify is stubbed in this draft.
 
 ### Validation
@@ -66,6 +68,10 @@ Sandboxes are keyed by `(tenant key, hash(policy + initSQL))`. A different polic
 **initSQL** (header / CLI / spec): SET of permitted names, `CREATE [OR REPLACE] TEMP VIEW|MACRO|TABLE`, `USE`, `LOAD` of spec-listed extensions. Reject `ATTACH`/`DETACH`, `COPY`/`EXPORT`, `INSTALL`, external access, security settings. Objects it creates are visible to user SQL **only if the spec whitelists them**.
 
 Prepared-statement handles are HMAC-signed and include rewritten SQL, tenant key, **policy hash + YAML**, initSQL, expiry, and bound parameter IPC so any node can execute without session state.
+
+### Metrics
+
+`GET /metrics` (Prometheus text). Query histogram `duckbox_query_duration_seconds{policy,outcome,cold,node}` plus rejections, limits, result rows/bytes, sandbox lifecycle, policy-validation cache, and lease/router stubs (`duckbox_route_decisions_total`, `duckbox_node_lease_*`). Histogram buckets: 5ms … 120s for queries; 10ms … 30s for warmup/initSQL. A self-fence logs `{"event":"self_fence",...}` and exits **3**.
 
 ## Arrow Flight SQL
 

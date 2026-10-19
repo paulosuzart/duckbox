@@ -66,6 +66,12 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	p.source_path = path;
 	p.yaml_body = body;
 	p.name = root.GetString("name");
+	p.metrics_class = root.GetString("metrics_class");
+	if (p.metrics_class.empty()) {
+		if (auto *m = root.Get("metrics")) {
+			p.metrics_class = m->GetString("class");
+		}
+	}
 	if (auto *auth = root.Get("auth")) {
 		p.key = LoadKeySpec(auth->Get("key"));
 	}

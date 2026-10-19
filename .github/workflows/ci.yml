@@ -83,6 +83,15 @@ jobs:
             --key tenant_21:user_sergio \
             --sql 'SELECT id, title, amount FROM deals WHERE id = ?' \
             --params 1
+          curl -sf http://127.0.0.1:9477/metrics > /tmp/duckbox-metrics.txt
+          grep -q 'duckbox_query_duration_seconds' /tmp/duckbox-metrics.txt
+          grep -q 'duckbox_queries_active' /tmp/duckbox-metrics.txt
+          grep -q 'duckbox_sandboxes_resident' /tmp/duckbox-metrics.txt
+          grep -q 'policy="analyst"' /tmp/duckbox-metrics.txt
+          if grep -E 'tenant="|user="|{key="|,key="' /tmp/duckbox-metrics.txt; then
+            echo "metrics must not label tenant/user/key" >&2
+            exit 1
+          fi
           kill "$(cat /tmp/duckbox.pid)" || true
       - name: Compose logs on failure
         if: failure()
