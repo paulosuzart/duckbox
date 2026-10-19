@@ -64,6 +64,39 @@ void CheckOne(const ddb::SQLStatement &stmt, const DaemonConfig &daemon, const S
 		    ct != ddb::CatalogType::MACRO_ENTRY && ct != ddb::CatalogType::TABLE_MACRO_ENTRY) {
 			throw SqlRejected("initSQL CREATE only allows TEMP TABLE/VIEW/MACRO");
 		}
+		// VIEW / MACRO / CTAS bodies are user-visible later; they must pass the
+		// same deny-by-default AST checks as interactive SQL.
+		ValidationContext ctx;
+		ctx.policy = &spec;
+		if (ct == ddb::CatalogType::VIEW_ENTRY) {
+			auto &info = cr.info->Cast<ddb::CreateViewInfo>();
+			if (info.query) {
+				ValidateSelect(*info.query, ctx);
+			}
+		} else if (ct == ddb::CatalogType::TABLE_ENTRY) {
+			auto &info = cr.info->Cast<ddb::CreateTableInfo>();
+			if (info.query) {
+				ValidateSelect(*info.query, ctx);
+			}
+		} else {
+			auto &info = cr.info->Cast<ddb::CreateMacroInfo>();
+			for (auto &macro : info.macros) {
+				if (!macro) {
+					continue;
+				}
+				if (macro->type == ddb::MacroType::SCALAR_MACRO) {
+					auto &sm = macro->Cast<ddb::ScalarMacroFunction>();
+					if (sm.expression) {
+						ValidateExpression(*sm.expression, ctx);
+					}
+				} else if (macro->type == ddb::MacroType::TABLE_MACRO) {
+					auto &tm = macro->Cast<ddb::TableMacroFunction>();
+					if (tm.query_node) {
+						ValidateQueryNode(*tm.query_node, ctx);
+					}
+				}
+			}
+		}
 		return;
 	}
 	if (type == ddb::StatementType::LOAD_STATEMENT) {

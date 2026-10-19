@@ -51,6 +51,46 @@ duckbox::DaemonConfig TestDaemon() {
 	return duckbox::DefaultDaemonConfig();
 }
 
+duckbox::Policy TestDucklakePolicy(const duckbox::Policy &base) {
+	auto p = base;
+	p.lake.kind = duckbox::LakeKind::Ducklake;
+	p.lake.alias = "lake";
+	p.lake.catalog = "ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox";
+	p.lake.catalog_env = "DUCKBOX_LAKE_CATALOG";
+	return p;
+}
+
+duckdb::unique_ptr<duckdb::LogicalGet> MakeScan(const std::string &fn, const std::vector<std::string> &params,
+                                               bool tenant_eq = false) {
+	duckdb::TableFunction tf(fn, {}, nullptr);
+	duckdb::vector<duckdb::LogicalType> types;
+	types.push_back(duckdb::LogicalType::INTEGER);
+	types.push_back(duckdb::LogicalType::INTEGER);
+	duckdb::vector<std::string> names;
+	names.push_back("tenant_id");
+	names.push_back("id");
+	auto get = duckdb::make_uniq<duckdb::LogicalGet>(0, std::move(tf), nullptr, std::move(types), std::move(names));
+	for (auto &s : params) {
+		get->parameters.emplace_back(s);
+	}
+	if (tenant_eq) {
+		get->table_filters.filters[0] = duckdb::make_uniq<duckdb::ConstantFilter>(
+		    duckdb::ExpressionType::COMPARE_EQUAL, duckdb::Value::INTEGER(21));
+	}
+	return get;
+}
+
+void ExpectPlanOk(duckdb::LogicalGet &get, const duckbox::Policy &policy, const duckbox::TenantKey &key,
+                  const std::string &msg) {
+	try {
+		duckbox::CheckLogicalPlan(get, policy, key);
+		g_passed++;
+	} catch (const std::exception &e) {
+		g_failed++;
+		std::cerr << "FAIL: " << msg << " threw '" << e.what() << "'\n";
+	}
+}
+
 duckbox::Policy TestPolicy() {
 	duckbox::Policy p;
 	p.name = "analyst";
@@ -270,6 +310,27 @@ int main() {
 		ExpectThrowContains([&] { guard.Check("SET enable_external_access=true", daemon, policy); }, "security",
 		                    "initSQL security SET denied");
 		guard.Check("CREATE TEMP VIEW v AS SELECT 1 AS x", daemon, policy);
+		guard.Check("CREATE TEMP VIEW v AS SELECT id FROM deals", daemon, policy);
+		guard.Check("CREATE TEMP MACRO add(a, b) AS a + b", daemon, policy);
+		ExpectThrowContains(
+		    [&] {
+			    guard.Check("CREATE TEMP VIEW v AS SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')",
+			                daemon, policy);
+		    },
+		    "table functions", "initSQL view cannot smuggle postgres_scan");
+		ExpectThrowContains(
+		    [&] { guard.Check("CREATE TEMP VIEW v AS SELECT * FROM read_parquet('x.parquet')", daemon, policy); },
+		    "table functions", "initSQL view cannot smuggle read_parquet");
+		ExpectThrowContains([&] { guard.Check("CREATE TEMP VIEW v AS SELECT md5(title) FROM deals", daemon, policy); },
+		                    "function not allowlisted", "initSQL view body uses function allowlist");
+		ExpectThrowContains(
+		    [&] {
+			    guard.Check("CREATE TEMP MACRO sneak() AS TABLE SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')",
+			                daemon, policy);
+		    },
+		    "table functions", "initSQL table macro cannot smuggle postgres_scan");
+		ExpectThrowContains([&] { guard.Check("CREATE TEMP MACRO h(x) AS md5(x)", daemon, policy); },
+		                    "function not allowlisted", "initSQL scalar macro body uses function allowlist");
 
 		TenantSandbox box(daemon, policy, key_a, "CREATE TEMP VIEW v AS SELECT 1 AS x", spec_dir);
 		box.Warmup(true);
@@ -281,6 +342,46 @@ int main() {
 		box.Warmup(false);
 		Expect(box.warmup_count() == 2, "warmup reruns after passivate");
 		Expect(box.Warm(), "warm after second warmup");
+	}
+
+	// Plan guard: ducklake_scan / postgres_scan only as scans of the spec's attached lake.
+	{
+		auto lake = TestDucklakePolicy(policy);
+		{
+			auto get = MakeScan("postgres_scan", {"dbname=x host=evil", "public", "deals"});
+			ExpectThrowContains([&] { CheckLogicalPlan(*get, policy, key_a); }, "attached DuckLake",
+			                    "memory spec rejects postgres_scan");
+		}
+		{
+			auto get = MakeScan("postgres_scan", {"dbname=evil host=attacker", "public", "deals"});
+			ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "attached DuckLake",
+			                    "postgres_scan of a foreign DSN is not the attached catalog");
+		}
+		{
+			auto get = MakeScan("postgres_scan",
+			                    {"dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox", "ducklake",
+			                     "ducklake_metadata"});
+			ExpectPlanOk(*get, lake, key_a, "postgres_scan of the attached catalog DSN is allowed");
+		}
+		{
+			auto get = MakeScan("ducklake_scan", {"deals"});
+			ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "tenant",
+			                    "ducklake_scan of deals still requires tenant equality");
+		}
+		{
+			auto get = MakeScan("ducklake_scan", {"deals"}, true);
+			ExpectPlanOk(*get, lake, key_a, "ducklake_scan of deals with tenant equality is allowed");
+		}
+		{
+			auto get = MakeScan("ducklake_scan", {lake.lake.catalog, "secrets"});
+			ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "not allowlisted",
+			                    "ducklake_scan of a non-spec table is denied");
+		}
+		{
+			auto get = MakeScan("read_parquet", {"s3://bucket/x.parquet"});
+			ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "denied scan",
+			                    "read_parquet stays denied on a ducklake spec");
+		}
 	}
 
 	// Per-connection policy hash: different policy => different sandbox; cache skips second lake check.
