@@ -39,6 +39,8 @@ void PopCtes(RewriteContext &ctx) {
 	ctx.cte_scope.pop_back();
 }
 
+} // namespace
+
 std::string ColonParamsToDollar(const std::string &sql) {
 	// Policy filters use :name. DuckDB named parameters are $name.
 	// Do not touch Postgres-style casts (`::`).
@@ -54,6 +56,8 @@ std::string ColonParamsToDollar(const std::string &sql) {
 	}
 	return out;
 }
+
+namespace {
 
 void RewriteQueryNode(ddb::unique_ptr<ddb::QueryNode> &node, RewriteContext &ctx);
 void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx);

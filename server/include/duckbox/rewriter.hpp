@@ -48,6 +48,9 @@ void BindNamedParameters(ddb::ParsedExpression &expr, const ddb::case_insensitiv
 void BindNamedParametersInStatement(ddb::SQLStatement &stmt, const ddb::case_insensitive_map_t<ddb::Value> &values);
 
 ddb::unique_ptr<ddb::ParsedExpression> ParsePolicyFilter(const std::string &filter_sql);
+// Policy filters and initSQL views use :name; DuckDB named parameters are $name.
+// Does not rewrite Postgres-style casts (`::`).
+std::string ColonParamsToDollar(const std::string &sql);
 ddb::Value ValueFromKeyVar(const std::string &name, const std::string &raw); // tenant_id → BIGINT, never interpolated
 void BindParsedExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr,
                           const ddb::case_insensitive_map_t<ddb::Value> &values);

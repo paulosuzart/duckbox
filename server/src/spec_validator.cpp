@@ -16,6 +16,9 @@
 namespace duckbox {
 namespace {
 
+void CollectParamsFromQuery(ddb::QueryNode &node, std::unordered_set<std::string> &out);
+void CollectParamsFromTableRef(ddb::TableRef &ref, std::unordered_set<std::string> &out);
+
 void CollectParams(const ddb::ParsedExpression &expr, std::unordered_set<std::string> &out) {
 	if (expr.GetExpressionClass() == ddb::ExpressionClass::PARAMETER) {
 		auto &p = expr.Cast<ddb::ParameterExpression>();
@@ -23,8 +26,86 @@ void CollectParams(const ddb::ParsedExpression &expr, std::unordered_set<std::st
 			out.insert(ddb::StringUtil::Lower(p.identifier));
 		}
 	}
+	if (expr.GetExpressionClass() == ddb::ExpressionClass::SUBQUERY) {
+		auto &sq = expr.Cast<ddb::SubqueryExpression>();
+		if (sq.subquery && sq.subquery->node) {
+			CollectParamsFromQuery(*sq.subquery->node, out);
+		}
+	}
 	ddb::ParsedExpressionIterator::EnumerateChildren(
 	    expr, [&](const ddb::ParsedExpression &child) { CollectParams(child, out); });
+}
+
+void CollectParamsFromExpr(ddb::unique_ptr<ddb::ParsedExpression> &expr, std::unordered_set<std::string> &out) {
+	if (expr) {
+		CollectParams(*expr, out);
+	}
+}
+
+void CollectParamsFromTableRef(ddb::TableRef &ref, std::unordered_set<std::string> &out) {
+	if (ref.type == ddb::TableReferenceType::SUBQUERY) {
+		auto &sq = ref.Cast<ddb::SubqueryRef>();
+		if (sq.subquery && sq.subquery->node) {
+			CollectParamsFromQuery(*sq.subquery->node, out);
+		}
+	} else if (ref.type == ddb::TableReferenceType::JOIN) {
+		auto &join = ref.Cast<ddb::JoinRef>();
+		if (join.left) {
+			CollectParamsFromTableRef(*join.left, out);
+		}
+		if (join.right) {
+			CollectParamsFromTableRef(*join.right, out);
+		}
+		CollectParamsFromExpr(join.condition, out);
+	} else if (ref.type == ddb::TableReferenceType::EXPRESSION_LIST) {
+		auto &el = ref.Cast<ddb::ExpressionListRef>();
+		for (auto &row : el.values) {
+			for (auto &expr : row) {
+				CollectParamsFromExpr(expr, out);
+			}
+		}
+	} else if (ref.type == ddb::TableReferenceType::TABLE_FUNCTION) {
+		auto &tf = ref.Cast<ddb::TableFunctionRef>();
+		CollectParamsFromExpr(tf.function, out);
+		if (tf.subquery && tf.subquery->node) {
+			CollectParamsFromQuery(*tf.subquery->node, out);
+		}
+	}
+	ddb::ParsedExpressionIterator::EnumerateTableRefChildren(
+	    ref, [&](ddb::unique_ptr<ddb::ParsedExpression> &child) { CollectParamsFromExpr(child, out); },
+	    [](ddb::TableRef &) {});
+}
+
+void CollectParamsFromQuery(ddb::QueryNode &node, std::unordered_set<std::string> &out) {
+	for (auto &kv : node.cte_map.map) {
+		if (kv.second && kv.second->query && kv.second->query->node) {
+			CollectParamsFromQuery(*kv.second->query->node, out);
+		}
+	}
+	if (node.type == ddb::QueryNodeType::SELECT_NODE) {
+		auto &sel = node.Cast<ddb::SelectNode>();
+		if (sel.from_table) {
+			CollectParamsFromTableRef(*sel.from_table, out);
+		}
+		for (auto &expr : sel.select_list) {
+			CollectParamsFromExpr(expr, out);
+		}
+		CollectParamsFromExpr(sel.where_clause, out);
+		CollectParamsFromExpr(sel.having, out);
+		CollectParamsFromExpr(sel.qualify, out);
+		for (auto &g : sel.groups.group_expressions) {
+			CollectParamsFromExpr(g, out);
+		}
+	} else if (node.type == ddb::QueryNodeType::SET_OPERATION_NODE) {
+		auto &setop = node.Cast<ddb::SetOperationNode>();
+		for (auto &child : setop.children) {
+			if (child) {
+				CollectParamsFromQuery(*child, out);
+			}
+		}
+	}
+	ddb::ParsedExpressionIterator::EnumerateQueryNodeModifiers(
+	    node, [&](ddb::unique_ptr<ddb::ParsedExpression> &child) { CollectParamsFromExpr(child, out); });
 }
 
 void CollectColumns(const ddb::ParsedExpression &expr, std::unordered_set<std::string> &out) {
@@ -337,65 +418,25 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
 
 namespace {
 
-bool SqlReferencesKeyVars(const std::string &sql, const std::unordered_set<std::string> &vars) {
-	if (sql.empty() || vars.empty()) {
-		return false;
-	}
-	auto lower = ddb::StringUtil::Lower(sql);
-	for (auto &var : vars) {
-		auto v = ddb::StringUtil::Lower(var);
-		if (v.empty()) {
-			continue;
-		}
-		for (char prefix : {':', '$'}) {
-			std::string pat;
-			pat.push_back(prefix);
-			pat += v;
-			size_t i = 0;
-			while ((i = lower.find(pat, i)) != std::string::npos) {
-				if (prefix == ':' && i > 0 && lower[i - 1] == ':') {
-					i += pat.size();
-					continue;
-				}
-				auto after = i + pat.size();
-				if (after < lower.size() &&
-				    (std::isalnum(static_cast<unsigned char>(lower[after])) || lower[after] == '_')) {
-					i += pat.size();
-					continue;
-				}
-				return true;
-			}
+bool ParamsReferenceKeyVars(const std::unordered_set<std::string> &params,
+                            const std::unordered_set<std::string> &vars) {
+	for (auto &p : params) {
+		if (vars.count(p)) {
+			return true;
 		}
 	}
 	return false;
 }
 
-std::string RawViewBody(const std::string &init_sql, const std::string &name) {
-	auto lower = ddb::StringUtil::Lower(init_sql);
-	auto needle = " view " + ddb::StringUtil::Lower(name);
-	auto pos = lower.find(needle);
-	if (pos == std::string::npos) {
-		return "";
-	}
-	auto as_pos = lower.find(" as ", pos);
-	if (as_pos == std::string::npos) {
-		return "";
-	}
-	auto end = init_sql.find(';', as_pos);
-	if (end == std::string::npos) {
-		end = init_sql.size();
-	}
-	return init_sql.substr(as_pos + 4, end - (as_pos + 4));
-}
-
-std::unordered_map<std::string, std::string> InitSqlViewBodies(const std::string &init_sql) {
-	std::unordered_map<std::string, std::string> out;
+// View name -> named parameters found on the parsed CREATE VIEW query (not SQL text).
+std::unordered_map<std::string, std::unordered_set<std::string>> InitSqlViewParams(const std::string &init_sql) {
+	std::unordered_map<std::string, std::unordered_set<std::string>> out;
 	if (init_sql.empty()) {
 		return out;
 	}
 	try {
 		ddb::Parser parser;
-		parser.ParseQuery(init_sql);
+		parser.ParseQuery(ColonParamsToDollar(init_sql));
 		for (auto &st : parser.statements) {
 			if (!st || st->type != ddb::StatementType::CREATE_STATEMENT) {
 				continue;
@@ -405,11 +446,11 @@ std::unordered_map<std::string, std::string> InitSqlViewBodies(const std::string
 				continue;
 			}
 			auto &vi = cs.info->Cast<ddb::CreateViewInfo>();
-			std::string body;
-			if (vi.query) {
-				body = vi.query->ToString();
+			std::unordered_set<std::string> params;
+			if (vi.query && vi.query->node) {
+				CollectParamsFromQuery(*vi.query->node, params);
 			}
-			out[ddb::StringUtil::Lower(vi.view_name)] = std::move(body);
+			out[ddb::StringUtil::Lower(vi.view_name)] = std::move(params);
 		}
 	} catch (...) {
 	}
@@ -425,7 +466,7 @@ std::vector<std::string> AuthorizedViewWarnings(const SandboxSpec &spec) {
 		vars.insert(ddb::StringUtil::Lower(n));
 	}
 	vars.insert("tenant_id");
-	auto views = InitSqlViewBodies(spec.init_sql);
+	auto views = InitSqlViewParams(spec.init_sql);
 	for (auto &kv : spec.tables) {
 		bool yaml_av = kv.second.authorized_view;
 		bool no_filters = kv.second.filters.empty();
@@ -433,13 +474,11 @@ std::vector<std::string> AuthorizedViewWarnings(const SandboxSpec &spec) {
 			continue;
 		}
 		auto it = views.find(ddb::StringUtil::Lower(kv.second.name));
-		std::string raw = RawViewBody(spec.init_sql, kv.second.name);
-		bool has_create = it != views.end() || !raw.empty();
+		bool has_create = it != views.end();
 		if (!yaml_av && !has_create) {
 			continue;
 		}
-		std::string body = it != views.end() ? it->second : std::string();
-		if (SqlReferencesKeyVars(body, vars) || SqlReferencesKeyVars(raw, vars)) {
+		if (has_create && ParamsReferenceKeyVars(it->second, vars)) {
 			continue;
 		}
 		warnings.push_back("authorized view '" + kv.second.name +

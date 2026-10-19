@@ -117,6 +117,12 @@ void duckbox::test::RunValidatorTests() {
 		       "authorized view without a key variable emits a warning");
 		av.init_sql = "CREATE TEMP VIEW qv AS SELECT 1 AS x FROM deals WHERE tenant_id = :tenant_id";
 		Expect(AuthorizedViewWarnings(av).empty(), "authorized view that binds :tenant_id does not warn");
+		av.init_sql = "CREATE TEMP VIEW qv AS SELECT 1 AS x FROM deals -- tenant_id = :tenant_id";
+		auto comment_warns = AuthorizedViewWarnings(av);
+		Expect(!comment_warns.empty() && comment_warns[0].find("key variable") != std::string::npos,
+		       "authorized view with a key var only in a SQL comment still warns");
+		av.init_sql = "CREATE TEMP VIEW qv AS SELECT 1 AS x FROM deals WHERE tenant_id = $tenant_id";
+		Expect(AuthorizedViewWarnings(av).empty(), "authorized view that binds $tenant_id does not warn");
 		av.extra_paths = {""};
 		Expect(has_path(validator.ValidateStatic(av), "extra_paths[0]", "non-empty"),
 		       "empty extra_paths entry is a field-path error");
