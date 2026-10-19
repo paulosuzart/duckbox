@@ -18,7 +18,8 @@ if(NOT EXISTS "${DUCKBOX_DEPS}/duckdb/include/duckdb/parser/parser.hpp" OR
    NOT EXISTS "${DUCKBOX_DEPS}/httplib/httplib.h" OR
    NOT EXISTS "${DUCKBOX_DEPS}/yaml-cpp-0.8.0/CMakeLists.txt" OR
    NOT EXISTS "${DUCKBOX_DEPS}/nlohmann/nlohmann/json.hpp" OR
-   NOT EXISTS "${DUCKBOX_DEPS}/jwt-cpp/include/jwt-cpp/jwt.h")
+   NOT EXISTS "${DUCKBOX_DEPS}/jwt-cpp/include/jwt-cpp/jwt.h" OR
+   NOT EXISTS "${DUCKBOX_DEPS}/cli11/CLI/CLI.hpp")
   message(STATUS "Fetching DuckDB ${DUCKBOX_DUCKDB_VERSION} and httplib into ${DUCKBOX_DEPS}")
   execute_process(
     COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/fetch_deps.sh"
@@ -73,6 +74,23 @@ if(NOT EXISTS "${DUCKBOX_DEPS}/jwt-cpp/include/jwt-cpp/jwt.h")
     FetchContent_Populate(jwt_cpp)
     file(MAKE_DIRECTORY "${DUCKBOX_DEPS}/jwt-cpp")
     file(COPY "${jwt_cpp_SOURCE_DIR}/include" DESTINATION "${DUCKBOX_DEPS}/jwt-cpp")
+  endif()
+endif()
+
+# CLI11: duckbox CLI (serve/sandbox/run/validate). Header-only.
+if(NOT EXISTS "${DUCKBOX_DEPS}/cli11/CLI/CLI.hpp")
+  include(FetchContent)
+  FetchContent_Declare(
+    cli11
+    URL https://github.com/CLIUtils/CLI11/releases/download/v2.4.2/CLI11.hpp
+    URL_HASH SHA256=3935283e4c9db7089ed304476dbab2805c9311c41b125a55e92da4659df0d660
+    DOWNLOAD_NO_EXTRACT TRUE)
+  FetchContent_GetProperties(cli11)
+  if(NOT cli11_POPULATED)
+    FetchContent_Populate(cli11)
+    file(MAKE_DIRECTORY "${DUCKBOX_DEPS}/cli11/CLI")
+    file(COPY "${cli11_SOURCE_DIR}/CLI11.hpp" DESTINATION "${DUCKBOX_DEPS}/cli11/CLI")
+    file(RENAME "${DUCKBOX_DEPS}/cli11/CLI/CLI11.hpp" "${DUCKBOX_DEPS}/cli11/CLI/CLI.hpp")
   endif()
 endif()
 

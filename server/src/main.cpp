@@ -2,138 +2,146 @@
 #include "duckbox/flight_sql_server.hpp"
 #include "duckbox/spec_validator.hpp"
 
-#include <cstring>
+#include <CLI/CLI.hpp>
+
 #include <iostream>
 #include <string>
 
-namespace {
-
-void Usage() {
-	std::cerr
-	    << "duckbox — deny-by-default SQL sandbox (named sandboxes + control plane)\n"
-	    << "\n"
-	    << "The daemon has no data access. Named sandbox definitions (id, key, policy,\n"
-	    << "lake, credential refs, initSQL) live in the registry. Queries send id + SQL.\n"
-	    << "\n"
-	    << "Usage:\n"
-	    << "  duckbox serve --daemon FILE [--listen HOST:PORT] [--metrics HOST:PORT] [--debug-http HOST:PORT]\n"
-	    << "  duckbox sandbox create|get|update|delete|list|expire --url grpc://HOST:PORT [--spec FILE] [--id ID] [--key KEY]\n"
-	    << "      list filters: [--id-prefix P] [--key-prefix P] [--policy-class C] [--state warm|passive|defined]\n"
-	    << "                    [--limit N] [--offset N]\n"
-	    << "  duckbox run --daemon FILE --spec FILE --key KEY --sql SQL [--init-sql SQL]\n"
-	    << "  duckbox validate --spec FILE [--daemon FILE]\n"
-	    << "\n"
-	    << "DuckDB " << DUCKBOX_DUCKDB_VERSION << "\n";
-}
-
-std::string Arg(int argc, char **argv, const char *flag, const std::string &def = "") {
-	for (int i = 0; i < argc - 1; i++) {
-		if (std::strcmp(argv[i], flag) == 0) {
-			return argv[i + 1];
-		}
-	}
-	return def;
-}
-
-bool HasFlag(int argc, char **argv, const char *flag) {
-	for (int i = 0; i < argc; i++) {
-		if (std::strcmp(argv[i], flag) == 0) {
-			return true;
-		}
-	}
-	return false;
-}
-
-} // namespace
-
 int main(int argc, char **argv) {
-	if (argc < 2 || HasFlag(argc, argv, "-h") || HasFlag(argc, argv, "--help")) {
-		Usage();
-		return argc < 2 ? 1 : 0;
+	CLI::App app{"duckbox — deny-by-default SQL sandbox (named sandboxes + control plane)\n\n"
+	             "The daemon has no data access. Named sandbox definitions (id, key, policy,\n"
+	             "lake, credential refs, initSQL) live in the registry. Queries send id + SQL."};
+	app.set_help_flag("-h,--help", "Print this help message and exit");
+	app.require_subcommand(1);
+	app.footer(std::string("DuckDB ") + DUCKBOX_DUCKDB_VERSION);
+
+	std::string serve_daemon;
+	std::string serve_listen;
+	std::string serve_debug_http;
+	std::string serve_metrics;
+	std::string serve_handle_secret;
+	bool serve_no_metrics = false;
+	auto *serve = app.add_subcommand("serve", "Run the control-plane Flight SQL daemon");
+	serve->add_option("--daemon", serve_daemon, "Daemon YAML");
+	serve->add_option("--listen", serve_listen, "Flight SQL listen address HOST:PORT");
+	serve->add_option("--debug-http", serve_debug_http, "Debug HTTP listen address HOST:PORT");
+	serve->add_option("--metrics", serve_metrics, "Prometheus /metrics listen address HOST:PORT");
+	serve->add_flag("--no-metrics", serve_no_metrics, "Disable the metrics listener");
+	serve->add_option("--handle-secret", serve_handle_secret, "Override handle HMAC secret");
+
+	duckbox::SandboxCliRequest req;
+	req.url = "grpc://127.0.0.1:4747";
+	req.caller = "local";
+	auto *sandbox = app.add_subcommand("sandbox", "Named-sandbox CRUD against a running daemon");
+	sandbox->require_subcommand(1);
+	auto add_sandbox_opts = [&](CLI::App *sub) {
+		sub->add_option("--url", req.url, "Flight SQL URL")->capture_default_str();
+		sub->add_option("--spec", req.spec_path, "Sandbox spec YAML");
+		sub->add_option("--id", req.id, "Sandbox id");
+		sub->add_option("--key", req.key, "Bound tenant key");
+		sub->add_option("--caller", req.caller, "Trusted caller identity")->capture_default_str();
+		sub->add_option("--id-prefix", req.id_prefix, "List filter: id prefix");
+		sub->add_option("--key-prefix", req.key_prefix, "List filter: key prefix");
+		sub->add_option("--policy-class", req.policy_class, "List filter: policy class");
+		sub->add_option("--state", req.state, "List filter: warm|passive|defined");
+		sub->add_option("--limit", req.limit, "List limit");
+		sub->add_option("--offset", req.offset, "List offset");
+	};
+	auto *sb_create = sandbox->add_subcommand("create", "Create a named sandbox");
+	auto *sb_get = sandbox->add_subcommand("get", "Get a named sandbox");
+	auto *sb_update = sandbox->add_subcommand("update", "Update a named sandbox");
+	auto *sb_delete = sandbox->add_subcommand("delete", "Delete a named sandbox");
+	auto *sb_list = sandbox->add_subcommand("list", "List named sandboxes");
+	auto *sb_expire = sandbox->add_subcommand("expire", "Expire a named sandbox (invalidate handles)");
+	for (auto *sub : {sb_create, sb_get, sb_update, sb_delete, sb_list, sb_expire}) {
+		add_sandbox_opts(sub);
 	}
-	std::string cmd = argv[1];
+
+	std::string run_daemon;
+	std::string run_spec;
+	std::string run_key;
+	std::string run_sql;
+	std::string run_init_sql;
+	auto *run = app.add_subcommand("run", "One-shot throwaway DuckDB (does not persist a named sandbox)");
+	run->add_option("--daemon", run_daemon, "Daemon YAML");
+	run->add_option("--spec", run_spec, "Sandbox spec YAML")->required();
+	run->add_option("--key", run_key, "Tenant key")->required();
+	run->add_option("--sql", run_sql, "SQL to execute")->required();
+	run->add_option("--init-sql", run_init_sql, "Optional initSQL override");
+
+	std::string validate_spec;
+	std::string validate_daemon;
+	auto *validate = app.add_subcommand("validate", "Static spec check plus throwaway-sandbox lake check");
+	validate->add_option("--spec", validate_spec, "Sandbox spec YAML");
+	validate->add_option("--daemon", validate_daemon, "Daemon YAML");
+
+	auto *query = app.add_subcommand("query", "Use the Python client (examples/python/quickstart.py)");
+	auto *seed = app.add_subcommand("seed", "Memory bootstrap is lake.bootstrap_sql; DuckLake uses scripts/seed_ducklake.py");
+
 	try {
-		if (cmd == "serve") {
-			auto daemon_path = Arg(argc, argv, "--daemon");
+		app.parse(argc, argv);
+	} catch (const CLI::ParseError &e) {
+		int rc = app.exit(e);
+		return rc == 0 ? 0 : 1;
+	}
+
+	try {
+		if (*serve) {
 			duckbox::ServerOptions opt;
-			opt.daemon = daemon_path.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(daemon_path);
-			auto listen = Arg(argc, argv, "--listen");
-			if (!listen.empty()) {
-				opt.daemon.listen = listen;
+			opt.daemon =
+			    serve_daemon.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(serve_daemon);
+			if (!serve_listen.empty()) {
+				opt.daemon.listen = serve_listen;
 			}
-			auto dbg = Arg(argc, argv, "--debug-http");
-			if (!dbg.empty()) {
-				opt.daemon.debug_http = dbg;
+			if (!serve_debug_http.empty()) {
+				opt.daemon.debug_http = serve_debug_http;
 			}
-			auto metrics = Arg(argc, argv, "--metrics");
-			if (!metrics.empty()) {
-				opt.daemon.metrics_listen = metrics;
+			if (!serve_metrics.empty()) {
+				opt.daemon.metrics_listen = serve_metrics;
 			}
-			if (HasFlag(argc, argv, "--no-metrics")) {
+			if (serve_no_metrics) {
 				opt.daemon.metrics_listen.clear();
 			}
-			auto secret = Arg(argc, argv, "--handle-secret");
-			if (!secret.empty()) {
-				opt.daemon.handle_secret = secret;
+			if (!serve_handle_secret.empty()) {
+				opt.daemon.handle_secret = serve_handle_secret;
 			}
 			return duckbox::RunServer(opt);
 		}
-		if (cmd == "sandbox") {
-			if (argc < 3) {
-				Usage();
-				return 1;
-			}
-			duckbox::SandboxCliRequest req;
-			req.op = argv[2];
-			req.url = Arg(argc, argv, "--url", "grpc://127.0.0.1:4747");
-			req.spec_path = Arg(argc, argv, "--spec");
-			req.id = Arg(argc, argv, "--id");
-			req.key = Arg(argc, argv, "--key");
-			req.caller = Arg(argc, argv, "--caller", "local");
-			req.id_prefix = Arg(argc, argv, "--id-prefix");
-			req.key_prefix = Arg(argc, argv, "--key-prefix");
-			req.policy_class = Arg(argc, argv, "--policy-class");
-			req.state = Arg(argc, argv, "--state");
-			auto limit = Arg(argc, argv, "--limit");
-			auto offset = Arg(argc, argv, "--offset");
-			if (!limit.empty()) {
-				req.limit = std::stoll(limit);
-			}
-			if (!offset.empty()) {
-				req.offset = std::stoll(offset);
+		if (*sandbox) {
+			if (*sb_create) {
+				req.op = "create";
+			} else if (*sb_get) {
+				req.op = "get";
+			} else if (*sb_update) {
+				req.op = "update";
+			} else if (*sb_delete) {
+				req.op = "delete";
+			} else if (*sb_list) {
+				req.op = "list";
+			} else if (*sb_expire) {
+				req.op = "expire";
 			}
 			return duckbox::RunSandboxCli(req);
 		}
-		if (cmd == "run") {
-			auto daemon_path = Arg(argc, argv, "--daemon");
-			auto spec = Arg(argc, argv, "--spec");
-			auto key = Arg(argc, argv, "--key");
-			auto sql = Arg(argc, argv, "--sql");
-			auto init_sql = Arg(argc, argv, "--init-sql");
-			if (spec.empty() || key.empty() || sql.empty()) {
-				Usage();
-				return 1;
-			}
-			auto daemon = daemon_path.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(daemon_path);
-			return duckbox::RunLocalQuery(daemon, spec, key, sql, init_sql);
+		if (*run) {
+			auto daemon = run_daemon.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(run_daemon);
+			return duckbox::RunLocalQuery(daemon, run_spec, run_key, run_sql, run_init_sql);
 		}
-		if (cmd == "validate") {
-			auto spec = Arg(argc, argv, "--spec");
-			auto daemon_path = Arg(argc, argv, "--daemon");
-			auto daemon = daemon_path.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(daemon_path);
-			return duckbox::RunValidateCommand(daemon, spec);
+		if (*validate) {
+			auto daemon =
+			    validate_daemon.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(validate_daemon);
+			return duckbox::RunValidateCommand(daemon, validate_spec);
 		}
-		if (cmd == "query") {
+		if (*query) {
 			std::cerr << "duckbox query: use examples/python/quickstart.py (or query_cli.py).\n"
 			          << "Or: duckbox run --spec FILE --key KEY --sql SQL\n";
 			return 1;
 		}
-		if (cmd == "seed") {
+		if (*seed) {
 			std::cerr << "seed: memory bootstrap is lake.bootstrap_sql in the spec; "
 			             "DuckLake uses scripts/seed_ducklake.py\n";
 			return 0;
 		}
-		Usage();
 		return 1;
 	} catch (const std::exception &e) {
 		std::cerr << "duckbox: " << e.what() << "\n";
