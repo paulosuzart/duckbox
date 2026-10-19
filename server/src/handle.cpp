@@ -68,6 +68,7 @@ std::string EncodePayload(const StatementHandle &h) {
 	PutI64(s, h.expires_at_unix);
 	PutU32(s, static_cast<uint32_t>(h.user_param_count));
 	PutStr(s, h.params_ipc);
+	PutI64(s, h.handle_gen);
 	return s;
 }
 
@@ -85,6 +86,9 @@ StatementHandle DecodePayload(const std::string &s) {
 	h.expires_at_unix = GetI64(s, i);
 	h.user_param_count = static_cast<int>(GetU32(s, i));
 	h.params_ipc = GetStr(s, i);
+	if (i + 8 <= s.size()) {
+		h.handle_gen = static_cast<int>(GetI64(s, i));
+	}
 	return h;
 }
 

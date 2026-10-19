@@ -3,6 +3,7 @@
 #include "duckbox/lake.hpp"
 #include "duckbox/metrics.hpp"
 #include "duckbox/spec_validator.hpp"
+#include "duckbox/yaml.hpp"
 
 #include <arrow/array.h>
 #include <arrow/buffer.h>
@@ -18,6 +19,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstddef>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -255,6 +257,12 @@ DuckboxFlightSqlServer::CallCtx DuckboxFlightSqlServer::Auth(const ServerCallCon
 			throw AuthError("missing x-duckbox-sandbox (named sandbox id)");
 		}
 		c.rec = defs_->Get(sandbox_id);
+		if (IsExpired(c.rec)) {
+			defs_->Delete(sandbox_id);
+			runtime_->PassivateId(sandbox_id, "ttl");
+			Metrics().IncExpiration(c.rec.spec.lifecycle.ttl_ms > 0 ? "ttl" : "expires_at");
+			throw NotFoundError("sandbox '" + sandbox_id + "' expired");
+		}
 		c.spec = c.rec.spec;
 		AuthorizeCaller(daemon_, c.caller, c.rec.key);
 		AuthRequest req;
@@ -284,6 +292,7 @@ StatementHandle DuckboxFlightSqlServer::MakeHandle(const CallCtx &c, const std::
 	h.tenant_raw = c.key.raw;
 	h.sandbox_id = c.rec.id;
 	h.version = c.rec.version;
+	h.handle_gen = c.rec.handle_gen;
 	h.content_hash = c.rec.content_hash;
 	h.user_param_count = user_params;
 	return h;
@@ -360,6 +369,15 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetSt
 			throw;
 		}
 		auto current = defs_->Get(h.sandbox_id);
+		if (IsExpired(current)) {
+			defs_->Delete(h.sandbox_id);
+			runtime_->PassivateId(h.sandbox_id, "ttl");
+			Metrics().IncExpiration(current.spec.lifecycle.ttl_ms > 0 ? "ttl" : "expires_at");
+			throw NotFoundError("sandbox '" + h.sandbox_id + "' expired");
+		}
+		if (h.handle_gen != current.handle_gen) {
+			throw StaleHandleError("sandbox '" + h.sandbox_id + "' handles were expired; re-prepare");
+		}
 		auto rec = ResolveHandleVersion(*defs_, current, h.version);
 		AuthorizeCaller(daemon_, CallerOf(context), rec.key);
 		(void)ParseTenantKey(h.tenant_raw, rec.spec.key);
@@ -476,8 +494,12 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 		}
 		token = signer_->Sign(h);
 		RememberBind(token, h.params_ipc);
-		AuthorizeCaller(daemon_, CallerOf(context), defs_->Get(h.sandbox_id).key);
-		auto rec = ResolveHandleVersion(*defs_, defs_->Get(h.sandbox_id), h.version);
+		auto current = defs_->Get(h.sandbox_id);
+		if (h.handle_gen != current.handle_gen) {
+			throw StaleHandleError("sandbox '" + h.sandbox_id + "' handles were expired; re-prepare");
+		}
+		AuthorizeCaller(daemon_, CallerOf(context), current.key);
+		auto rec = ResolveHandleVersion(*defs_, current, h.version);
 		auto box = runtime_->Get(rec);
 		auto schema = SchemaFromCols(box->DescribeRewritten(h.rewritten_sql));
 		return Info(descriptor, token, schema);
@@ -659,7 +681,9 @@ const std::vector<arrow::flight::ActionType> &DuckboxFlightSqlServer::SandboxAct
 	    {"UpdateSandbox",
 	     "Replace the definition and bump version. N-1 stays warm for handles.stale_version_grace (default 0)."},
 	    {"DeleteSandbox", "Tombstone the sandbox id."},
-	    {"ListSandboxes", "List non-tombstoned sandbox ids."},
+	    {"ListSandboxes",
+	     "List authorized sandboxes. YAML body: id_prefix, key_prefix, policy_class, state, limit, offset."},
+	    {"ExpireSandbox", "Passivate the instance and invalidate prepared handles. Definition stays."},
 	};
 	return k;
 }
@@ -706,6 +730,12 @@ arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContex
 			auto id = body.empty() ? Hdr(context, {"x-duckbox-sandbox"}) : body;
 			auto rec = defs_->Get(id);
 			AuthorizeCaller(daemon_, caller, rec.key);
+			if (IsExpired(rec)) {
+				defs_->Delete(id);
+				runtime_->PassivateId(id, "ttl");
+				Metrics().IncExpiration(rec.spec.lifecycle.ttl_ms > 0 ? "ttl" : "expires_at");
+				throw NotFoundError("sandbox '" + id + "' expired");
+			}
 			return ResultJson(rec.ToJson(), result);
 		}
 		if (action.type == "DeleteSandbox") {
@@ -716,24 +746,90 @@ arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContex
 			runtime_->PassivateId(id, "delete");
 			return ResultJson(out.ToJson(), result);
 		}
+		if (action.type == "ExpireSandbox") {
+			auto id = body.empty() ? Hdr(context, {"x-duckbox-sandbox"}) : body;
+			auto rec = defs_->Get(id);
+			AuthorizeCaller(daemon_, caller, rec.key);
+			auto out = defs_->Expire(id);
+			runtime_->PassivateId(id, "expire");
+			Metrics().IncExpiration("expire");
+			return ResultJson(out.ToJson(), result);
+		}
 		if (action.type == "ListSandboxes") {
+			runtime_->Sweep();
+			SandboxListFilter filter;
+			if (!body.empty()) {
+				auto root = ParseYaml(body);
+				if (root.IsMap()) {
+					YamlRejectUnknownKeys(root, {"id_prefix", "key_prefix", "policy_class", "state", "limit",
+					                             "offset"});
+					filter.id_prefix = root.GetString("id_prefix");
+					filter.key_prefix = root.GetString("key_prefix");
+					filter.policy_class = root.GetString("policy_class");
+					filter.state = root.GetString("state");
+					filter.limit = root.GetInt("limit", 100);
+					filter.offset = root.GetInt("offset", 0);
+				} else if (!root.IsNull()) {
+					throw PolicyError("ListSandboxes body: expected mapping");
+				}
+			}
+			if (!filter.state.empty() && filter.state != "warm" && filter.state != "passive" &&
+			    filter.state != "defined") {
+				throw PolicyError("state: expected warm, passive, or defined");
+			}
+			if (filter.limit <= 0) {
+				filter.limit = 100;
+			}
+			if (filter.limit > 1000) {
+				filter.limit = 1000;
+			}
+			if (filter.offset < 0) {
+				filter.offset = 0;
+			}
 			auto all = defs_->List();
-			std::ostringstream os;
-			os << "{\"sandboxes\":[";
-			bool first = true;
+			std::vector<SandboxRecord> visible;
 			for (auto &r : all) {
+				if (IsExpired(r)) {
+					try {
+						defs_->Delete(r.id);
+						runtime_->PassivateId(r.id, "ttl");
+						Metrics().IncExpiration(r.spec.lifecycle.ttl_ms > 0 ? "ttl" : "expires_at");
+					} catch (const std::exception &) {
+					}
+					continue;
+				}
 				try {
 					AuthorizeCaller(daemon_, caller, r.key);
 				} catch (const AuthError &) {
 					continue;
 				}
-				if (!first) {
+				visible.push_back(r);
+			}
+			auto page_filter = filter;
+			page_filter.limit = 0;
+			page_filter.offset = 0;
+			auto items = runtime_->Summarize(visible, page_filter);
+			int64_t total = static_cast<int64_t>(items.size());
+			int64_t off = filter.offset;
+			int64_t lim = filter.limit;
+			std::vector<SandboxSummary> page;
+			if (off < total) {
+				auto begin = items.begin() + static_cast<std::ptrdiff_t>(off);
+				auto end = begin + static_cast<std::ptrdiff_t>(lim);
+				if (end > items.end()) {
+					end = items.end();
+				}
+				page.assign(begin, end);
+			}
+			std::ostringstream os;
+			os << "{\"sandboxes\":[";
+			for (size_t i = 0; i < page.size(); i++) {
+				if (i) {
 					os << ",";
 				}
-				first = false;
-				os << r.ToJson();
+				os << SandboxSummaryJson(page[i]);
 			}
-			os << "]}";
+			os << "],\"total\":" << total << ",\"offset\":" << off << ",\"limit\":" << lim << "}";
 			return ResultJson(os.str(), result);
 		}
 		return Status::NotImplemented("unknown action " + action.type);
@@ -853,11 +949,10 @@ int RunServer(const ServerOptions &opt) {
 	return 0;
 }
 
-int RunSandboxCli(const std::string &op, const std::string &url, const std::string &spec_path, const std::string &id,
-                  const std::string &key, const std::string &caller) {
+int RunSandboxCli(const SandboxCliRequest &req) {
 	std::string host = "127.0.0.1";
 	int port = 4747;
-	auto u = url;
+	auto u = req.url;
 	if (u.rfind("grpc://", 0) == 0) {
 		u = u.substr(7);
 	}
@@ -880,29 +975,29 @@ int RunSandboxCli(const std::string &op, const std::string &url, const std::stri
 	}
 	auto client = std::move(*client_res);
 	arrow::flight::FlightCallOptions opt;
-	opt.headers.emplace_back("x-duckbox-caller", caller.empty() ? "local" : caller);
-	if (!id.empty()) {
-		opt.headers.emplace_back("x-duckbox-sandbox", id);
+	opt.headers.emplace_back("x-duckbox-caller", req.caller.empty() ? "local" : req.caller);
+	if (!req.id.empty()) {
+		opt.headers.emplace_back("x-duckbox-sandbox", req.id);
 	}
-	if (!key.empty()) {
-		opt.headers.emplace_back("x-duckbox-key", key);
+	if (!req.key.empty()) {
+		opt.headers.emplace_back("x-duckbox-key", req.key);
 	}
 	std::string body;
 	std::string action_type;
-	if (op == "create" || op == "update") {
-		if (spec_path.empty()) {
-			std::cerr << "duckbox sandbox " << op << ": --spec is required\n";
+	if (req.op == "create" || req.op == "update") {
+		if (req.spec_path.empty()) {
+			std::cerr << "duckbox sandbox " << req.op << ": --spec is required\n";
 			return 1;
 		}
-		auto spec = LoadSpecFile(spec_path);
-		if (!id.empty()) {
-			spec.id = id;
+		auto spec = LoadSpecFile(req.spec_path);
+		if (!req.id.empty()) {
+			spec.id = req.id;
 		}
-		if (!key.empty()) {
-			spec.bound_key = key;
+		if (!req.key.empty()) {
+			spec.bound_key = req.key;
 		}
 		body = spec.yaml_body;
-		if (!id.empty() || !key.empty()) {
+		if (!req.id.empty() || !req.key.empty()) {
 			if (body.find("\nid:") == std::string::npos && body.rfind("id:", 0) != 0) {
 				body = "id: " + spec.id + "\nkey: " + spec.bound_key + "\n" + body;
 			}
@@ -915,18 +1010,44 @@ int RunSandboxCli(const std::string &op, const std::string &url, const std::stri
 				body += "  " + line + "\n";
 			}
 		}
-		action_type = op == "create" ? "CreateSandbox" : "UpdateSandbox";
-	} else if (op == "get" || op == "delete") {
-		if (id.empty()) {
-			std::cerr << "duckbox sandbox " << op << ": --id is required\n";
+		action_type = req.op == "create" ? "CreateSandbox" : "UpdateSandbox";
+	} else if (req.op == "get" || req.op == "delete" || req.op == "expire") {
+		if (req.id.empty()) {
+			std::cerr << "duckbox sandbox " << req.op << ": --id is required\n";
 			return 1;
 		}
-		body = id;
-		action_type = op == "get" ? "GetSandbox" : "DeleteSandbox";
-	} else if (op == "list") {
+		body = req.id;
+		if (req.op == "get") {
+			action_type = "GetSandbox";
+		} else if (req.op == "delete") {
+			action_type = "DeleteSandbox";
+		} else {
+			action_type = "ExpireSandbox";
+		}
+	} else if (req.op == "list") {
 		action_type = "ListSandboxes";
+		std::ostringstream y;
+		if (!req.id_prefix.empty()) {
+			y << "id_prefix: " << req.id_prefix << "\n";
+		}
+		if (!req.key_prefix.empty()) {
+			y << "key_prefix: " << req.key_prefix << "\n";
+		}
+		if (!req.policy_class.empty()) {
+			y << "policy_class: " << req.policy_class << "\n";
+		}
+		if (!req.state.empty()) {
+			y << "state: " << req.state << "\n";
+		}
+		if (req.limit > 0) {
+			y << "limit: " << req.limit << "\n";
+		}
+		if (req.offset > 0) {
+			y << "offset: " << req.offset << "\n";
+		}
+		body = y.str();
 	} else {
-		std::cerr << "duckbox sandbox: unknown op " << op << "\n";
+		std::cerr << "duckbox sandbox: unknown op " << req.op << "\n";
 		return 1;
 	}
 	arrow::flight::Action action;

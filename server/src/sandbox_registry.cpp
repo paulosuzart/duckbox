@@ -170,8 +170,9 @@ std::string SandboxRecord::ToJson() const {
 	os << "{\"id\":\"" << JsonEsc(id) << "\",\"key\":\"" << JsonEsc(key) << "\",\"policy_class\":\""
 	   << JsonEsc(policy_class) << "\",\"version\":" << version << ",\"content_hash\":\"" << JsonEsc(content_hash)
 	   << "\",\"lake_validated\":" << (lake_validated ? "true" : "false") << ",\"tombstone\":"
-	   << (tombstone ? "true" : "false") << ",\"updated_at_ms\":" << updated_at_ms << ",\"spec_dir\":\""
-	   << JsonEsc(spec_dir) << "\",\"spec_yaml\":\"" << JsonEsc(spec_yaml) << "\"}";
+	   << (tombstone ? "true" : "false") << ",\"created_at_ms\":" << created_at_ms << ",\"updated_at_ms\":"
+	   << updated_at_ms << ",\"expires_at_ms\":" << expires_at_ms << ",\"handle_gen\":" << handle_gen
+	   << ",\"spec_dir\":\"" << JsonEsc(spec_dir) << "\",\"spec_yaml\":\"" << JsonEsc(spec_yaml) << "\"}";
 	return os.str();
 }
 
@@ -179,7 +180,8 @@ std::string SandboxRecord::PointerJson() const {
 	std::ostringstream os;
 	os << "{\"id\":\"" << JsonEsc(id) << "\",\"version\":" << version << ",\"content_hash\":\"" << JsonEsc(content_hash)
 	   << "\",\"lake_validated\":" << (lake_validated ? "true" : "false") << ",\"tombstone\":"
-	   << (tombstone ? "true" : "false") << ",\"updated_at_ms\":" << updated_at_ms << "}";
+	   << (tombstone ? "true" : "false") << ",\"created_at_ms\":" << created_at_ms << ",\"updated_at_ms\":"
+	   << updated_at_ms << ",\"expires_at_ms\":" << expires_at_ms << ",\"handle_gen\":" << handle_gen << "}";
 	return os.str();
 }
 
@@ -192,7 +194,10 @@ SandboxRecord SandboxRecord::FromJson(const std::string &json) {
 	r.content_hash = JsonStr(json, "content_hash");
 	r.lake_validated = JsonBool(json, "lake_validated");
 	r.tombstone = JsonBool(json, "tombstone");
+	r.created_at_ms = JsonI64(json, "created_at_ms");
 	r.updated_at_ms = JsonI64(json, "updated_at_ms");
+	r.expires_at_ms = JsonI64(json, "expires_at_ms");
+	r.handle_gen = JsonInt(json, "handle_gen");
 	r.spec_yaml = JsonStr(json, "spec_yaml");
 	r.spec_dir = JsonStr(json, "spec_dir");
 	if (!r.spec_yaml.empty()) {
@@ -229,6 +234,26 @@ SandboxRecord RecordFromSpec(SandboxSpec spec, std::string spec_dir) {
 int64_t WallNowMs() {
 	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
 	    .count();
+}
+
+void ApplyLifecycleTimes(SandboxRecord &rec, int64_t now_ms) {
+	if (now_ms <= 0) {
+		now_ms = WallNowMs();
+	}
+	if (rec.created_at_ms <= 0) {
+		rec.created_at_ms = now_ms;
+	}
+	rec.expires_at_ms = ComputeExpiresAtMs(rec.created_at_ms, rec.spec);
+}
+
+bool IsExpired(const SandboxRecord &rec, int64_t now_ms) {
+	if (rec.expires_at_ms <= 0) {
+		return false;
+	}
+	if (now_ms <= 0) {
+		now_ms = WallNowMs();
+	}
+	return now_ms >= rec.expires_at_ms;
 }
 
 SandboxRecord ResolveHandleVersion(SandboxRegistry &defs, const SandboxRecord &current, int handle_version,
@@ -284,7 +309,9 @@ SandboxRecord MemorySandboxRegistry::Create(SandboxRecord rec) {
 	rec.version = version;
 	rec.tombstone = false;
 	rec.lake_validated = false;
-	rec.updated_at_ms = WallNowMs();
+	rec.handle_gen = 0;
+	ApplyLifecycleTimes(rec, WallNowMs());
+	rec.updated_at_ms = rec.created_at_ms;
 	rec.etag = std::to_string(etag_seq_++);
 	recs_[rec.id] = rec;
 	versions_[rec.id][rec.version] = rec;
@@ -310,6 +337,9 @@ SandboxRecord MemorySandboxRegistry::Update(SandboxRecord rec) {
 	rec.version = it->second.version + 1;
 	rec.tombstone = false;
 	rec.lake_validated = false;
+	rec.handle_gen = it->second.handle_gen;
+	rec.created_at_ms = it->second.created_at_ms;
+	ApplyLifecycleTimes(rec, WallNowMs());
 	rec.updated_at_ms = WallNowMs();
 	rec.etag = std::to_string(etag_seq_++);
 	recs_[rec.id] = rec;
@@ -337,6 +367,18 @@ std::vector<SandboxRecord> MemorySandboxRegistry::List() {
 		}
 	}
 	return out;
+}
+
+SandboxRecord MemorySandboxRegistry::Expire(const std::string &id) {
+	std::lock_guard<std::mutex> hold(mu_);
+	auto it = recs_.find(id);
+	if (it == recs_.end() || it->second.tombstone) {
+		throw NotFoundError("sandbox '" + id + "' not found");
+	}
+	it->second.handle_gen++;
+	it->second.updated_at_ms = WallNowMs();
+	it->second.etag = std::to_string(etag_seq_++);
+	return it->second;
 }
 
 void MemorySandboxRegistry::RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) {
@@ -411,6 +453,11 @@ SandboxRecord S3SandboxRegistry::LoadCurrent(const std::string &id) const {
 		if (rec.updated_at_ms > 0) {
 			full.updated_at_ms = rec.updated_at_ms;
 		}
+		if (rec.created_at_ms > 0) {
+			full.created_at_ms = rec.created_at_ms;
+		}
+		full.expires_at_ms = rec.expires_at_ms > 0 ? rec.expires_at_ms : full.expires_at_ms;
+		full.handle_gen = rec.handle_gen;
 		if (full.id.empty()) {
 			full.id = id;
 		}
@@ -456,7 +503,9 @@ SandboxRecord S3SandboxRegistry::Create(SandboxRecord rec) {
 		rec.version = existing.version + 1;
 		rec.lake_validated = false;
 		rec.tombstone = false;
-		rec.updated_at_ms = WallNowMs();
+		rec.handle_gen = 0;
+		ApplyLifecycleTimes(rec, WallNowMs());
+		rec.updated_at_ms = rec.created_at_ms;
 		PutVersion(rec);
 		PutCurrent(rec, existing.etag, "");
 		auto got = client_->Get(CurrentKey(rec.id));
@@ -471,7 +520,9 @@ SandboxRecord S3SandboxRegistry::Create(SandboxRecord rec) {
 	rec.version = 1;
 	rec.lake_validated = false;
 	rec.tombstone = false;
-	rec.updated_at_ms = WallNowMs();
+	rec.handle_gen = 0;
+	ApplyLifecycleTimes(rec, WallNowMs());
+	rec.updated_at_ms = rec.created_at_ms;
 	PutVersion(rec);
 	PutCurrent(rec, "", "*");
 	auto got = client_->Get(CurrentKey(rec.id));
@@ -489,6 +540,9 @@ SandboxRecord S3SandboxRegistry::Update(SandboxRecord rec) {
 	rec.version = current.version + 1;
 	rec.lake_validated = false;
 	rec.tombstone = false;
+	rec.handle_gen = current.handle_gen;
+	rec.created_at_ms = current.created_at_ms;
+	ApplyLifecycleTimes(rec, WallNowMs());
 	rec.updated_at_ms = WallNowMs();
 	PutVersion(rec);
 	PutCurrent(rec, current.etag, "");
@@ -500,6 +554,16 @@ SandboxRecord S3SandboxRegistry::Update(SandboxRecord rec) {
 SandboxRecord S3SandboxRegistry::Delete(const std::string &id) {
 	auto current = LoadCurrent(id);
 	current.tombstone = true;
+	PutCurrent(current, current.etag, "");
+	auto got = client_->Get(CurrentKey(id));
+	current.etag = got.etag;
+	return current;
+}
+
+SandboxRecord S3SandboxRegistry::Expire(const std::string &id) {
+	auto current = LoadCurrent(id);
+	current.handle_gen++;
+	current.updated_at_ms = WallNowMs();
 	PutCurrent(current, current.etag, "");
 	auto got = client_->Get(CurrentKey(id));
 	current.etag = got.etag;

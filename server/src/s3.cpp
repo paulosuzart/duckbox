@@ -149,7 +149,9 @@ S3Object S3ControlClient::Request(const std::string &method, const std::string &
 	if (method == "GET") {
 		res = cli->Get(path.c_str(), hh);
 	} else if (method == "PUT") {
-		res = cli->Put(path.c_str(), hh, body, "application/json");
+		// Empty content_type: httplib emplaces a second Content-Type if we pass one,
+		// and RustFS/SigV4 403s an unsigned duplicate.
+		res = cli->Put(path.c_str(), hh, body, "");
 	} else if (method == "DELETE") {
 		res = cli->Delete(path.c_str(), hh);
 	} else {
@@ -171,6 +173,9 @@ S3Object S3ControlClient::Request(const std::string &method, const std::string &
 	out.etag = UnquoteEtag(et);
 	if (out.status >= 400) {
 		out.error = "s3 " + method + " " + key + " status " + std::to_string(out.status);
+		if (!out.body.empty() && out.body.size() < 512) {
+			out.error += ": " + out.body;
+		}
 	}
 	return out;
 }

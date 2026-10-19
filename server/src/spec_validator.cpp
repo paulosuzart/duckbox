@@ -187,6 +187,15 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 	} else if (spec.handles.stale_version_grace_ms > kMaxStaleVersionGraceMs) {
 		add("handles.stale_version_grace", "cap is 1h");
 	}
+	if (!spec.lifecycle.idle_timeout_raw.empty() && spec.lifecycle.idle_timeout_ms < 0) {
+		add("lifecycle.idle_timeout", "expected duration like 0s, 30s, 5m, 1h");
+	}
+	if (!spec.lifecycle.ttl_raw.empty() && spec.lifecycle.ttl_ms < 0) {
+		add("lifecycle.ttl", "expected duration like 30s, 5m, 1h");
+	}
+	if (!spec.lifecycle.expires_at_raw.empty() && spec.lifecycle.expires_at_ms < 0) {
+		add("lifecycle.expires_at", "expected unix timestamp or RFC3339 like 2026-10-19T12:00:00Z");
+	}
 	return issues;
 }
 

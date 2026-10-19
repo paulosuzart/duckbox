@@ -30,7 +30,10 @@ struct SandboxRecord {
 	std::string spec_yaml;
 	std::string spec_dir;
 	std::string etag;
+	int64_t created_at_ms = 0; // wall clock of first live version
 	int64_t updated_at_ms = 0; // wall clock when this version became current
+	int64_t expires_at_ms = 0; // 0 = none; from lifecycle.ttl / expires_at
+	int handle_gen = 0;        // ExpireSandbox; not a spec version
 	SandboxSpec spec;
 
 	std::string ToJson() const;      // immutable vN.json body
@@ -48,6 +51,8 @@ public:
 	virtual SandboxRecord Update(SandboxRecord rec) = 0;  // bumps version; ConflictError on CAS fail
 	virtual SandboxRecord Delete(const std::string &id) = 0;
 	virtual std::vector<SandboxRecord> List() = 0; // live definitions; tombstones omitted
+	// Passivate-invalidate: bump handle_gen, keep spec version. Definition stays.
+	virtual SandboxRecord Expire(const std::string &id) = 0;
 	virtual void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) = 0;
 	virtual bool LakeValidated(const std::string &id, int version) const = 0;
 	virtual SandboxRecord GetVersion(const std::string &id, int version) = 0; // immutable vN, including N-1
@@ -61,6 +66,7 @@ public:
 	SandboxRecord Update(SandboxRecord rec) override;
 	SandboxRecord Delete(const std::string &id) override;
 	std::vector<SandboxRecord> List() override;
+	SandboxRecord Expire(const std::string &id) override;
 	void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) override;
 	bool LakeValidated(const std::string &id, int version) const override;
 	SandboxRecord GetVersion(const std::string &id, int version) override;
@@ -83,6 +89,7 @@ public:
 	SandboxRecord Update(SandboxRecord rec) override;
 	SandboxRecord Delete(const std::string &id) override;
 	std::vector<SandboxRecord> List() override;
+	SandboxRecord Expire(const std::string &id) override;
 	void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) override;
 	bool LakeValidated(const std::string &id, int version) const override;
 	SandboxRecord GetVersion(const std::string &id, int version) override;
@@ -107,5 +114,7 @@ int64_t WallNowMs();
 SandboxRecord ResolveHandleVersion(SandboxRegistry &defs, const SandboxRecord &current, int handle_version,
                                    int64_t now_ms = 0);
 void EnsureCurrentVersion(const SandboxRecord &current, int handle_version, const std::string &sandbox_id);
+bool IsExpired(const SandboxRecord &rec, int64_t now_ms = 0); // uses WallNowMs when now_ms <= 0
+void ApplyLifecycleTimes(SandboxRecord &rec, int64_t now_ms = 0);
 
 } // namespace duckbox

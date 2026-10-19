@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <sstream>
 #include <thread>
 
 namespace duckbox {
@@ -22,6 +23,11 @@ TenantSandbox::TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key, 
     : daemon_(std::move(daemon)), policy_(std::move(policy)), key_(std::move(key)), init_sql_(std::move(init_sql)),
       spec_dir_(std::move(spec_dir)), sandbox_id_(std::move(sandbox_id)), version_(version),
       secrets_(secrets ? std::move(secrets) : std::make_shared<EnvFileSecretResolver>()) {
+}
+
+void TenantSandbox::Touch() {
+	last_used_ = std::chrono::steady_clock::now();
+	last_used_wall_ms_ = WallNowMs();
 }
 
 TenantSandbox::~TenantSandbox() {
@@ -345,17 +351,128 @@ std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
 	return box;
 }
 
-void SandboxRuntime::EvictIdleLocked() {
-	if (daemon_.idle_evict_ms <= 0) {
-		return;
+int64_t EffectiveIdleTimeoutMs(const DaemonConfig &daemon, const SandboxSpec &spec) {
+	int64_t idle = spec.lifecycle.idle_timeout_ms;
+	if (idle < 0) {
+		idle = daemon.idle_evict_ms;
 	}
+	if (daemon.max_idle_evict_ms > 0 && idle > daemon.max_idle_evict_ms) {
+		idle = daemon.max_idle_evict_ms;
+	}
+	return idle;
+}
+
+void SandboxRuntime::EvictIdleLocked() {
 	auto now = std::chrono::steady_clock::now();
 	for (auto it = boxes_.begin(); it != boxes_.end(); ++it) {
+		auto idle_limit = EffectiveIdleTimeoutMs(daemon_, it->second->GetPolicy());
+		if (idle_limit <= 0) {
+			continue;
+		}
 		auto idle = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second->last_used()).count();
-		if (idle >= daemon_.idle_evict_ms && it->second.use_count() == 1 && it->second->Warm()) {
+		if (idle >= idle_limit && it->second.use_count() == 1 && it->second->Warm()) {
 			it->second->Passivate("idle");
 		}
 	}
+}
+
+void SandboxRuntime::Sweep() {
+	std::lock_guard<std::mutex> hold(mu_);
+	EvictIdleLocked();
+	PublishResidentLocked();
+}
+
+const TenantSandbox *SandboxRuntime::FindIdLocked(const std::string &id) const {
+	auto prefix = id + "@";
+	const TenantSandbox *found = nullptr;
+	for (auto &kv : boxes_) {
+		if (kv.first == id || kv.first.rfind(prefix, 0) == 0) {
+			if (kv.second->Warm()) {
+				return kv.second.get();
+			}
+			found = kv.second.get();
+		}
+	}
+	return found;
+}
+
+std::string SandboxRuntime::InstanceState(const std::string &id) const {
+	std::lock_guard<std::mutex> hold(mu_);
+	auto *box = FindIdLocked(id);
+	if (!box) {
+		return "defined";
+	}
+	return box->Warm() ? "warm" : "passive";
+}
+
+int64_t SandboxRuntime::LastUsedWallMs(const std::string &id) const {
+	std::lock_guard<std::mutex> hold(mu_);
+	auto *box = FindIdLocked(id);
+	return box ? box->last_used_wall_ms() : 0;
+}
+
+namespace {
+
+std::string JsonEscSummary(const std::string &s) {
+	std::string out;
+	out.reserve(s.size() + 8);
+	for (unsigned char c : s) {
+		if (c == '"' || c == '\\') {
+			out.push_back('\\');
+			out.push_back(static_cast<char>(c));
+		} else if (c == '\n') {
+			out += "\\n";
+		} else {
+			out.push_back(static_cast<char>(c));
+		}
+	}
+	return out;
+}
+
+} // namespace
+
+std::string SandboxSummaryJson(const SandboxSummary &s) {
+	std::ostringstream os;
+	os << "{\"id\":\"" << JsonEscSummary(s.id) << "\",\"key\":\"" << JsonEscSummary(s.key)
+	   << "\",\"policy_class\":\"" << JsonEscSummary(s.policy_class) << "\",\"version\":" << s.version
+	   << ",\"state\":\"" << JsonEscSummary(s.state) << "\",\"owner\":\"" << JsonEscSummary(s.owner)
+	   << "\",\"created_at\":" << s.created_at_ms << ",\"updated_at\":" << s.updated_at_ms
+	   << ",\"last_used_at\":" << s.last_used_at_ms << ",\"expires_at\":" << s.expires_at_ms << "}";
+	return os.str();
+}
+
+std::vector<SandboxSummary> SandboxRuntime::Summarize(const std::vector<SandboxRecord> &recs,
+                                                     const SandboxListFilter &filter) const {
+	std::vector<SandboxSummary> items;
+	items.reserve(recs.size());
+	for (auto &r : recs) {
+		if (!filter.id_prefix.empty() && r.id.rfind(filter.id_prefix, 0) != 0) {
+			continue;
+		}
+		if (!filter.key_prefix.empty() && r.key.rfind(filter.key_prefix, 0) != 0) {
+			continue;
+		}
+		if (!filter.policy_class.empty() && r.policy_class != filter.policy_class) {
+			continue;
+		}
+		SandboxSummary s;
+		s.id = r.id;
+		s.key = r.key;
+		s.policy_class = r.policy_class;
+		s.version = r.version;
+		s.owner = daemon_.name;
+		s.created_at_ms = r.created_at_ms;
+		s.updated_at_ms = r.updated_at_ms;
+		s.expires_at_ms = r.expires_at_ms;
+		s.state = InstanceState(r.id);
+		s.last_used_at_ms = LastUsedWallMs(r.id);
+		if (!filter.state.empty() && s.state != filter.state) {
+			continue;
+		}
+		items.push_back(std::move(s));
+	}
+	std::sort(items.begin(), items.end(), [](const SandboxSummary &a, const SandboxSummary &b) { return a.id < b.id; });
+	return items;
 }
 
 size_t SandboxRuntime::Size() const {

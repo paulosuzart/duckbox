@@ -1,4 +1,5 @@
 #include "duckbox/daemon_config.hpp"
+#include "duckbox/policy.hpp"
 #include "duckbox/secrets.hpp"
 #include "duckbox/yaml.hpp"
 
@@ -180,9 +181,26 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 		}
 	}
 	if (auto *lim = root.Get("limits")) {
-		YamlRejectUnknownKeys(*lim, {"handle_ttl_seconds", "idle_evict_ms", "max_sandboxes", "init_sql_timeout_ms"});
+		YamlRejectUnknownKeys(*lim, {"handle_ttl_seconds", "idle_evict_ms", "idle_timeout", "max_idle_timeout",
+		                             "max_sandboxes", "init_sql_timeout_ms"});
 		d.handle_ttl_seconds = lim->GetInt("handle_ttl_seconds", d.handle_ttl_seconds);
 		d.idle_evict_ms = lim->GetInt("idle_evict_ms", d.idle_evict_ms);
+		auto idle_raw = lim->GetString("idle_timeout");
+		if (!idle_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(idle_raw, &ms)) {
+				throw PolicyError("limits.idle_timeout: expected duration like 30s, 5m, 1h");
+			}
+			d.idle_evict_ms = ms;
+		}
+		auto max_idle_raw = lim->GetString("max_idle_timeout");
+		if (!max_idle_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(max_idle_raw, &ms)) {
+				throw PolicyError("limits.max_idle_timeout: expected duration like 30s, 5m, 1h");
+			}
+			d.max_idle_evict_ms = ms;
+		}
 		d.max_sandboxes = static_cast<size_t>(lim->GetInt("max_sandboxes", static_cast<int64_t>(d.max_sandboxes)));
 		d.init_sql_timeout_ms = lim->GetInt("init_sql_timeout_ms", d.init_sql_timeout_ms);
 	}

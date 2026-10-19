@@ -9,6 +9,8 @@ auth:
 limits:
   handle_ttl_seconds: 300
   idle_evict_ms: 300000
+  idle_timeout: 5m
+  max_idle_timeout: 1h
   max_sandboxes: 600
   init_sql_timeout_ms: 5000
 handle_secret: duckbox-dev-secret

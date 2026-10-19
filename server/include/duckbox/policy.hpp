@@ -61,6 +61,17 @@ struct HandleSettings {
 	std::string stale_version_grace_raw; // original YAML, for validation errors
 };
 
+// Optional definition lifetime. idle_timeout passivates the instance; ttl /
+// expires_at tombstone the definition. Missing idle_timeout uses the daemon default.
+struct LifecycleSettings {
+	int64_t idle_timeout_ms = -1; // -1 = daemon default; 0 = never idle-passivate
+	std::string idle_timeout_raw;
+	int64_t ttl_ms = 0; // 0 = none
+	std::string ttl_raw;
+	int64_t expires_at_ms = 0; // 0 = none; absolute unix ms
+	std::string expires_at_raw;
+};
+
 // How a sandbox key string is split into bind variables (tenant_id, user, …).
 struct KeySpec {
 	std::vector<std::string> patterns;
@@ -111,6 +122,7 @@ struct SandboxSpec {
 	std::string metrics_class; // YAML alias of policy_class
 	std::vector<std::string> attachments;
 	HandleSettings handles;
+	LifecycleSettings lifecycle;
 
 	// Bounded Prometheus `policy` label. Never the sandbox id.
 	const std::string &PolicyClass() const {
@@ -137,5 +149,9 @@ std::string ContentHash(const SandboxSpec &spec); // alias of FingerprintSpec
 bool ValidSandboxId(const std::string &id);       // [a-z0-9][a-z0-9_-]{0,63}
 // 0s, 30s, 5m, 1h, 500ms; bare integer is seconds. Returns false if unparseable.
 bool ParseDurationMs(const std::string &raw, int64_t *out_ms);
+// Unix seconds, unix ms, or RFC3339 (`2026-10-19T12:00:00Z`). Returns false if unparseable.
+bool ParseExpiresAtMs(const std::string &raw, int64_t *out_ms);
+// Earlier of created+ttl and absolute expires_at; 0 if neither is set.
+int64_t ComputeExpiresAtMs(int64_t created_at_ms, const SandboxSpec &spec);
 
 } // namespace duckbox

@@ -17,7 +17,9 @@ void Usage() {
 	    << "\n"
 	    << "Usage:\n"
 	    << "  duckbox serve --daemon FILE [--listen HOST:PORT] [--metrics HOST:PORT] [--debug-http HOST:PORT]\n"
-	    << "  duckbox sandbox create|get|update|delete|list --url grpc://HOST:PORT [--spec FILE] [--id ID] [--key KEY]\n"
+	    << "  duckbox sandbox create|get|update|delete|list|expire --url grpc://HOST:PORT [--spec FILE] [--id ID] [--key KEY]\n"
+	    << "      list filters: [--id-prefix P] [--key-prefix P] [--policy-class C] [--state warm|passive|defined]\n"
+	    << "                    [--limit N] [--offset N]\n"
 	    << "  duckbox run --daemon FILE --spec FILE --key KEY --sql SQL [--init-sql SQL]\n"
 	    << "  duckbox validate --spec FILE [--daemon FILE]\n"
 	    << "\n"
@@ -81,13 +83,26 @@ int main(int argc, char **argv) {
 				Usage();
 				return 1;
 			}
-			auto op = std::string(argv[2]);
-			auto url = Arg(argc, argv, "--url", "grpc://127.0.0.1:4747");
-			auto spec = Arg(argc, argv, "--spec");
-			auto id = Arg(argc, argv, "--id");
-			auto key = Arg(argc, argv, "--key");
-			auto caller = Arg(argc, argv, "--caller", "local");
-			return duckbox::RunSandboxCli(op, url, spec, id, key, caller);
+			duckbox::SandboxCliRequest req;
+			req.op = argv[2];
+			req.url = Arg(argc, argv, "--url", "grpc://127.0.0.1:4747");
+			req.spec_path = Arg(argc, argv, "--spec");
+			req.id = Arg(argc, argv, "--id");
+			req.key = Arg(argc, argv, "--key");
+			req.caller = Arg(argc, argv, "--caller", "local");
+			req.id_prefix = Arg(argc, argv, "--id-prefix");
+			req.key_prefix = Arg(argc, argv, "--key-prefix");
+			req.policy_class = Arg(argc, argv, "--policy-class");
+			req.state = Arg(argc, argv, "--state");
+			auto limit = Arg(argc, argv, "--limit");
+			auto offset = Arg(argc, argv, "--offset");
+			if (!limit.empty()) {
+				req.limit = std::stoll(limit);
+			}
+			if (!offset.empty()) {
+				req.offset = std::stoll(offset);
+			}
+			return duckbox::RunSandboxCli(req);
 		}
 		if (cmd == "run") {
 			auto daemon_path = Arg(argc, argv, "--daemon");

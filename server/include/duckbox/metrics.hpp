@@ -38,6 +38,7 @@ public:
 	virtual void ObserveInitSql(double seconds) = 0;
 	virtual void IncColdStart() = 0;
 	virtual void IncPassivation(const char *reason) = 0;
+	virtual void IncExpiration(const char *reason) = 0; // ttl | expires_at | expire
 	virtual void SetResident(size_t warm, size_t passive) = 0;
 	virtual void ObservePolicyValidation(double seconds, const char *result) = 0;
 	virtual void IncValidationCache(const char *result) = 0;
@@ -69,6 +70,7 @@ public:
 	void ObserveInitSql(double seconds) override;
 	void IncColdStart() override;
 	void IncPassivation(const char *reason) override;
+	void IncExpiration(const char *reason) override;
 	void SetResident(size_t warm, size_t passive) override;
 	void ObservePolicyValidation(double seconds, const char *result) override;
 	void IncValidationCache(const char *result) override;
@@ -131,6 +133,8 @@ public:
 	void IncColdStart() override {
 	}
 	void IncPassivation(const char *) override {
+	}
+	void IncExpiration(const char *) override {
 	}
 	void SetResident(size_t, size_t) override {
 	}

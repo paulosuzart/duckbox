@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -75,7 +76,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 	}
 	YamlRejectUnknownKeys(root, {"id", "key", "name", "policy_class", "metrics_class", "auth", "resources", "lake",
 	                             "tables", "functions", "deny_table_functions", "require_prepared_statements",
-	                             "init_sql", "bootstrap_sql_inline", "handles", "attachments", "metrics"});
+	                             "init_sql", "bootstrap_sql_inline", "handles", "attachments", "metrics", "lifecycle"});
 	SandboxSpec p;
 	p.source_path = path;
 	p.yaml_body = body;
@@ -192,6 +193,36 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 			}
 		}
 	}
+	if (auto *life = root.Get("lifecycle")) {
+		YamlRejectUnknownKeys(*life, {"idle_timeout", "ttl", "expires_at"});
+		p.lifecycle.idle_timeout_raw = life->GetString("idle_timeout");
+		if (!p.lifecycle.idle_timeout_raw.empty()) {
+			int64_t ms = 0;
+			if (ParseDurationMs(p.lifecycle.idle_timeout_raw, &ms)) {
+				p.lifecycle.idle_timeout_ms = ms;
+			} else {
+				p.lifecycle.idle_timeout_ms = -2; // validator: bad duration
+			}
+		}
+		p.lifecycle.ttl_raw = life->GetString("ttl");
+		if (!p.lifecycle.ttl_raw.empty()) {
+			int64_t ms = 0;
+			if (ParseDurationMs(p.lifecycle.ttl_raw, &ms)) {
+				p.lifecycle.ttl_ms = ms;
+			} else {
+				p.lifecycle.ttl_ms = -1;
+			}
+		}
+		p.lifecycle.expires_at_raw = life->GetString("expires_at");
+		if (!p.lifecycle.expires_at_raw.empty()) {
+			int64_t ms = 0;
+			if (ParseExpiresAtMs(p.lifecycle.expires_at_raw, &ms)) {
+				p.lifecycle.expires_at_ms = ms;
+			} else {
+				p.lifecycle.expires_at_ms = -1;
+			}
+		}
+	}
 	p.version = ContentHash(p);
 	return p;
 }
@@ -275,6 +306,8 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
 	os << spec.resources.memory_limit << '|' << spec.resources.threads << '|' << spec.resources.query_timeout_ms << '|'
 	   << spec.resources.max_result_rows << '\n';
 	os << "grace:" << spec.handles.stale_version_grace_ms << '\n';
+	os << "life:" << spec.lifecycle.idle_timeout_ms << '|' << spec.lifecycle.ttl_ms << '|'
+	   << spec.lifecycle.expires_at_ms << '\n';
 	return Sha256Hex(os.str());
 }
 
@@ -334,6 +367,83 @@ bool ParseDurationMs(const std::string &raw, int64_t *out_ms) {
 	}
 	*out_ms = n * mul;
 	return true;
+}
+
+bool ParseExpiresAtMs(const std::string &raw, int64_t *out_ms) {
+	if (!out_ms) {
+		return false;
+	}
+	size_t a = 0;
+	while (a < raw.size() && std::isspace(static_cast<unsigned char>(raw[a]))) {
+		a++;
+	}
+	size_t b = raw.size();
+	while (b > a && std::isspace(static_cast<unsigned char>(raw[b - 1]))) {
+		b--;
+	}
+	if (a >= b) {
+		return false;
+	}
+	std::string s = raw.substr(a, b - a);
+	bool digits = !s.empty();
+	for (char c : s) {
+		if (!std::isdigit(static_cast<unsigned char>(c))) {
+			digits = false;
+			break;
+		}
+	}
+	if (digits) {
+		try {
+			int64_t n = std::stoll(s);
+			if (n <= 0) {
+				return false;
+			}
+			*out_ms = n >= 1000000000000LL ? n : n * 1000; // 13-digit ms vs unix seconds
+			return true;
+		} catch (...) {
+			return false;
+		}
+	}
+	if (!s.empty() && s.back() == 'Z') {
+		s.pop_back();
+	}
+	auto plus = s.find('+');
+	if (plus == std::string::npos) {
+		plus = s.rfind('-');
+		if (plus != std::string::npos && plus <= 9) {
+			plus = std::string::npos;
+		}
+	}
+	if (plus != std::string::npos) {
+		s = s.substr(0, plus);
+	}
+	std::tm tm{};
+	const char *parsed = strptime(s.c_str(), "%Y-%m-%dT%H:%M:%S", &tm);
+	if (!parsed) {
+		parsed = strptime(s.c_str(), "%Y-%m-%d", &tm);
+	}
+	if (!parsed) {
+		return false;
+	}
+	tm.tm_isdst = 0;
+	time_t utc = timegm(&tm);
+	if (utc == static_cast<time_t>(-1)) {
+		return false;
+	}
+	*out_ms = static_cast<int64_t>(utc) * 1000;
+	return true;
+}
+
+int64_t ComputeExpiresAtMs(int64_t created_at_ms, const SandboxSpec &spec) {
+	int64_t abs = spec.lifecycle.expires_at_ms > 0 ? spec.lifecycle.expires_at_ms : 0;
+	int64_t from_ttl = 0;
+	if (spec.lifecycle.ttl_ms > 0 && created_at_ms > 0) {
+		from_ttl = created_at_ms + spec.lifecycle.ttl_ms;
+	}
+	if (abs > 0 && from_ttl > 0) {
+		return abs < from_ttl ? abs : from_ttl;
+	}
+	return abs > 0 ? abs : from_ttl;
 }
 
 std::string ContentHash(const SandboxSpec &spec) {

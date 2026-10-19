@@ -121,6 +121,9 @@ const char *Help(const std::string &name) {
 	if (name == "duckbox_sandbox_passivations_total") {
 		return "Sandboxes that freed DuckDB.";
 	}
+	if (name == "duckbox_sandbox_expirations_total") {
+		return "Sandbox expirations (ttl, expires_at, ExpireSandbox).";
+	}
 	if (name == "duckbox_policy_validation_seconds") {
 		return "Static or lake spec validation time.";
 	}
@@ -362,6 +365,12 @@ void MetricsRegistry::IncPassivation(const char *reason) {
 	std::string labels = NodeLabels(std::string("reason=\"") + EscapeLabel(reason ? reason : "idle") + "\"");
 	std::lock_guard<std::mutex> hold(mu_);
 	IncLocked("duckbox_sandbox_passivations_total", labels);
+}
+
+void MetricsRegistry::IncExpiration(const char *reason) {
+	std::string labels = NodeLabels(std::string("reason=\"") + EscapeLabel(reason ? reason : "ttl") + "\"");
+	std::lock_guard<std::mutex> hold(mu_);
+	IncLocked("duckbox_sandbox_expirations_total", labels);
 }
 
 void MetricsRegistry::SetResident(size_t warm, size_t passive) {

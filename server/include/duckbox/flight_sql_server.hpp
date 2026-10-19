@@ -3,7 +3,7 @@
 // Arrow Flight SQL is the v1 interface. The daemon is the control plane
 // (named sandbox registry, routing, leases). Queries send sandbox id + SQL.
 // CRUD is Flight DoAction (CreateSandbox/GetSandbox/UpdateSandbox/DeleteSandbox/
-// ListSandboxes). FlightSqlServerBase::DoAction is final, so a thin
+// ListSandboxes/ExpireSandbox). FlightSqlServerBase::DoAction is final, so a thin
 // FlightServerBase wrapper intercepts those actions.
 
 #include "duckbox/daemon_config.hpp"
@@ -77,7 +77,7 @@ public:
 	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> DoGetTableTypes(
 	    const arrow::flight::ServerCallContext &context) override;
 
-	// CreateSandbox / Get / Update / Delete / List. Caller must match auth.callers.
+	// CreateSandbox / Get / Update / Delete / List / Expire. Caller must match auth.callers.
 	arrow::Status HandleSandboxAction(const arrow::flight::ServerCallContext &context, const arrow::flight::Action &action,
 	                                  std::unique_ptr<arrow::flight::ResultStream> *result);
 
@@ -147,8 +147,22 @@ private:
 int RunServer(const ServerOptions &opt); // ValidateDaemonOrThrow then listen; returns process exit code
 int RunLocalQuery(const DaemonConfig &daemon, const std::string &spec_path, const std::string &key,
                   const std::string &sql, const std::string &init_sql);
-int RunSandboxCli(const std::string &op, const std::string &url, const std::string &spec_path, const std::string &id,
-                  const std::string &key, const std::string &caller);
+struct SandboxCliRequest {
+	std::string op;
+	std::string url;
+	std::string spec_path;
+	std::string id;
+	std::string key;
+	std::string caller;
+	std::string id_prefix;
+	std::string key_prefix;
+	std::string policy_class;
+	std::string state;
+	int64_t limit = 0;
+	int64_t offset = 0;
+};
+
+int RunSandboxCli(const SandboxCliRequest &req);
 void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
                     std::shared_ptr<SandboxRuntime> runtime);
 

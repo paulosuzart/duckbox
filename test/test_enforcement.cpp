@@ -154,6 +154,8 @@ int main() {
 		Expect(loaded_daemon.metrics_listen.find("9477") != std::string::npos, "daemon yaml metrics listen");
 		Expect(loaded_daemon.metrics_policy_classes.count("analyst") == 1, "daemon yaml policy class allowlist");
 		Expect(loaded_daemon.lease.bucket.empty(), "memory daemon has no lease/lake credentials");
+		Expect(loaded_daemon.idle_evict_ms == 5 * 60 * 1000, "daemon idle_timeout duration");
+		Expect(loaded_daemon.max_idle_evict_ms == 3600 * 1000, "daemon max_idle_timeout duration");
 		auto bad_path = "/tmp/duckbox-bad-daemon-lake.yaml";
 		{
 			std::ofstream o(bad_path);
@@ -263,6 +265,32 @@ int main() {
 			s.replace(pos, std::string("columns: [tenant_id, id]").size(), "columns: id");
 			ExpectThrowContains([&] { LoadSpecString(s, "<list>"); }, "expected list", "columns scalar is not a list");
 		}
+		{
+			std::string s = mini;
+			auto pos = s.find("threads: 2");
+			s.replace(pos, std::string("threads: 2").size(), "threads: 9223372036854775808");
+			ExpectThrowContains([&] { LoadSpecString(s, "<i64>"); }, "int64 range",
+			                    "integer overflow is rejected");
+		}
+		ExpectThrowContains([&] { LoadSpecString(std::string(mini) + "lifecycle:\n  nope: 1s\n", "<life>"); },
+		                    "unknown key", "unknown lifecycle key is rejected");
+		{
+			std::string s = mini;
+			s += "lifecycle:\n  idle_timeout: banana\n";
+			auto bad = LoadSpecString(s, "<idle>");
+			auto iss = validator.ValidateStatic(bad);
+			bool found = false;
+			for (auto &i : iss) {
+				if (i.path == "lifecycle.idle_timeout" && i.message.find("duration") != std::string::npos) {
+					found = true;
+				}
+			}
+			Expect(found, "bad idle_timeout is a field-path error");
+		}
+		int64_t exp_ms = 0;
+		Expect(ParseExpiresAtMs("1700000000", &exp_ms) && exp_ms == 1700000000000LL, "unix seconds expires_at");
+		Expect(ParseExpiresAtMs("2026-01-02T03:04:05Z", &exp_ms) && exp_ms > 0, "RFC3339 expires_at");
+		Expect(!ParseExpiresAtMs("not-a-time", &exp_ms), "unparseable expires_at");
 	}
 
 	auto ducklake_spec =
@@ -735,6 +763,132 @@ int main() {
 	}
 
 	{
+		MemorySandboxRegistry defs;
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "life-a";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		rec.spec.lifecycle.idle_timeout_ms = 20;
+		rec.spec.lifecycle.idle_timeout_raw = "20ms";
+		rec.spec.yaml_body += "\nlifecycle:\n  idle_timeout: 20ms\n";
+		rec = defs.Create(rec);
+		Expect(rec.created_at_ms > 0, "create sets created_at");
+		Expect(rec.expires_at_ms == 0, "no ttl means no expires_at");
+		auto created_at = rec.created_at_ms;
+		auto rec2 = rec;
+		rec2.spec.resources.max_result_rows = 50;
+		rec2.spec.yaml_body += "\n# bump-life\n";
+		rec2 = defs.Update(rec2);
+		Expect(rec2.created_at_ms == created_at, "update preserves created_at");
+		Expect(rec2.handle_gen == rec.handle_gen, "update keeps handle_gen");
+
+		DaemonConfig capped = daemon;
+		capped.idle_evict_ms = 5000;
+		capped.max_idle_evict_ms = 30;
+		Expect(EffectiveIdleTimeoutMs(capped, rec.spec) == 20, "spec idle under max is kept");
+		rec.spec.lifecycle.idle_timeout_ms = 5000;
+		Expect(EffectiveIdleTimeoutMs(capped, rec.spec) == 30, "daemon max idle caps spec");
+		SandboxSpec missing_life;
+		missing_life.lifecycle.idle_timeout_ms = -1;
+		Expect(EffectiveIdleTimeoutMs(capped, missing_life) == 30, "daemon default idle is also capped");
+
+		auto leases = std::make_shared<SingleNodeLeaseManager>();
+		auto defs_rt = std::make_shared<MemorySandboxRegistry>();
+		SandboxRuntime rt(daemon, leases, defs_rt);
+		auto wr = RecordFromSpec(loaded, spec_dir);
+		wr.id = "warm-a";
+		wr.key = key_a.raw;
+		wr.spec.id = wr.id;
+		wr.spec.bound_key = wr.key;
+		wr.spec.lifecycle.idle_timeout_ms = 25;
+		wr = defs_rt->Create(wr);
+		auto box = rt.Get(wr);
+		Expect(rt.InstanceState(wr.id) == "warm", "warm instance after Get");
+		Expect(rt.LastUsedWallMs(wr.id) > 0, "last_used_at set on warmup");
+		box.reset();
+		std::this_thread::sleep_for(std::chrono::milliseconds(40));
+		rt.Sweep();
+		Expect(rt.WarmCount() == 0, "idle_timeout passivates the instance");
+		Expect(rt.InstanceState(wr.id) == "passive", "passivated instance stays in-process");
+		Expect(defs_rt->List().size() == 1, "idle_timeout keeps the definition");
+
+		auto defined = RecordFromSpec(loaded, spec_dir);
+		defined.id = "defined-b";
+		defined.key = "tenant_22:user_kim";
+		defined.spec.id = defined.id;
+		defined.spec.bound_key = defined.key;
+		defined.spec.policy_class = "analyst";
+		defined = defs_rt->Create(defined);
+		Expect(rt.InstanceState(defined.id) == "defined", "never-warmed is defined");
+
+		SandboxListFilter filt;
+		filt.id_prefix = "warm";
+		auto listed = rt.Summarize(defs_rt->List(), filt);
+		Expect(listed.size() == 1 && listed[0].id == "warm-a", "list id_prefix filter");
+		filt = {};
+		filt.key_prefix = "tenant_22";
+		listed = rt.Summarize(defs_rt->List(), filt);
+		Expect(listed.size() == 1 && listed[0].id == "defined-b", "list key_prefix filter");
+		filt = {};
+		filt.state = "defined";
+		listed = rt.Summarize(defs_rt->List(), filt);
+		Expect(listed.size() == 1 && listed[0].id == "defined-b", "list state=defined");
+		filt = {};
+		filt.state = "passive";
+		listed = rt.Summarize(defs_rt->List(), filt);
+		Expect(listed.size() == 1 && listed[0].id == "warm-a", "list state=passive after idle");
+		filt = {};
+		listed = rt.Summarize(defs_rt->List(), filt);
+		Expect(listed.size() == 2, "list all authorized (test has no auth filter)");
+		Expect(listed[0].id == "defined-b" && listed[1].id == "warm-a", "list is sorted by id");
+
+		HmacHandleSigner signer(daemon.handle_secret, 300);
+		StatementHandle h;
+		h.rewritten_sql = "SELECT 1";
+		h.tenant_raw = wr.key;
+		h.sandbox_id = wr.id;
+		h.version = wr.version;
+		h.handle_gen = wr.handle_gen;
+		h.content_hash = wr.content_hash;
+		auto tok = signer.Sign(h);
+		auto verified = signer.Verify(tok);
+		Expect(verified.handle_gen == wr.handle_gen, "signed handle carries handle_gen");
+		auto expired = defs_rt->Expire(wr.id);
+		Expect(expired.handle_gen == wr.handle_gen + 1, "ExpireSandbox bumps handle_gen");
+		Expect(expired.version == wr.version, "ExpireSandbox keeps spec version");
+		rt.PassivateId(wr.id, "expire");
+		Expect(rt.InstanceState(wr.id) == "defined", "expire removes the instance");
+		Expect(defs_rt->Get(wr.id).id == wr.id, "expire keeps the definition");
+		auto after = signer.Verify(tok);
+		Expect(after.handle_gen != defs_rt->Get(wr.id).handle_gen, "expired handles do not match current handle_gen");
+
+		auto ttl_rec = RecordFromSpec(loaded, spec_dir);
+		ttl_rec.id = "ttl-c";
+		ttl_rec.key = key_a.raw;
+		ttl_rec.spec.id = ttl_rec.id;
+		ttl_rec.spec.bound_key = ttl_rec.key;
+		ttl_rec.spec.lifecycle.ttl_ms = 1;
+		ttl_rec.spec.lifecycle.ttl_raw = "1ms";
+		ttl_rec = defs_rt->Create(ttl_rec);
+		Expect(ttl_rec.expires_at_ms == ttl_rec.created_at_ms + 1, "ttl sets expires_at from created_at");
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		Expect(IsExpired(ttl_rec), "ttl elapsed is expired");
+		defs_rt->Delete(ttl_rec.id);
+		ExpectThrowContains([&] { defs_rt->Get("ttl-c"); }, "not found", "ttl tombstone hides get");
+
+		auto abs_rec = RecordFromSpec(loaded, spec_dir);
+		abs_rec.id = "abs-d";
+		abs_rec.key = key_a.raw;
+		abs_rec.spec.id = abs_rec.id;
+		abs_rec.spec.bound_key = abs_rec.key;
+		abs_rec.spec.lifecycle.expires_at_ms = WallNowMs() - 1;
+		abs_rec.spec.lifecycle.expires_at_raw = "1";
+		abs_rec = defs_rt->Create(abs_rec);
+		Expect(IsExpired(abs_rec), "absolute expires_at in the past is expired");
+	}
+
+	{
 		std::map<std::string, std::pair<std::string, std::string>> objects; // key -> {body, etag}
 		httplib::Server svr;
 		auto unquote = [](std::string e) {
@@ -842,6 +996,8 @@ int main() {
 		reg.IncRejection("analyst", "table_function");
 		reg.IncLimit("analyst", "timeout");
 		reg.IncPassivation("idle");
+		reg.IncExpiration("ttl");
+		reg.IncExpiration("expire");
 		reg.IncRoute("local");
 		reg.IncLeaseRenewal("ok");
 		reg.SetLeaseRenewalTimestamp(1700000000);
@@ -858,6 +1014,8 @@ int main() {
 		Expect(text.find("node=\"node-a\"") != std::string::npos, "node label");
 		Expect(text.find("outcome=\"ok\"") != std::string::npos, "ok outcome");
 		Expect(text.find("cold=\"false\"") != std::string::npos, "cold label");
+		Expect(text.find("duckbox_sandbox_expirations_total{") != std::string::npos, "expiration counter");
+		Expect(text.find("reason=\"ttl\"") != std::string::npos, "ttl expiration reason");
 		Expect(text.find("duckbox_query_rejections_total{") != std::string::npos, "rejections counter");
 		Expect(text.find("reason=\"table_function\"") != std::string::npos, "rejection reason");
 		Expect(text.find("duckbox_queries_active{node=\"node-a\"}") != std::string::npos, "active gauge");

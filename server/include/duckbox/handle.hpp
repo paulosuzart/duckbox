@@ -17,6 +17,7 @@ struct StatementHandle {
 	std::string tenant_raw;
 	std::string sandbox_id;
 	int version = 0;
+	int handle_gen = 0; // bumped by ExpireSandbox; independent of spec version
 	std::string content_hash;
 	int64_t expires_at_unix = 0;
 	int user_param_count = 0;

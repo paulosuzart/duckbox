@@ -97,7 +97,7 @@ Daemon startup validates **only** daemon config (listen, limits, optional lease 
 
 ### Sandbox lifecycle
 
-Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap.
+Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap. Spec `lifecycle.idle_timeout` overrides the daemon default (capped by `limits.max_idle_timeout`). Spec `lifecycle.ttl` / `expires_at` tombstone the named definition when due.
 
 **initSQL**: SET of permitted names (empty allowlist is deny-all), `CREATE [OR REPLACE] TEMP VIEW|MACRO|TABLE`, `USE`, `LOAD` of spec-listed extensions (exact name). Reject `ATTACH`/`DETACH`, `COPY`/`EXPORT`, `INSTALL`, security settings. VIEW/MACRO bodies are rewritten with the tenant key and AST-checked. Objects it creates are visible to user SQL **only if the spec whitelists them**. After lake attach, `enable_external_access` is false (allowed_directories/paths cover the lake only).
 
@@ -114,7 +114,9 @@ v1 wire protocol. JDBC and ADBC work. Headers:
 - `x-duckbox-caller` — trusted caller identity; used only when `auth.allow_insecure_dev` is set and no bearer/JWT is configured
 - `Authorization: Bearer` — static `auth.bearer_secrets` or HS256 JWT (`auth.jwt_secret`). Unsigned tokens are rejected
 
-CRUD actions: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes` (body is spec YAML or id).
+CRUD actions: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes`, `ExpireSandbox`. Create/Update body is spec YAML; ListSandboxes YAML body filters `id_prefix`, `key_prefix`, `policy_class`, `state` (`warm`|`passive`|`defined`) plus `limit`/`offset`. Each list item is a summary (`id`, `key`, `version`, `policy_class`, `state`, `owner`, `created_at`, `updated_at`, `last_used_at`, `expires_at`) — not the full spec. `ExpireSandbox` passivates the instance and invalidates prepared handles; the definition stays.
+
+Optional spec `lifecycle.idle_timeout` passivates an idle instance (daemon `limits.idle_timeout` / `idle_evict_ms` is the default; `limits.max_idle_timeout` caps it). `lifecycle.ttl` / `lifecycle.expires_at` tombstone the definition.
 
 `GetCatalogs` / `GetDbSchemas` / `GetTables` / `GetSqlInfo` are answered **by the sandbox** and filtered to spec-whitelisted tables/columns.
 
