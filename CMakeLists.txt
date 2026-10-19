@@ -16,7 +16,7 @@ endif()
 if(NOT EXISTS "${DUCKBOX_DEPS}/duckdb/include/duckdb/parser/parser.hpp" OR
    NOT EXISTS "${DUCKBOX_DEPS}/duckdb/lib/libduckdb_static.a" OR
    NOT EXISTS "${DUCKBOX_DEPS}/httplib/httplib.h" OR
-   NOT EXISTS "${DUCKBOX_DEPS}/yaml-cpp-0.8.0/CMakeLists.txt" OR
+   NOT EXISTS "${DUCKBOX_DEPS}/yaml-cpp/CMakeLists.txt" OR
    NOT EXISTS "${DUCKBOX_DEPS}/nlohmann/nlohmann/json.hpp" OR
    NOT EXISTS "${DUCKBOX_DEPS}/jwt-cpp/include/jwt-cpp/jwt.h" OR
    NOT EXISTS "${DUCKBOX_DEPS}/cli11/CLI/CLI.hpp" OR
@@ -30,20 +30,21 @@ if(NOT EXISTS "${DUCKBOX_DEPS}/duckdb/include/duckdb/parser/parser.hpp" OR
   endif()
 endif()
 
-# yaml-cpp: specs and daemon config are security-relevant; never use a homemade parser.
+# yaml-cpp 0.9.0: cmake_minimum_required 3.5...3.30 so CMake 4 accepts it.
+# 0.8.0 declared 3.4 and fails on Homebrew CMake 4 (no 0.8.1; 0.9.0 is the fix).
 set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
 set(YAML_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
-if(EXISTS "${DUCKBOX_DEPS}/yaml-cpp-0.8.0/CMakeLists.txt")
-  add_subdirectory("${DUCKBOX_DEPS}/yaml-cpp-0.8.0" "${CMAKE_BINARY_DIR}/yaml-cpp" EXCLUDE_FROM_ALL)
+if(EXISTS "${DUCKBOX_DEPS}/yaml-cpp/CMakeLists.txt")
+  add_subdirectory("${DUCKBOX_DEPS}/yaml-cpp" "${CMAKE_BINARY_DIR}/yaml-cpp" EXCLUDE_FROM_ALL)
 else()
   include(FetchContent)
   FetchContent_Declare(
     yaml-cpp
-    URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/0.8.0.tar.gz
-    URL_HASH SHA256=fbe74bbdcee21d656715688706da3c8becfd946d92cd44705cc6098bb23b3a16)
+    URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.9.0.tar.gz
+    URL_HASH SHA256=25cb043240f828a8c51beb830569634bc7ac603978e0f69d6b63558dadefd49a)
   FetchContent_MakeAvailable(yaml-cpp)
 endif()
 
@@ -266,8 +267,11 @@ set(_duckdb_libs
   duckdb_skiplistlib
   duckdb_yyjson
   duckdb_mbedtls
-  duckdb_fsst
-  duckdb_jemalloc)
+  duckdb_fsst)
+# Official macOS static-libs zip does not include libduckdb_jemalloc.a.
+if(EXISTS "${_duckdb_libdir}/libduckdb_jemalloc.a")
+  list(APPEND _duckdb_libs duckdb_jemalloc)
+endif()
 
 set(_duckdb_link_files)
 foreach(_lib ${_duckdb_libs})

@@ -48,12 +48,14 @@ if [[ -f /tmp/duckdb-dl/static-libs-linux-amd64.zip && "$lib_zip" == "static-lib
   cp /tmp/duckdb-dl/static-libs-linux-amd64.zip "$lib_zip_path"
 fi
 
-YAML_CPP_VERSION="${YAML_CPP_VERSION:-0.8.0}"
+# 0.9.0 is cmake_minimum_required 3.5...3.30 (CMake 4 rejects 0.8.0's 3.4).
+YAML_CPP_VERSION="${YAML_CPP_VERSION:-0.9.0}"
+YAML_CPP_TAG="${YAML_CPP_TAG:-yaml-cpp-${YAML_CPP_VERSION}}"
 NLOHMANN_JSON_VERSION="${NLOHMANN_JSON_VERSION:-v3.11.3}"
 JWT_CPP_VERSION="${JWT_CPP_VERSION:-v0.7.0}"
 CLI11_VERSION="${CLI11_VERSION:-v2.4.2}"
 CPPCODEC_VERSION="${CPPCODEC_VERSION:-v0.2}"
-yaml_tar="$DEPS/cache/yaml-cpp-${YAML_CPP_VERSION}.tar.gz"
+yaml_tar="$DEPS/cache/yaml-cpp-${YAML_CPP_TAG}.tar.gz"
 json_hdr="$DEPS/cache/nlohmann-json-${NLOHMANN_JSON_VERSION}.hpp"
 jwt_tar="$DEPS/cache/jwt-cpp-${JWT_CPP_VERSION}.tar.gz"
 cli11_hdr="$DEPS/cache/CLI11-${CLI11_VERSION}.hpp"
@@ -61,7 +63,7 @@ codec_tar="$DEPS/cache/cppcodec-${CPPCODEC_VERSION}.tar.gz"
 download "https://github.com/duckdb/duckdb/archive/refs/tags/${DUCKDB_VERSION}.tar.gz" "$src_tar"
 download "$base/$lib_zip" "$lib_zip_path"
 download "https://raw.githubusercontent.com/yhirose/cpp-httplib/${HTTP_LIB_VERSION}/httplib.h" "$DEPS/httplib/httplib.h"
-download "https://github.com/jbeder/yaml-cpp/archive/refs/tags/${YAML_CPP_VERSION}.tar.gz" "$yaml_tar"
+download "https://github.com/jbeder/yaml-cpp/archive/refs/tags/${YAML_CPP_TAG}.tar.gz" "$yaml_tar"
 download "https://github.com/nlohmann/json/releases/download/${NLOHMANN_JSON_VERSION}/json.hpp" "$json_hdr"
 download "https://github.com/Thalhammer/jwt-cpp/archive/refs/tags/${JWT_CPP_VERSION}.tar.gz" "$jwt_tar"
 download "https://github.com/CLIUtils/CLI11/releases/download/${CLI11_VERSION}/CLI11.hpp" "$cli11_hdr"
@@ -70,9 +72,14 @@ mkdir -p "$DEPS/nlohmann/nlohmann"
 cp -f "$json_hdr" "$DEPS/nlohmann/nlohmann/json.hpp"
 mkdir -p "$DEPS/cli11/CLI"
 cp -f "$cli11_hdr" "$DEPS/cli11/CLI/CLI.hpp"
-if [[ ! -f "$DEPS/yaml-cpp-${YAML_CPP_VERSION}/CMakeLists.txt" ]]; then
-  echo "Extracting yaml-cpp ${YAML_CPP_VERSION}"
-  tar -xzf "$yaml_tar" -C "$DEPS"
+if [[ ! -f "$DEPS/yaml-cpp/CMakeLists.txt" ]]; then
+  echo "Extracting yaml-cpp ${YAML_CPP_TAG}"
+  tmp="$(mktemp -d)"
+  tar -xzf "$yaml_tar" -C "$tmp"
+  src_root="$(find "$tmp" -maxdepth 1 -type d -name 'yaml-cpp-*' | head -1)"
+  rm -rf "$DEPS/yaml-cpp"
+  mv "$src_root" "$DEPS/yaml-cpp"
+  rm -rf "$tmp"
 fi
 if [[ ! -f "$DEPS/jwt-cpp/include/jwt-cpp/jwt.h" ]]; then
   echo "Extracting jwt-cpp ${JWT_CPP_VERSION}"
