@@ -147,6 +147,7 @@ int main() {
 	    {"SELECT * FROM read_csv_auto('x.csv')", "table functions"},
 	    {"SELECT * FROM 's3://duckbox-lake/data/secret.parquet'", "replacement scans"},
 	    {"SELECT * FROM parquet_scan('x.parquet')", "table functions"},
+	    {"SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')", "table functions"},
 	    {"SELECT * FROM duckdb_tables()", "table functions"},
 	    {"COPY deals TO 'out.csv'", "only SELECT"},
 	    {"PRAGMA show_tables", "only SELECT"},

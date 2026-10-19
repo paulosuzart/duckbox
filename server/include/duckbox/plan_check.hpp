@@ -2,6 +2,8 @@
 
 // Independent optimizer-extension plan guard. After DuckDB optimizes, refuse
 // tenant-table scans that lack tenant equality and refuse file-scan functions.
+// Lake-internal scans (ducklake_scan, postgres_scan for the catalog) are allowed;
+// user SQL still cannot name them (deny_table_functions at the AST).
 
 #include "duckbox/policy.hpp"
 #include "duckbox/tenant_key.hpp"

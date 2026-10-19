@@ -7,24 +7,28 @@ namespace duckbox {
 namespace {
 
 const char *kDeniedScans[] = {
-    "read_csv",     "read_csv_auto", "read_parquet", "parquet_scan", "glob",           "read_json",
-    "read_ndjson",  "read_text",     "read_blob",    "read_arrow",   "sqlite_scan",    "postgres_scan",
-    "duckdb_tables","duckdb_schemas","query_table",  "read_csv_auto","read_json_auto", "read_xlsx"};
+    "read_csv",      "read_csv_auto", "read_parquet",  "parquet_scan", "glob",        "read_json",
+    "read_ndjson",   "read_text",     "read_blob",     "read_arrow",   "sqlite_scan", "duckdb_tables",
+    "duckdb_schemas","query_table",   "read_json_auto","read_xlsx"};
+
+bool IsLakeInternalScan(const std::string &lower) {
+	// DuckLake catalog lives in Postgres; data files go through ducklake_scan.
+	// User SQL still cannot name these: deny_table_functions rejects them at the AST.
+	return lower == "seq_scan" || lower == "ducklake_scan" || lower == "postgres_scan" ||
+	       lower.find("ducklake") != std::string::npos;
+}
 
 bool IsDeniedScan(const std::string &fname) {
 	auto lower = ddb::StringUtil::Lower(fname);
+	if (IsLakeInternalScan(lower)) {
+		return false;
+	}
 	for (auto *d : kDeniedScans) {
 		if (lower == d) {
 			return true;
 		}
 	}
 	if (ddb::StringUtil::StartsWith(lower, "read_") || ddb::StringUtil::EndsWith(lower, "_scan")) {
-		if (lower == "seq_scan" || lower == "ducklake_scan") {
-			return false;
-		}
-		if (lower.find("ducklake") != std::string::npos) {
-			return false;
-		}
 		return true;
 	}
 	return false;
