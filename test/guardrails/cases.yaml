@@ -1,6 +1,8 @@
 # Table-driven SQL guardrails. Add a bypass as a new case; no C++ required.
 # expect: allow | deny
-# stage: rewrite | execute | both  (deny defaults to rewrite, allow to execute)
+# stage: rewrite | execute | both | plan | spec | initsql
+#   deny defaults to rewrite, allow to execute
+# scan_fn: CheckLogicalPlan(MakeScan(name)) — no DuckDB parse / rewrite (AST bypass)
 cases:
   - id: insert_denied
     sql: "INSERT INTO deals VALUES (21, 9, 'x', 1, false)"
@@ -118,6 +120,35 @@ cases:
     expect: deny
     reason: denied in user SQL
     stage: plan
+
+  # CheckLogicalPlan on a constructed LogicalGet — no DuckDB parse / rewrite.
+  - id: plan_query_bypasses_ast
+    sql: "SELECT * FROM query('SELECT 1')"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+    scan_fn: query
+
+  - id: plan_query_table_bypasses_ast
+    sql: "SELECT * FROM query_table('SELECT 1')"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+    scan_fn: query_table
+
+  - id: plan_glob_bypasses_ast
+    sql: "SELECT * FROM glob('*')"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+    scan_fn: glob
+
+  - id: plan_read_csv_bypasses_ast
+    sql: "SELECT * FROM read_csv('x.csv')"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+    scan_fn: read_csv
 
   - id: spec_deny_table_functions_false
     sql: "SELECT 1"

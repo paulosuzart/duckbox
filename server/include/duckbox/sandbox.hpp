@@ -34,7 +34,10 @@ struct ColumnSchema {
 	std::string logical_type;
 };
 
-// One warm DuckDB for id@version. Not thread-safe across Execute; SandboxRuntime serializes via Get().
+// One warm DuckDB for id@version. Execute / ExecuteRewritten / ExtractPlan /
+// DescribeRewritten take mu_ for the whole statement so UserStatementGuardState
+// counters on the shared ClientContext cannot interleave (Flight DoGet and
+// Execute on the same instance serialize here).
 class TenantSandbox {
 public:
 	TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key, std::string init_sql, std::string spec_dir,
@@ -98,7 +101,7 @@ private:
 	std::shared_ptr<SecretResolver> secrets_;
 	std::unique_ptr<ddb::DuckDB> db_;
 	std::unique_ptr<ddb::Connection> con_;
-	std::mutex mu_;
+	std::mutex mu_; // held for the whole user statement; see UserStatementScope
 	std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
 	int64_t last_used_wall_ms_ = 0;
 	int warmup_count_ = 0;

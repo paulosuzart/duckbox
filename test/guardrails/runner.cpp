@@ -1,6 +1,7 @@
 #include "check.hpp"
 
 #include "duckbox/init_sql.hpp"
+#include "duckbox/plan_check.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/sandbox.hpp"
@@ -70,7 +71,7 @@ int main() {
 		}
 		YamlRejectUnknownKeys(node, {"id", "sql", "expect", "reason", "stage", "contains", "not_contains", "key",
 		                             "init_sql", "rewrite_contains", "rewrite_not_contains", "extra_functions",
-		                             "deny_table_functions", "spec_yaml"});
+		                             "deny_table_functions", "spec_yaml", "scan_fn"});
 		auto id = node.GetString("id");
 		auto sql = Trim(node.GetString("sql"));
 		auto expect = node.GetString("expect");
@@ -83,7 +84,9 @@ int main() {
 		if (stage.empty()) {
 			stage = expect == "deny" ? "rewrite" : "execute";
 		}
-		if (id.empty() || (sql.empty() && stage != "spec") || (expect != "allow" && expect != "deny")) {
+		auto scan_fn = node.GetString("scan_fn");
+		if (id.empty() || (sql.empty() && stage != "spec" && scan_fn.empty()) ||
+		    (expect != "allow" && expect != "deny")) {
 			g_failed++;
 			std::cerr << "FAIL: case '" << id << "' needs id, sql, expect allow|deny\n";
 			continue;
@@ -187,10 +190,17 @@ int main() {
 
 		if (do_plan) {
 			try {
-				box_for(key_raw, init_sql).ExtractPlan(sql);
+				if (!scan_fn.empty()) {
+					// LogicalGet with no DuckDB parse / rewrite — plan guard only.
+					auto get = duckbox::test::MakeScan(scan_fn, {});
+					CheckLogicalPlan(*get, policy, key);
+				} else {
+					box_for(key_raw, init_sql).ExtractPlan(sql);
+				}
 				if (expect == "deny") {
 					g_failed++;
-					std::cerr << "FAIL: " << id << " expected plan deny of " << sql << "\n";
+					std::cerr << "FAIL: " << id << " expected plan deny of "
+					          << (scan_fn.empty() ? sql : scan_fn) << "\n";
 				} else {
 					g_passed++;
 				}

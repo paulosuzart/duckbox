@@ -5,10 +5,10 @@
 // ClientContext; nested DuckLake catalog I/O (a deeper optimizer invocation
 // on the same context, or a context without the marker) is not run through
 // the user guard. The user plan allowlists seq_scan / ducklake_scan of spec
-// tables with typed tenant filters. postgres_*/duckdb_*/ducklake_* (except
-// ducklake_scan of a spec table) are denied in the user plan unconditionally
-// — origin, not function-name DuckLake allowances. Mandatory filters are
-// typed ConstantFilter / BoundComparison.
+// tables with typed tenant filters. Every other name in
+// IsAlwaysDeniedTableFunction (query, glob, read_*, postgres_*, duckdb_*, …)
+// is denied in the user plan unconditionally — same list as spec validation,
+// not AST-only. Mandatory filters are typed ConstantFilter / BoundComparison.
 
 #include "duckbox/policy.hpp"
 #include "duckbox/tenant_key.hpp"
@@ -48,6 +48,10 @@ bool CatalogIsAttachedLake(const std::string &catalog, const Policy &policy);
 
 // Marks this ClientContext as executing user SQL. Nested optimizer callbacks
 // (DuckLake metadata I/O) see a deeper depth and skip the user plan guard.
+// scopes / optimizer_depth are not atomic: they are only sound because every
+// user-SQL entry holds TenantSandbox::mu_ for the whole statement (Execute,
+// ExecuteRewritten, ExtractPlan, DescribeRewritten). Flight DoGet and Execute
+// on the same instance serialize on that mutex.
 class UserStatementScope {
 public:
 	explicit UserStatementScope(ddb::ClientContext &ctx);

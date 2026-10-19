@@ -252,6 +252,8 @@ bool SandboxSpec::FunctionAllowed(const std::string &name) const {
 }
 
 bool IsAlwaysDeniedTableFunction(const std::string &name) {
+	// Keep in lockstep with CheckGet in plan_check.cpp (user plan uses this
+	// after allowing bound seq_scan / ducklake_scan of spec tables).
 	auto n = Lower(name);
 	if (ddb::StringUtil::StartsWith(n, "postgres_") || ddb::StringUtil::StartsWith(n, "duckdb_") ||
 	    ddb::StringUtil::StartsWith(n, "ducklake_") || ddb::StringUtil::StartsWith(n, "pragma_") ||

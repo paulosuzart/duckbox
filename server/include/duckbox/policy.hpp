@@ -132,8 +132,10 @@ struct SandboxSpec {
 	bool FunctionAllowed(const std::string &name) const;
 };
 
-// Table functions are never a spec `functions` allowlist entry. postgres_*/duckdb_*/
-// ducklake_* and known table-function names are rejected at load and ValidateStatic.
+// Shared denylist for spec `functions` (load + ValidateStatic) and the user-plan
+// guard. postgres_*/duckdb_*/ducklake_*/read_*/ *_scan, query, query_table, glob,
+// and other table-function names. Bound seq_scan / ducklake_scan of a spec table
+// are plan operators, not spec `functions` entries.
 bool IsAlwaysDeniedTableFunction(const std::string &name);
 
 using Policy = SandboxSpec;

@@ -96,6 +96,7 @@ void duckbox::test::RunValidatorTests() {
 		Expect(IsAlwaysDeniedTableFunction("postgres_query") && IsAlwaysDeniedTableFunction("duckdb_tables") &&
 		           IsAlwaysDeniedTableFunction("ducklake_scan") && IsAlwaysDeniedTableFunction("read_csv") &&
 		           IsAlwaysDeniedTableFunction("glob") && IsAlwaysDeniedTableFunction("generate_series") &&
+		           IsAlwaysDeniedTableFunction("query") && IsAlwaysDeniedTableFunction("query_table") &&
 		           !IsAlwaysDeniedTableFunction("count"),
 		       "table-function names are banned from the functions allowlist");
 	}

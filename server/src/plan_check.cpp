@@ -36,20 +36,13 @@ namespace {
 
 const char *kUserStmtState = "duckbox.user_statement";
 
+// Not atomic. TenantSandbox::mu_ is held around every user statement that
+// creates a UserStatementScope, so two user statements cannot increment
+// these on the same ClientContext at once.
 struct UserStatementGuardState : ddb::ClientContextState {
 	int scopes = 0;
 	int optimizer_depth = 0;
 };
-
-// User-plan denylist. DuckLake internals never reach CheckGet: they run without
-// UserStatementScope or at optimizer_depth > 1.
-bool IsUserDeniedTableScan(const std::string &lower) {
-	if (ddb::StringUtil::StartsWith(lower, "postgres_") || ddb::StringUtil::StartsWith(lower, "duckdb_") ||
-	    lower == "pg_clear_cache" || ddb::StringUtil::StartsWith(lower, "pragma_")) {
-		return true;
-	}
-	return ddb::StringUtil::StartsWith(lower, "ducklake_") && lower != "ducklake_scan";
-}
 
 bool ValuesEqual(const ddb::Value &got, const ddb::Value &want) {
 	if (got.IsNull() || want.IsNull()) {
@@ -294,9 +287,6 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 	auto table = get.GetTable();
 	auto tname = BoundTableName(get);
 
-	if (IsUserDeniedTableScan(fname)) {
-		throw PlanRejected(get.function.name + " is denied in user SQL");
-	}
 	auto require_preds = [&](const TablePolicy &spec, const std::string &shown) {
 		for (auto &pred : PredicatesFor(spec, key)) {
 			if (!ScanHasTypedPred(get, pred, inherited)) {
@@ -332,6 +322,12 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 		return;
 	}
 	if (fname != "seq_scan") {
+		// Same denylist as spec `functions` (IsAlwaysDeniedTableFunction): query,
+		// glob, read_*, postgres_*, duckdb_*, ducklake_* (except ducklake_scan of
+		// a spec table above), … — not AST-only.
+		if (IsAlwaysDeniedTableFunction(fname)) {
+			throw PlanRejected(get.function.name + " is denied in user SQL");
+		}
 		throw PlanRejected("plan contains denied scan function: " + get.function.name);
 	}
 	if (table) {

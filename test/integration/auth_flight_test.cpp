@@ -17,10 +17,12 @@
 #include <arrow/flight/sql/client.h>
 #include <arrow/table.h>
 
+#include <atomic>
 #include <chrono>
 #include <ctime>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -366,6 +368,61 @@ void duckbox::test::RunAuthFlightTests() {
 				auto stream = std::move(stream_res).ValueOrDie();
 				auto tbl = stream->ToTable();
 				Expect(tbl.ok() && (*tbl)->num_rows() == 1, "Flight SQL tenant 21 sees 1 row");
+			}
+		}
+		{
+			auto conc = sql_client.Execute(qopt, "SELECT id, title FROM deals ORDER BY id");
+			Expect(conc.ok(), "Flight SQL Execute for concurrent DoGet");
+			if (conc.ok()) {
+				auto info = std::move(conc).ValueOrDie();
+				Expect(!info->endpoints().empty(), "concurrent Execute returns an endpoint");
+				auto ticket = info->endpoints()[0].ticket;
+				auto rec = defs->Get("flight-c");
+				auto box = runtime->Get(rec);
+				std::atomic<int> doget_ok{0};
+				std::atomic<int> exec_ok{0};
+				std::string doget_err;
+				std::string exec_err;
+				std::mutex err_mu;
+				std::thread doget_th([&] {
+					auto stream_res = raw_client->DoGet(qopt, ticket);
+					if (!stream_res.ok()) {
+						std::lock_guard<std::mutex> g(err_mu);
+						doget_err = stream_res.status().ToString();
+						return;
+					}
+					auto stream = std::move(stream_res).ValueOrDie();
+					auto tbl = stream->ToTable();
+					if (!tbl.ok()) {
+						std::lock_guard<std::mutex> g(err_mu);
+						doget_err = tbl.status().ToString();
+						return;
+					}
+					if ((*tbl)->num_rows() == 1) {
+						doget_ok = 1;
+					} else {
+						std::lock_guard<std::mutex> g(err_mu);
+						doget_err = "unexpected row count " + std::to_string((*tbl)->num_rows());
+					}
+				});
+				std::thread exec_th([&] {
+					try {
+						auto out = box->Execute("SELECT id FROM deals");
+						if (out.row_count == 1) {
+							exec_ok = 1;
+						} else {
+							std::lock_guard<std::mutex> g(err_mu);
+							exec_err = "unexpected row count " + std::to_string(out.row_count);
+						}
+					} catch (const std::exception &e) {
+						std::lock_guard<std::mutex> g(err_mu);
+						exec_err = e.what();
+					}
+				});
+				doget_th.join();
+				exec_th.join();
+				Expect(doget_ok == 1, "DoGet concurrent with Execute on the same sandbox: " + doget_err);
+				Expect(exec_ok == 1, "Execute concurrent with DoGet on the same sandbox: " + exec_err);
 			}
 		}
 		auto denied = sql_client.Execute(qopt, "SELECT * FROM secrets");

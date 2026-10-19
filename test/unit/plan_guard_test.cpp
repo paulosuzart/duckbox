@@ -104,8 +104,28 @@ void duckbox::test::RunPlanGuardTests() {
 	}
 	{
 		auto get = MakeScan("read_parquet", {"s3://bucket/x.parquet"});
-		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "denied scan",
-		                    "read_parquet stays denied on a ducklake spec");
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "denied in user SQL",
+		                    "read_parquet is denied in the user plan (shared denylist, not AST-only)");
+	}
+	{
+		auto get = MakeScan("query", {"SELECT 1"});
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "denied in user SQL",
+		                    "query is denied in the user plan even if the AST is skipped");
+	}
+	{
+		auto get = MakeScan("query_table", {"SELECT 1"});
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "denied in user SQL",
+		                    "query_table is denied in the user plan even if the AST is skipped");
+	}
+	{
+		auto get = MakeScan("glob", {"*"});
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "denied in user SQL",
+		                    "glob is denied in the user plan even if the AST is skipped");
+	}
+	{
+		auto get = MakeScan("read_csv", {"x.csv"});
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "denied in user SQL",
+		                    "read_csv is denied in the user plan even if the AST is skipped");
 	}
 	{
 		Expect(CatalogIsAttachedLake("lake", lake), "spec alias is the attached lake");
