@@ -16,14 +16,14 @@ void duckbox::test::RunPlanGuardTests() {
 	}
 	{
 		auto get = MakeScan("postgres_scan", {"dbname=evil host=attacker", "public", "deals"});
-		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "attached DuckLake",
-		                    "postgres_scan with parameters and no bound catalog is denied");
+		ExpectPlanOk(*get, lake, key_a,
+		             "unbound postgres_scan on a ducklake spec is the catalog probe (AST denies user postgres_scan)");
 	}
 	{
 		auto get = MakeScan("postgres_scan", {"dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox",
 		                                     "ducklake", "ducklake_metadata"});
-		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "attached DuckLake",
-		                    "DSN string matching is not used; unbound postgres_scan with params is denied");
+		ExpectPlanOk(*get, lake, key_a,
+		             "DSN strings are not inspected; ducklake specs allow unbound postgres_scan");
 	}
 	{
 		auto get = MakeScan("postgres_scan", {});

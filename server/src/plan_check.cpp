@@ -284,6 +284,10 @@ bool CatalogIsAttachedLake(const std::string &catalog, const Policy &policy) {
 	if (policy.lake.kind == LakeKind::Memory && (cat == "memory" || cat == "main")) {
 		return true;
 	}
+	// DuckLake's postgres metadata catalog is not always named the spec alias.
+	if (policy.lake.kind == LakeKind::Ducklake && cat.find("ducklake") != std::string::npos) {
+		return true;
+	}
 	return false;
 }
 
@@ -299,7 +303,30 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 	if (fname == "pragma_table_info" || ddb::StringUtil::StartsWith(fname, "pragma_")) {
 		return;
 	}
-	if (IsDucklakeScan(fname) || IsPostgresScan(fname)) {
+	if (IsPostgresScan(fname)) {
+		if (policy.lake.kind != LakeKind::Ducklake) {
+			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
+		}
+		// DuckLake probes postgres metadata through postgres_scan. 1.5.6 puts the
+		// connection args in LogicalGet::parameters (not only bind_data), and
+		// ParentCatalog() is often the metadata catalog, not the spec alias.
+		// User-written postgres_scan(...) is already rejected at the AST
+		// (deny_table_functions). Do not DSN-match parameters.
+		if (table) {
+			auto *spec = policy.FindTable(tname);
+			if (spec) {
+				for (auto &pred : PredicatesFor(*spec, key)) {
+					if (!ScanHasTypedPred(get, pred, inherited)) {
+						throw PlanRejected("scan of tenant table '" + tname + "' lacks typed equality on " + pred.column);
+					}
+				}
+			} else if (!LooksLikeDucklakeCatalogTable(tname) && !CatalogIsAttachedLake(catalog, policy)) {
+				throw PlanRejected("scan of table not allowlisted: " + tname);
+			}
+		}
+		return;
+	}
+	if (IsDucklakeScan(fname)) {
 		if (policy.lake.kind != LakeKind::Ducklake) {
 			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
 		}
@@ -321,9 +348,7 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 			}
 			return;
 		}
-		// Unbound: DuckLake catalog probes put the DSN in bind_data (empty plan params).
-		// Parameters on LogicalGet are user-visible table-function args we cannot
-		// attribute to the attached catalog without GetTable().
+		// Unbound ducklake_scan with parameters is a user-visible table function.
 		if (!get.parameters.empty()) {
 			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
 		}
