@@ -303,69 +303,70 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 	if (fname == "pragma_table_info" || ddb::StringUtil::StartsWith(fname, "pragma_")) {
 		return;
 	}
+	auto require_preds = [&](const TablePolicy &spec, const std::string &shown) {
+		for (auto &pred : PredicatesFor(spec, key)) {
+			if (!ScanHasTypedPred(get, pred, inherited)) {
+				throw PlanRejected("scan of tenant table '" + shown + "' lacks typed equality on " + pred.column);
+			}
+		}
+	};
+
 	if (IsPostgresScan(fname)) {
 		if (policy.lake.kind != LakeKind::Ducklake) {
 			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
 		}
-		// DuckLake probes postgres metadata through postgres_scan. 1.5.6 puts the
-		// connection args in LogicalGet::parameters (not only bind_data), and
-		// ParentCatalog() is often the metadata catalog, not the spec alias.
-		// User-written postgres_scan(...) is already rejected at the AST
-		// (deny_table_functions). Do not DSN-match parameters.
-		if (table) {
-			auto *spec = policy.FindTable(tname);
-			if (spec) {
-				for (auto &pred : PredicatesFor(*spec, key)) {
-					if (!ScanHasTypedPred(get, pred, inherited)) {
-						throw PlanRejected("scan of tenant table '" + tname + "' lacks typed equality on " + pred.column);
-					}
-				}
-			} else if (!LooksLikeDucklakeCatalogTable(tname) && !CatalogIsAttachedLake(catalog, policy)) {
-				throw PlanRejected("scan of table not allowlisted: " + tname);
-			}
-		}
+		// DuckLake metadata I/O is postgres_scan of information_schema / ducklake_*
+		// (parameters hold the DSN). Throwing here aborts the postgres transaction
+		// and DuckLake only reports "Current transaction is aborted". User-written
+		// postgres_scan(...) is already denied at the AST. Do not DSN-match.
 		return;
 	}
 	if (IsDucklakeScan(fname)) {
 		if (policy.lake.kind != LakeKind::Ducklake) {
 			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
 		}
-		if (table) {
-			// Bound catalog object: only the spec's attached alias (never a DSN string).
-			if (!CatalogIsAttachedLake(catalog, policy)) {
-				throw PlanRejected(get.function.name +
-				                   " is not an internal scan of the spec's attached DuckLake catalog");
-			}
-			auto *spec = policy.FindTable(tname);
-			if (spec) {
-				for (auto &pred : PredicatesFor(*spec, key)) {
-					if (!ScanHasTypedPred(get, pred, inherited)) {
-						throw PlanRejected("scan of tenant table '" + tname + "' lacks typed equality on " + pred.column);
-					}
+		std::string shown = tname;
+		if (shown.empty()) {
+			for (auto &p : get.parameters) {
+				if (p.IsNull()) {
+					continue;
 				}
-			} else if (!LooksLikeDucklakeCatalogTable(tname)) {
-				throw PlanRejected("scan of table not allowlisted: " + tname);
+				auto s = p.ToString();
+				if (policy.FindTable(s) || LooksLikeDucklakeCatalogTable(s)) {
+					shown = s;
+					break;
+				}
 			}
+			if (shown.empty() && !get.parameters.empty() && !get.parameters.back().IsNull()) {
+				shown = get.parameters.back().ToString();
+			}
+		}
+		auto *spec = shown.empty() ? nullptr : policy.FindTable(shown);
+		if (spec) {
+			require_preds(*spec, shown);
 			return;
 		}
-		// Unbound ducklake_scan with parameters is a user-visible table function.
-		if (!get.parameters.empty()) {
-			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
+		if (LooksLikeDucklakeCatalogTable(shown) || LooksLikeDucklakeCatalogTable(tname) ||
+		    CatalogIsAttachedLake(catalog, policy)) {
+			return;
 		}
+		if (!shown.empty()) {
+			throw PlanRejected("scan of table not allowlisted: " + shown);
+		}
+		// Empty-param ducklake_scan is a catalog probe. User ducklake_scan(...) is AST-denied.
 		return;
 	}
 
 	// seq_scan of a bound catalog table
 	if (table) {
+		if (LooksLikeDucklakeCatalogTable(tname)) {
+			return;
+		}
 		auto *spec = policy.FindTable(tname);
 		if (!spec) {
 			throw PlanRejected("scan of table not allowlisted: " + tname);
 		}
-		for (auto &pred : PredicatesFor(*spec, key)) {
-			if (!ScanHasTypedPred(get, pred, inherited)) {
-				throw PlanRejected("scan of tenant table '" + tname + "' lacks typed equality on " + pred.column);
-			}
-		}
+		require_preds(*spec, tname);
 		return;
 	}
 	// seq_scan without a catalog entry is a CTE / VALUES materialization — no lake table.

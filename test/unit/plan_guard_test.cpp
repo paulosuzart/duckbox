@@ -32,18 +32,22 @@ void duckbox::test::RunPlanGuardTests() {
 	}
 	{
 		auto get = MakeScan("ducklake_scan", {"deals"});
-		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "attached DuckLake",
-		                    "unbound ducklake_scan with parameters is denied");
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "typed equality",
+		                    "unbound ducklake_scan of a spec table still needs tenant filters");
 	}
 	{
 		auto get = MakeScan("ducklake_scan", {"deals"}, true);
-		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "attached DuckLake",
-		                    "tenant ConstantFilter does not authorize an unbound ducklake_scan");
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "typed equality",
+		                    "tenant ConstantFilter alone is not enough without _deleted");
 	}
 	{
 		auto get = MakeScan("ducklake_scan", {lake.lake.catalog, "secrets"});
-		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "attached DuckLake",
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "not allowlisted",
 		                    "unbound ducklake_scan of a non-spec table is denied");
+	}
+	{
+		auto get = MakeScan("ducklake_scan", {lake.lake.catalog, "ducklake_metadata"});
+		ExpectPlanOk(*get, lake, key_a, "unbound ducklake_scan of catalog metadata is allowed");
 	}
 	{
 		auto get = MakeScan("read_parquet", {"s3://bucket/x.parquet"});
