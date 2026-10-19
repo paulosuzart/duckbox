@@ -104,8 +104,11 @@ struct Attachment {
 
 // Allowlisted table or authorized view. filters are typed equalities (tenant_id,
 // _deleted, …) verified on the bound plan for direct table access. authorized_view
-// may be set in YAML (skips mandatory tenant filters) and is confirmed at warmup
-// when the spec name is an initSQL view, not a base table.
+// may be set in YAML (skips mandatory tenant filters and WrapFilteredTable) and
+// is confirmed at warmup when the spec name is an initSQL view. Authorized views
+// bypass tenant filters — the SaaS must embed the key-variable predicate in the
+// view body. YAML authorized_view=true overrides a temp view that shadows a
+// lake table; without it, the rewriter still wraps the base table.
 struct TablePolicy {
 	std::string name;
 	std::vector<std::string> columns;
@@ -150,7 +153,11 @@ struct SandboxSpec {
 
 // True for s3://, file paths, http(s)://. False for postgres/mysql DSNs (not DuckDB file paths).
 bool LocationContributesAllowedPath(const std::string &location);
-// lake.data_path + path-like attachment locations + extra_paths. Never parsed from initSQL.
+// Reject `..`, extra `//` besides a scheme `://`, and query strings. Force a
+// trailing slash (including `s3://bucket` → `s3://bucket/`). Throws PolicyError.
+std::string CanonicalAllowedPrefix(const std::string &raw);
+// lake.data_path + path-like attachment locations + extra_paths, each passed
+// through CanonicalAllowedPrefix. Never parsed from initSQL.
 std::vector<std::string> DeclaredAllowedPaths(const SandboxSpec &spec);
 
 // Shared denylist for spec `functions` (load + ValidateStatic) and the user-plan

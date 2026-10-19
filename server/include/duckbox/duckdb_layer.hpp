@@ -34,6 +34,7 @@
 #include "duckdb/parser/result_modifier.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/planner/column_binding.hpp"
 #include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/parser/statement/load_statement.hpp"
 #include "duckdb/parser/statement/set_statement.hpp"

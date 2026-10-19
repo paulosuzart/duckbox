@@ -110,9 +110,26 @@ void duckbox::test::RunValidatorTests() {
 		av.tables["qv"].filters.clear();
 		av.tables["qv"].authorized_view = true;
 		Expect(validator.ValidateStatic(av).empty(), "authorized_view with no tenant filters is statically valid");
+		av.init_sql = "CREATE TEMP VIEW qv AS SELECT 1 AS x";
+		auto warns = AuthorizedViewWarnings(av);
+		Expect(!warns.empty() && warns[0].find("qv") != std::string::npos &&
+		           warns[0].find("key variable") != std::string::npos,
+		       "authorized view without a key variable emits a warning");
+		av.init_sql = "CREATE TEMP VIEW qv AS SELECT 1 AS x FROM deals WHERE tenant_id = :tenant_id";
+		Expect(AuthorizedViewWarnings(av).empty(), "authorized view that binds :tenant_id does not warn");
 		av.extra_paths = {""};
 		Expect(has_path(validator.ValidateStatic(av), "extra_paths[0]", "non-empty"),
 		       "empty extra_paths entry is a field-path error");
+		av.extra_paths = {"/tmp/../secret"};
+		Expect(has_path(validator.ValidateStatic(av), "extra_paths[0]", ".."),
+		       "extra_paths with .. is a field-path error");
+		av.extra_paths = {"s3://bucket/foo?x=1"};
+		Expect(has_path(validator.ValidateStatic(av), "extra_paths[0]", "query string"),
+		       "extra_paths with a query string is a field-path error");
+		av.extra_paths = {"s3://bucket//foo"};
+		Expect(has_path(validator.ValidateStatic(av), "extra_paths[0]", "//"),
+		       "extra_paths with extra slashes is a field-path error");
+		av.extra_paths.clear();
 		av.extra_paths.clear();
 		Attachment missing;
 		missing.name = "feed";

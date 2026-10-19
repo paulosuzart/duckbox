@@ -21,3 +21,13 @@ python3 -m gcovr --root "$ROOT" \
   --txt \
   --print-summary \
   --fail-under-line 75
+
+# plan_check.cpp is the last-line-of-defense; keep it well above the repo floor.
+python3 -m gcovr --root "$ROOT" \
+  --filter 'server/src/plan_check.cpp' \
+  --exclude '\.deps/' \
+  --exclude 'test/' \
+  "$BUILD" \
+  --txt \
+  --print-summary \
+  --fail-under-line 85

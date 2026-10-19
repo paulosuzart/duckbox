@@ -4,7 +4,7 @@
 // creates the sandbox supplies this SQL. It runs at warmup before
 // enable_external_access=false and lock_configuration. The agent never runs
 // in this phase. Views/macros it creates are authorized if the spec exposes
-// them (see PlanGuardInfo::view_scan_counts).
+// them (see PlanGuardInfo::authorized_views).
 
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/policy.hpp"

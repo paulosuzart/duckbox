@@ -40,4 +40,15 @@ void duckbox::test::RunRewriterTests() {
 		auto rw = RewriteUserSql("SELECT id FROM deals", lit, key_a);
 		Expect(rw.find("21") != std::string::npos, "K2 rewrite binds the key tenant, not the spec literal");
 	}
+	{
+		auto av = policy;
+		av.tables["deals"].authorized_view = true;
+		av.tables["deals"].filters.clear();
+		av.tables["deals"].columns = {"id", "title", "amount"};
+		auto rw = RewriteUserSql("SELECT id, title, amount FROM deals", av, key_a);
+		Expect(rw.find("tenant_id") == std::string::npos && rw.find("_deleted") == std::string::npos,
+		       "authorized view is not WrapFilteredTable'd");
+		Expect(ddb::StringUtil::Lower(rw).find("from deals") != std::string::npos,
+		       "authorized view keeps the view BaseTableRef");
+	}
 }

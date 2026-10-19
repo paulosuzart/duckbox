@@ -12,6 +12,8 @@ This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/inclu
 
 **initSQL** is trusted. It runs at warmup **before** `enable_external_access=false` and `lock_configuration`. The agent never executes in that phase. Views (and macros) created there are **authorized views** (BigQuery-style): if the spec exposes the view, the plan guard treats that view's expansion as opaque (no table-function/allowlist rejection *inside* it) and still checks everything the agent wrote around it. The same function or non-allowlisted table used directly by the agent is denied.
 
+**Authorized views bypass tenant filters.** The rewriter does not wrap them in `WHERE tenant_id = :tenant_id`. The SaaS must embed the tenant predicate (a key variable such as `:tenant_id`) in the view body. Create/Update return a `warnings` array and write the same text to the audit log when an authorized view's body does not reference a key variable.
+
 Allowed external locations are derived from the spec — not parsed from initSQL: `lake.data_path`, each `attachments` entry, and rarely `extra_paths` for a prefix with no attachment. Those prefixes are applied to DuckDB `allowed_paths` / `allowed_directories` **before** external access is disabled. Authorized views may read anything under the declared lake/attachments using the sandbox's resolved credentials. Anything undeclared fails. initSQL is written to the audit log with secrets redacted.
 
 ```yaml
@@ -21,25 +23,76 @@ attachments:
 # extra_paths: [/rarely/needed]              # only when there is no attachment
 ```
 
-## Quickstart in 5 minutes
+## Run everything locally (macOS and Linux)
 
-You need Docker (Postgres + an S3 emulator), a built `./build/duckbox`, and Python 3.
+Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (compose → seed → serve → CLI create → quickstart). Job `enforcement` runs the test commands.
+
+### Prerequisites
+
+- Docker Engine with Compose v2 (Postgres + RustFS)
+- Python 3.10+
+- CMake 3.20+ and a C++17 compiler (`g++` on Linux, Apple Clang or `g++` on macOS)
+- **Linux:** `sudo` for the Arrow APT source
+- **macOS:** Homebrew
+
+### 1. C++ dependencies and Arrow
 
 ```bash
-docker compose up -d
-python3 -m venv .venv && .venv/bin/pip install -r examples/python/requirements.txt
+# Linux
+bash scripts/install_arrow.sh
+
+# macOS (Homebrew formulae enable Flight SQL)
+brew install apache-arrow openssl cmake
+```
+
+```bash
+bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp
+```
+
+### 2. Build
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
+cmake --build build --parallel
+# equivalent: make build CXX=g++
+```
+
+On macOS you can omit `-DCMAKE_CXX_COMPILER=g++` and use the default AppleClang.
+
+### 3. Tests (no Docker)
+
+```bash
+ctest --test-dir build --output-on-failure
+make validate
+```
+
+### 4. DuckLake: Postgres + RustFS, seed, serve, CLI, quickstart
+
+```bash
+docker compose up -d --wait
+
+python3 -m venv .venv
+.venv/bin/pip install -r examples/python/requirements.txt
+
 export DUCKBOX_S3_KEY=rustfsadmin DUCKBOX_S3_SECRET=rustfsadmin
 export DUCKBOX_HANDLE_SECRET=duckbox-dev-secret
 export DUCKBOX_LAKE_CATALOG='ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox'
+
 .venv/bin/python scripts/seed_ducklake.py
-./build/duckbox serve --daemon ./daemons/ducklake.yaml
+
+./build/duckbox serve --daemon ./daemons/ducklake.yaml --listen 127.0.0.1:4747
 ```
 
-In another terminal:
+In another terminal (same env vars are not required for the CLI; the daemon already has them):
 
 ```bash
+./build/duckbox sandbox create --url grpc://127.0.0.1:4747 \
+  --spec ./policies/ducklake/analyst.yaml \
+  --id acme-analyst --key tenant_21:user_sergio
+
 .venv/bin/python examples/python/quickstart.py
-# or open examples/python/quickstart.ipynb  (same steps, pandas DataFrames)
+# or open examples/python/quickstart.ipynb  (same walkthrough as quickstart.py)
+.venv/bin/python examples/python/authorized_views_e2e.py
 ```
 
 The helper is three or four lines in your own code:
@@ -55,6 +108,8 @@ print(db.query("SELECT id, title, amount FROM deals"))
 ```
 
 `DUCKBOX_URL` / `DUCKBOX_SPEC` / `DUCKBOX_SANDBOX` override the defaults. Memory lake (no Docker): serve `daemons/memory.yaml` and set `DUCKBOX_SPEC=policies/memory/analyst.yaml`. A flag-oriented one-shot lives at `examples/python/query_cli.py`.
+
+**RustFS** is the emulator in `docker-compose.yml` to match the product S3 target; if the image is unusable, MinIO is the fallback (same path-style endpoint). Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads.
 
 ## Named sandboxes
 
@@ -117,7 +172,7 @@ Daemon startup validates **only** daemon config (listen, limits, optional lease 
 
 Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap. Spec `lifecycle.idle_timeout` overrides the daemon default (capped by `limits.max_idle_timeout`). Spec `lifecycle.ttl` / `expires_at` tombstone the named definition when due.
 
-**initSQL**: trusted SaaS SQL, rerun on every warmup, then `enable_external_access=false` and `lock_configuration`. Objects it creates are visible to agent SQL **only if the spec lists them**. Exposed views are authorized (expansion opaque in the plan guard; agent-written SQL around them is still checked). DuckDB `allowed_directories`/`allowed_paths` are derived from `lake.data_path`, path-like `attachments`, and optional `extra_paths` before external access is disabled. Agent SQL cannot `COPY`/`read_*` except through those views, and only for prefixes the spec already declared.
+**initSQL**: trusted SaaS SQL, rerun on every warmup, then `enable_external_access=false` and `lock_configuration`. Objects it creates are visible to agent SQL **only if the spec lists them**. Exposed views are authorized (expansion opaque in the plan guard by catalog-entry oid / table-function operator; agent-written SQL around them is still checked). Authorized views are **not** wrapped with spec tenant filters — put `:tenant_id` (or another key variable) in the view itself. DuckDB `allowed_directories`/`allowed_paths` are derived from `lake.data_path`, path-like `attachments`, and optional `extra_paths` before external access is disabled (prefixes are canonicalized: no `..`, no extra `//`, no query string, trailing slash). Agent SQL cannot `COPY`/`read_*` except through those views, and only for prefixes the spec already declared.
 
 ### Metrics
 
@@ -140,36 +195,7 @@ Optional spec `lifecycle.idle_timeout` passivates an idle instance (daemon `limi
 
 Python is Arrow Flight SQL via ADBC. Use `examples/python/quickstart.ipynb` (or `quickstart.py`) after the daemon is up. `create_sandbox()` / `connect(sandbox=...)` send the id header for you.
 
-## Build
-
-Linux (CI): `bash scripts/install_arrow.sh` (Apache Arrow APT, including Flight SQL).  
-macOS: `brew install apache-arrow openssl cmake` (recent formulae enable Flight SQL).
-
-```bash
-bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-make validate
-```
-
-## DuckLake locally (Postgres + RustFS)
-
-The **spec** (not the daemon) carries DuckLake attach info. Credentials are env/secret names (never logged): `DUCKBOX_S3_KEY` / `DUCKBOX_S3_SECRET` / `DUCKBOX_LAKE_CATALOG` / `DUCKBOX_HANDLE_SECRET`.
-
-```bash
-docker compose up -d
-export DUCKBOX_S3_KEY=rustfsadmin DUCKBOX_S3_SECRET=rustfsadmin
-export DUCKBOX_HANDLE_SECRET=duckbox-dev-secret
-export DUCKBOX_LAKE_CATALOG='ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox'
-.venv/bin/python scripts/seed_ducklake.py
-./build/duckbox serve --daemon ./daemons/ducklake.yaml
-.venv/bin/python examples/python/quickstart.py
-```
-
-CI job `ducklake-e2e` runs this on GitHub Actions (Docker available there). This VM has no Docker, so local compose is the laptop/CI path. **RustFS** is the emulator in `docker-compose.yml` to match the product S3 target; if the image is unusable, MinIO is the fallback (same path-style endpoint).
-
-Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads. The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl for tests). `S3ConditionalLeaseManager` is the v1 lease interface; this draft uses `SingleNodeLeaseManager` and probes the lease endpoint when configured.
+The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl for tests). `S3ConditionalLeaseManager` is the v1 lease interface; this draft uses `SingleNodeLeaseManager` and probes the lease endpoint when configured.
 
 ## Layout
 

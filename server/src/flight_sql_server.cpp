@@ -161,6 +161,45 @@ arrow::Status ResultJson(const std::string &json, std::unique_ptr<arrow::flight:
 	return Status::OK();
 }
 
+std::string JsonEscAction(const std::string &s) {
+	std::string out;
+	out.reserve(s.size() + 8);
+	for (unsigned char c : s) {
+		if (c == '"' || c == '\\') {
+			out.push_back('\\');
+			out.push_back(static_cast<char>(c));
+		} else if (c == '\n') {
+			out += "\\n";
+		} else {
+			out.push_back(static_cast<char>(c));
+		}
+	}
+	return out;
+}
+
+std::string CreateUpdateResultJson(const SandboxRecord &rec, const char *action) {
+	auto warnings = AuthorizedViewWarnings(rec.spec);
+	WriteSandboxAudit(action, rec.id, rec.key, warnings);
+	auto json = rec.ToJson();
+	if (warnings.empty()) {
+		return json;
+	}
+	if (!json.empty() && json.back() == '}') {
+		json.pop_back();
+	}
+	json += ",\"warnings\":[";
+	for (size_t i = 0; i < warnings.size(); i++) {
+		if (i) {
+			json += ',';
+		}
+		json += '"';
+		json += JsonEscAction(warnings[i]);
+		json += '"';
+	}
+	json += "]}";
+	return json;
+}
+
 arrow::Result<std::unique_ptr<FlightInfo>> MakeInfo(const FlightDescriptor &desc, const std::string &token,
                                                     const std::shared_ptr<arrow::Schema> &schema) {
 	ARROW_ASSIGN_OR_RAISE(auto ticket_str, sql::CreateStatementQueryTicket(token));
@@ -725,12 +764,12 @@ arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContex
 				auto out = defs_->Update(rec);
 				int keep = out.spec.handles.stale_version_grace_ms > 0 ? out.version - 1 : -1;
 				runtime_->PassivateId(out.id, "update", keep);
-				return ResultJson(out.ToJson(), result);
+				return ResultJson(CreateUpdateResultJson(out, "update"), result);
 			}
 			load_spec(rec);
 			AuthorizeCaller(daemon_, caller, rec.key);
 			auto out = defs_->Create(rec);
-			return ResultJson(out.ToJson(), result);
+			return ResultJson(CreateUpdateResultJson(out, "create"), result);
 		}
 		if (action.type == "GetSandbox") {
 			auto id = body.empty() ? Hdr(context, {"x-duckbox-sandbox"}) : body;

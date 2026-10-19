@@ -29,4 +29,9 @@ public:
 
 int RunValidateCommand(const DaemonConfig &daemon, const std::string &spec_path); // CLI; throwaway sandbox for lake check
 
+// Authorized views bypass tenant filters. Warn at Create/Update when a YAML
+// authorized view (or a spec table with no filters whose initSQL creates a
+// view) does not reference a key variable in the view body.
+std::vector<std::string> AuthorizedViewWarnings(const SandboxSpec &spec);
+
 } // namespace duckbox

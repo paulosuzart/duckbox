@@ -2,7 +2,9 @@
 
 // AST rewriter: wrap allowlisted base tables in subqueries with spec filters,
 // bind key variables as typed constants (never string-interpolate user SQL).
-// User `?` / `$n` parameters are left for Flight SQL binding at execute.
+// Authorized views are not wrapped (they bypass tenant filters; the SaaS must
+// embed the key-variable predicate in the view). User `?` / `$n` parameters
+// are left for Flight SQL binding at execute.
 
 #include "duckbox/policy.hpp"
 #include "duckbox/tenant_key.hpp"

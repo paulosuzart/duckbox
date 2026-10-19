@@ -10,6 +10,7 @@
 #include <iostream>
 #include <map>
 #include <regex>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace duckbox {
@@ -211,10 +212,30 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 			ValidateSecretRefSyntax(kv.second.credential, prefix + ".credential", issues);
 		}
 	}
+	auto check_prefix = [&](const std::string &field, const std::string &p) {
+		if (p.empty()) {
+			return;
+		}
+		try {
+			(void)CanonicalAllowedPrefix(p);
+		} catch (const PolicyError &e) {
+			add(field, e.what());
+		}
+	};
+	if (!spec.lake.data_path.empty()) {
+		check_prefix("lake.data_path", spec.lake.data_path);
+	}
+	for (auto &kv : spec.attachments) {
+		if (LocationContributesAllowedPath(kv.second.location)) {
+			check_prefix("attachments." + kv.second.name + ".location", kv.second.location);
+		}
+	}
 	for (size_t i = 0; i < spec.extra_paths.size(); i++) {
 		if (spec.extra_paths[i].empty()) {
 			add("extra_paths[" + std::to_string(i) + "]", "must be a non-empty path prefix");
+			continue;
 		}
+		check_prefix("extra_paths[" + std::to_string(i) + "]", spec.extra_paths[i]);
 	}
 	if (!spec.deny_table_functions) {
 		add("deny_table_functions", "false is refused (table functions are always denied)");
@@ -312,6 +333,120 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
 		}
 	}
 	return issues;
+}
+
+namespace {
+
+bool SqlReferencesKeyVars(const std::string &sql, const std::unordered_set<std::string> &vars) {
+	if (sql.empty() || vars.empty()) {
+		return false;
+	}
+	auto lower = ddb::StringUtil::Lower(sql);
+	for (auto &var : vars) {
+		auto v = ddb::StringUtil::Lower(var);
+		if (v.empty()) {
+			continue;
+		}
+		for (char prefix : {':', '$'}) {
+			std::string pat;
+			pat.push_back(prefix);
+			pat += v;
+			size_t i = 0;
+			while ((i = lower.find(pat, i)) != std::string::npos) {
+				if (prefix == ':' && i > 0 && lower[i - 1] == ':') {
+					i += pat.size();
+					continue;
+				}
+				auto after = i + pat.size();
+				if (after < lower.size() &&
+				    (std::isalnum(static_cast<unsigned char>(lower[after])) || lower[after] == '_')) {
+					i += pat.size();
+					continue;
+				}
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+std::string RawViewBody(const std::string &init_sql, const std::string &name) {
+	auto lower = ddb::StringUtil::Lower(init_sql);
+	auto needle = " view " + ddb::StringUtil::Lower(name);
+	auto pos = lower.find(needle);
+	if (pos == std::string::npos) {
+		return "";
+	}
+	auto as_pos = lower.find(" as ", pos);
+	if (as_pos == std::string::npos) {
+		return "";
+	}
+	auto end = init_sql.find(';', as_pos);
+	if (end == std::string::npos) {
+		end = init_sql.size();
+	}
+	return init_sql.substr(as_pos + 4, end - (as_pos + 4));
+}
+
+std::unordered_map<std::string, std::string> InitSqlViewBodies(const std::string &init_sql) {
+	std::unordered_map<std::string, std::string> out;
+	if (init_sql.empty()) {
+		return out;
+	}
+	try {
+		ddb::Parser parser;
+		parser.ParseQuery(init_sql);
+		for (auto &st : parser.statements) {
+			if (!st || st->type != ddb::StatementType::CREATE_STATEMENT) {
+				continue;
+			}
+			auto &cs = st->Cast<ddb::CreateStatement>();
+			if (!cs.info || cs.info->type != ddb::CatalogType::VIEW_ENTRY) {
+				continue;
+			}
+			auto &vi = cs.info->Cast<ddb::CreateViewInfo>();
+			std::string body;
+			if (vi.query) {
+				body = vi.query->ToString();
+			}
+			out[ddb::StringUtil::Lower(vi.view_name)] = std::move(body);
+		}
+	} catch (...) {
+	}
+	return out;
+}
+
+} // namespace
+
+std::vector<std::string> AuthorizedViewWarnings(const SandboxSpec &spec) {
+	std::vector<std::string> warnings;
+	std::unordered_set<std::string> vars;
+	for (auto &n : spec.key.VariableNames()) {
+		vars.insert(ddb::StringUtil::Lower(n));
+	}
+	vars.insert("tenant_id");
+	auto views = InitSqlViewBodies(spec.init_sql);
+	for (auto &kv : spec.tables) {
+		bool yaml_av = kv.second.authorized_view;
+		bool no_filters = kv.second.filters.empty();
+		if (!yaml_av && !no_filters) {
+			continue;
+		}
+		auto it = views.find(ddb::StringUtil::Lower(kv.second.name));
+		std::string raw = RawViewBody(spec.init_sql, kv.second.name);
+		bool has_create = it != views.end() || !raw.empty();
+		if (!yaml_av && !has_create) {
+			continue;
+		}
+		std::string body = it != views.end() ? it->second : std::string();
+		if (SqlReferencesKeyVars(body, vars) || SqlReferencesKeyVars(raw, vars)) {
+			continue;
+		}
+		warnings.push_back("authorized view '" + kv.second.name +
+		                   "' does not reference a key variable; tenant filters are not applied — "
+		                   "embed the tenant predicate in the view");
+	}
+	return warnings;
 }
 
 void SpecValidator::ThrowIf(const std::vector<SpecIssue> &issues) const {

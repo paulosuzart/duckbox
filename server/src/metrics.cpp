@@ -579,6 +579,21 @@ void WriteInitSqlAudit(const TenantKey &key, const Policy &policy, const std::st
 	std::clog << os.str();
 }
 
+void WriteSandboxAudit(const char *action, const std::string &id, const std::string &key,
+                       const std::vector<std::string> &warnings) {
+	std::ostringstream os;
+	os << "{\"event\":\"sandbox\",\"action\":\"" << JsonEsc(action ? action : "") << "\",\"id\":\"" << JsonEsc(id)
+	   << "\",\"key\":\"" << JsonEsc(key) << "\",\"warnings\":[";
+	for (size_t i = 0; i < warnings.size(); i++) {
+		if (i) {
+			os << ',';
+		}
+		os << '"' << JsonEsc(warnings[i]) << '"';
+	}
+	os << "]}\n";
+	std::clog << os.str();
+}
+
 void WriteAuditLog(const TenantKey &key, const Policy &policy, double seconds, int64_t rows, int64_t bytes,
                    const char *outcome, const char *reason) {
 	std::ostringstream os;

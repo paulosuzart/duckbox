@@ -239,6 +239,50 @@ cases:
           - leaked
           - i
 
+  - id: authorized_view_deals_constants_from_secrets
+    sql: "SELECT id, title, amount FROM deals"
+    expect: allow
+    stage: execute
+    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
+    extra_tables:
+      - name: deals
+        columns: [id, title, amount]
+        authorized_view: true
+    contains:
+      - "should never"
+
+  - id: authorized_view_deals_join_secrets
+    sql: "SELECT * FROM deals, secrets"
+    expect: deny
+    reason: not allowlisted
+    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
+    extra_tables:
+      - name: deals
+        columns: [id, title, amount]
+        authorized_view: true
+
+  - id: authorized_view_deals_union_secrets
+    sql: "SELECT title FROM deals UNION SELECT note FROM secrets"
+    expect: deny
+    reason: not allowlisted
+    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
+    extra_tables:
+      - name: deals
+        columns: [id, title, amount]
+        authorized_view: true
+
+  - id: authorized_view_deals_repeated_scan
+    sql: "SELECT a.title, b.title FROM deals a, deals b"
+    expect: allow
+    stage: execute
+    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
+    extra_tables:
+      - name: deals
+        columns: [id, title, amount]
+        authorized_view: true
+    contains:
+      - "should never"
+
   - id: duckdb_tables
     sql: "SELECT * FROM duckdb_tables()"
     expect: deny

@@ -175,6 +175,9 @@ void WriteAuditLog(const TenantKey &key, const Policy &policy, double seconds, i
                    const char *outcome, const char *reason);
 // Warmup audit of trusted initSQL. Secrets (password=, SECRET ', URI userinfo) are redacted.
 void WriteInitSqlAudit(const TenantKey &key, const Policy &policy, const std::string &sql, const char *outcome);
+// Create/Update audit. warnings are authorized-view tenant-filter caveats (not stored on vN.json).
+void WriteSandboxAudit(const char *action, const std::string &id, const std::string &key,
+                       const std::vector<std::string> &warnings);
 
 void ObserveFailure(IMetrics &m, const Policy *policy, const TenantKey *key, const std::exception &e, bool cold,
                     double seconds);

@@ -177,6 +177,13 @@ void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx) {
 		if (ref->alias.empty()) {
 			ref->alias = base.table_name;
 		}
+		// Authorized views already embed their contract (including any tenant
+		// predicate). Wrapping them as a filtered subquery duplicates LogicalGets
+		// vs the warmup body snapshot and makes a constant-projecting view fail
+		// closed on the extra secrets scan.
+		if (spec->authorized_view) {
+			return;
+		}
 		ref = WrapFilteredTable(ref->Copy(), *spec, *ctx.policy);
 		return;
 	}

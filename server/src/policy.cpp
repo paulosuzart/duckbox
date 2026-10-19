@@ -294,14 +294,46 @@ bool LocationContributesAllowedPath(const std::string &location) {
 	return true;
 }
 
+std::string CanonicalAllowedPrefix(const std::string &raw) {
+	if (raw.empty()) {
+		throw PolicyError("allowed path is empty");
+	}
+	if (raw.find("..") != std::string::npos) {
+		throw PolicyError("allowed path must not contain '..'");
+	}
+	if (raw.find('?') != std::string::npos) {
+		throw PolicyError("allowed path must not contain a query string");
+	}
+	auto scheme = raw.find("://");
+	if (scheme == 0) {
+		throw PolicyError("allowed path has an empty scheme");
+	}
+	std::string rest = scheme == std::string::npos ? raw : raw.substr(scheme + 3);
+	if (rest.empty()) {
+		throw PolicyError("allowed path is missing a host or path after the scheme");
+	}
+	if (rest.find("//") != std::string::npos) {
+		throw PolicyError("allowed path must not contain '//'");
+	}
+	if (scheme == std::string::npos && raw.find("//") != std::string::npos) {
+		throw PolicyError("allowed path must not contain '//'");
+	}
+	std::string out = raw;
+	if (out.back() != '/') {
+		out.push_back('/');
+	}
+	return out;
+}
+
 std::vector<std::string> DeclaredAllowedPaths(const SandboxSpec &spec) {
 	std::vector<std::string> paths;
 	auto add = [&](const std::string &p) {
 		if (p.empty()) {
 			return;
 		}
-		if (std::find(paths.begin(), paths.end(), p) == paths.end()) {
-			paths.push_back(p);
+		auto canon = CanonicalAllowedPrefix(p);
+		if (std::find(paths.begin(), paths.end(), canon) == paths.end()) {
+			paths.push_back(std::move(canon));
 		}
 	};
 	add(spec.lake.data_path);

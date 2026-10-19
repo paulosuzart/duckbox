@@ -223,8 +223,28 @@ void duckbox::test::RunAuthFlightTests() {
 		};
 		auto created_a = create_one("flight-a", "tenant_21:user_sergio");
 		Expect(created_a.find("flight-a") != std::string::npos, "CreateSandbox returns id");
+		Expect(created_a.find("\"warnings\"") == std::string::npos,
+		       "CreateSandbox without an authorized-view caveat has no warnings field");
 		auto created_c = create_one("flight-c", "tenant_21:user_other");
 		Expect(created_c.find("flight-c") != std::string::npos, "CreateSandbox second in-scope id");
+		{
+			auto av_body = body;
+			auto fn_at = av_body.find("functions:");
+			if (fn_at != std::string::npos) {
+				av_body.insert(fn_at, "  qv:\n    authorized_view: true\n    columns: [x]\n");
+			}
+			av_body += "\ninit_sql: CREATE TEMP VIEW qv AS SELECT 1 AS x\n";
+			auto o = opt;
+			o.headers.emplace_back("x-duckbox-sandbox", "warn-av");
+			o.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+			auto created_av = ActionBody(*raw_client, o, "CreateSandbox", av_body);
+			Expect(created_av.find("warn-av") != std::string::npos, "CreateSandbox authorized-view sandbox returns id");
+			Expect(created_av.find("warnings") != std::string::npos &&
+			           created_av.find("key variable") != std::string::npos,
+			       "CreateSandbox response warns when an authorized view lacks a key variable");
+			Expect(created_av.find("spec_yaml") != std::string::npos,
+			       "warnings are on the response; spec_yaml is still present");
+		}
 		try {
 			(void)create_one("flight-b", "tenant_22:user_kim");
 			g_failed++;

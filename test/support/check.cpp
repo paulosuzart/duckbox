@@ -111,8 +111,8 @@ ddb::unique_ptr<ddb::LogicalGet> MakeScan(const std::string &fn, const std::vect
                                           bool tenant_eq) {
 	ddb::TableFunction tf(fn, {}, nullptr);
 	ddb::vector<ddb::LogicalType> types;
-	types.push_back(ddb::LogicalType::INTEGER);
-	types.push_back(ddb::LogicalType::INTEGER);
+	types.push_back(ddb::LogicalType(ddb::LogicalTypeId::INTEGER));
+	types.push_back(ddb::LogicalType(ddb::LogicalTypeId::INTEGER));
 	ddb::vector<std::string> names;
 	names.push_back("tenant_id");
 	names.push_back("id");

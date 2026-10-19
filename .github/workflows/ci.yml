@@ -61,10 +61,10 @@ jobs:
       - name: Coverage (gcovr, server/src >= 75%)
         run: make coverage
 
-  ducklake-e2e:
-    name: DuckLake + S3 emulator (Flight SQL / ADBC)
+  readme-runbook:
+    name: README local runbook (compose, CLI, quickstart)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Arrow Flight SQL + build tools
@@ -76,17 +76,31 @@ jobs:
             .deps
             ~/.duckdb
           key: duckdb-v1.5.6-nanoarrow-yamlcpp080-ducklake-${{ runner.os }}-${{ runner.arch }}
-      - name: Build
-        run: make build CXX=g++
+      - name: Fetch deps and build
+        run: |
+          bash scripts/fetch_deps.sh
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
+          cmake --build build --parallel
+      - name: Tests (README step 3)
+        env:
+          DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+        run: |
+          ctest --test-dir build --output-on-failure
+          make validate
       - name: Start Postgres + RustFS
-        run: docker compose up -d
+        run: docker compose up -d --wait
       - name: Python deps
         run: |
           python3 -m venv .venv
           .venv/bin/pip install -r examples/python/requirements.txt
       - name: Seed DuckLake
+        env:
+          DUCKBOX_S3_KEY: rustfsadmin
+          DUCKBOX_S3_SECRET: rustfsadmin
+          DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+          DUCKBOX_LAKE_CATALOG: ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox
         run: .venv/bin/python scripts/seed_ducklake.py
-      - name: Serve Flight SQL, quickstart, and scrape /metrics
+      - name: Serve, CLI sandbox create, quickstart, scrape /metrics
         env:
           DUCKBOX_S3_KEY: rustfsadmin
           DUCKBOX_S3_SECRET: rustfsadmin
@@ -101,6 +115,9 @@ jobs:
             fi
             sleep 1
           done
+          ./build/duckbox sandbox create --url grpc://127.0.0.1:4747 \
+            --spec ./policies/ducklake/analyst.yaml \
+            --id acme-analyst --key tenant_21:user_sergio
           .venv/bin/python examples/python/quickstart.py
           .venv/bin/python examples/python/authorized_views_e2e.py
           curl -sf http://127.0.0.1:9477/metrics > /tmp/duckbox-metrics.txt

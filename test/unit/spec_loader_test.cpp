@@ -197,7 +197,7 @@ void duckbox::test::RunSpecLoaderTests() {
 		       "attachments YAML mapping loads");
 		auto derived = DeclaredAllowedPaths(loaded_ap);
 		Expect(std::find(derived.begin(), derived.end(), "s3://duckbox-lake/authorized/") != derived.end() &&
-		           std::find(derived.begin(), derived.end(), "/tmp/escape") != derived.end(),
+		           std::find(derived.begin(), derived.end(), "/tmp/escape/") != derived.end(),
 		       "DeclaredAllowedPaths unions attachment location and extra_paths");
 	}
 	ExpectThrowContains([&] { LoadSpecString(std::string(mini) + "authorized_paths:\n  - x\n", "<old>"); },
@@ -220,13 +220,23 @@ void duckbox::test::RunSpecLoaderTests() {
 		Expect(std::find(paths.begin(), paths.end(), "s3://lake/data/") != paths.end(), "lake data_path is derived");
 		Expect(std::find(paths.begin(), paths.end(), "s3://lake/authorized/") != paths.end(),
 		       "attachment S3 prefix is derived");
-		Expect(std::find(paths.begin(), paths.end(), "/tmp/extra") != paths.end(), "extra_paths is an escape hatch");
+		Expect(std::find(paths.begin(), paths.end(), "/tmp/extra/") != paths.end(), "extra_paths is an escape hatch");
 		Expect(std::find(paths.begin(), paths.end(), "postgres://example/db") == paths.end(),
 		       "Postgres DSN is not a DuckDB allowed path");
 		Expect(!LocationContributesAllowedPath("postgresql://x") && LocationContributesAllowedPath("/tmp/x") &&
 		           LocationContributesAllowedPath("s3://b/p") &&
 		           !LocationContributesAllowedPath("host=x dbname=y"),
 		       "path-like locations contribute; DSNs do not");
+		Expect(CanonicalAllowedPrefix("s3://bucket") == "s3://bucket/", "s3://bucket gets a trailing slash");
+		Expect(CanonicalAllowedPrefix("s3://bucket/") == "s3://bucket/", "already-slash S3 prefix is unchanged");
+		Expect(CanonicalAllowedPrefix("/tmp/foo") == "/tmp/foo/", "file prefix gets a trailing slash");
+		ExpectThrowContains([&] { CanonicalAllowedPrefix(""); }, "empty", "empty path is rejected");
+		ExpectThrowContains([&] { CanonicalAllowedPrefix("/tmp/../etc"); }, "..", "dot-dot is rejected");
+		ExpectThrowContains([&] { CanonicalAllowedPrefix("s3://bucket/foo?x=1"); }, "query string",
+		                    "query strings are rejected");
+		ExpectThrowContains([&] { CanonicalAllowedPrefix("s3://bucket//foo"); }, "//", "extra slashes are rejected");
+		ExpectThrowContains([&] { CanonicalAllowedPrefix("s3://"); }, "scheme", "empty host after scheme is rejected");
+		ExpectThrowContains([&] { CanonicalAllowedPrefix("://bucket/"); }, "scheme", "empty scheme is rejected");
 	}
 
 	ExpectThrowContains([&] { ParseSecretRef("super-secret-value", "lake.s3.access_key"); }, "reference",

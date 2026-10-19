@@ -190,7 +190,7 @@ void TenantSandbox::SnapshotAuthorizedViews() {
 	if (!con_ || !plan_info_) {
 		return;
 	}
-	plan_info_->view_scan_counts.clear();
+	plan_info_->authorized_views.clear();
 	auto quote = [](const std::string &n) {
 		std::string o = "\"";
 		for (char c : n) {
@@ -210,18 +210,30 @@ void TenantSandbox::SnapshotAuthorizedViews() {
 				has_base = chunk && chunk->size() > 0;
 			}
 		}
-		auto q = con_->Query("SELECT sql FROM duckdb_views() WHERE lower(view_name)='" + EscapeSqlString(lower) +
-		                     "' LIMIT 1");
+		auto q = con_->Query(
+		    "SELECT sql, database_name, schema_name, temporary FROM duckdb_views() WHERE lower(view_name)='" +
+		    EscapeSqlString(lower) + "' ORDER BY CASE WHEN temporary THEN 0 ELSE 1 END LIMIT 1");
 		std::string view_sql;
+		std::string view_db;
+		std::string view_schema;
 		if (q && !q->HasError()) {
 			auto chunk = q->Fetch();
 			if (chunk && chunk->size() > 0 && !chunk->data[0].GetValue(0).IsNull()) {
 				view_sql = chunk->data[0].GetValue(0).ToString();
+				if (chunk->ColumnCount() > 1 && !chunk->data[1].GetValue(0).IsNull()) {
+					view_db = chunk->data[1].GetValue(0).ToString();
+				}
+				if (chunk->ColumnCount() > 2 && !chunk->data[2].GetValue(0).IsNull()) {
+					view_schema = chunk->data[2].GetValue(0).ToString();
+				}
 			}
 		}
-		// A temp view that shadows a lake table is not an authorized view; the
-		// rewriter keeps qualifying the base table (tenant filters still apply).
-		if (view_sql.empty() || has_base) {
+		// YAML authorized_view=true overrides a shadowing base table: the SaaS
+		// is exposing the initSQL view, not the lake table (tenant filters are
+		// not wrapped). Without that flag, a temp view that shadows a lake table
+		// is not authorized; the rewriter keeps wrapping the base table.
+		bool yaml_av = kv.second.authorized_view;
+		if (view_sql.empty() || (has_base && !yaml_av)) {
 			kv.second.authorized_view = false;
 			if (kv.second.filters.empty()) {
 				throw Error("tables." + kv.second.name +
@@ -230,8 +242,10 @@ void TenantSandbox::SnapshotAuthorizedViews() {
 			continue;
 		}
 		kv.second.authorized_view = true;
-		// Plan the view body, not `SELECT * FROM view` — a view named like a
-		// base table would recurse in the binder (CREATE VIEW deals AS … deals).
+		// Snapshot `SELECT * FROM view` — that is the skip-wrap agent shape.
+		// A constant-projecting view can yield more LogicalGets than its body
+		// alone; the body is only a fallback when the view name would recurse
+		// (CREATE VIEW deals AS … deals).
 		auto body = view_sql;
 		ddb::StringUtil::Trim(body);
 		auto trimmed = ddb::StringUtil::Lower(body);
@@ -241,21 +255,72 @@ void TenantSandbox::SnapshotAuthorizedViews() {
 				body = body.substr(as_pos + 4);
 			}
 		}
-		try {
-			auto plan = con_->ExtractPlan(body);
-			if (plan) {
-				CollectScanKeys(*plan, plan_info_->view_scan_counts[lower]);
-			}
-		} catch (const std::exception &e) {
-			try {
-				auto plan = con_->ExtractPlan("SELECT * FROM " + quote(kv.second.name));
-				if (plan) {
-					CollectScanKeys(*plan, plan_info_->view_scan_counts[lower]);
+		std::string first_err;
+		auto merge_snap = [&](const AuthorizedViewSubtree &snap) {
+			auto &dst = plan_info_->authorized_views[lower];
+			for (auto &kv_oid : snap.table_oids) {
+				auto &slot = dst.table_oids[kv_oid.first];
+				if (kv_oid.second > slot) {
+					slot = kv_oid.second;
 				}
-			} catch (const std::exception &e2) {
-				throw Error(std::string("authorized view '") + kv.second.name + "' plan snapshot failed: " + e.what() +
-				            " / " + e2.what());
 			}
+			for (auto &fn : snap.table_functions) {
+				dst.table_functions.insert(fn);
+			}
+		};
+		auto merge_plan = [&](const std::string &sql) {
+			try {
+				auto plan = con_->ExtractPlan(sql);
+				if (plan) {
+					AuthorizedViewSubtree snap;
+					CollectAuthorizedViewSubtree(*plan, snap);
+					merge_snap(snap);
+				}
+			} catch (const std::exception &e) {
+				first_err = e.what();
+			}
+		};
+		std::string probe_sql = "SELECT * FROM " + kv.second.name;
+		if (!kv.second.columns.empty()) {
+			probe_sql = "SELECT ";
+			for (size_t i = 0; i < kv.second.columns.size(); i++) {
+				if (i) {
+					probe_sql += ", ";
+				}
+				probe_sql += quote(kv.second.columns[i]);
+			}
+			probe_sql += " FROM " + kv.second.name;
+		}
+		auto probe = RewriteUserSql(probe_sql, policy_, key_);
+		auto from_view = std::string("SELECT * FROM ");
+		if (!view_db.empty()) {
+			from_view += quote(view_db) + ".";
+		}
+		if (!view_schema.empty()) {
+			from_view += quote(view_schema) + ".";
+		}
+		from_view += quote(kv.second.name);
+		// Record the plan the optimizer extension actually sees (same callback
+		// the agent query hits). ExtractPlan's return tree can have fewer gets
+		// than that callback.
+		AuthorizedViewSubtree recorded;
+		plan_info_->record_into = &recorded;
+		plan_info_->record_only = true;
+		try {
+			UserStatementScope user(*con_->context);
+			(void)con_->ExtractPlan(probe);
+		} catch (const std::exception &e) {
+			first_err = e.what();
+		}
+		plan_info_->record_only = false;
+		plan_info_->record_into = nullptr;
+		merge_snap(recorded);
+		merge_plan(probe);
+		merge_plan(from_view);
+		merge_plan(body);
+		if (plan_info_->authorized_views[lower].table_oids.empty() &&
+		    plan_info_->authorized_views[lower].table_functions.empty() && !first_err.empty()) {
+			throw Error(std::string("authorized view '") + kv.second.name + "' plan snapshot failed: " + first_err);
 		}
 	}
 	plan_info_->policy = policy_;

@@ -96,6 +96,36 @@ void duckbox::test::RunSandboxExecTests() {
 
 	{
 		auto view_pol = policy;
+		view_pol.tables["deals"].authorized_view = true;
+		view_pol.tables["deals"].filters.clear();
+		view_pol.tables["deals"].columns = {"id", "title", "amount"};
+		TenantSandbox box_av(
+		    daemon, view_pol, key_a,
+		    "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets", spec_dir);
+		auto got = box_av.Execute("SELECT id, title, amount FROM deals");
+		Expect(got.text_table.find("should never") != std::string::npos,
+		       "reviewer repro: constant-projecting authorized view over secrets is allowed");
+		try {
+			auto plan = box_av.ExtractPlan("SELECT id, title, amount FROM deals");
+			Expect(static_cast<bool>(plan), "ExtractPlan of the authorized view succeeds");
+		} catch (const std::exception &e) {
+			Expect(false, std::string("ExtractPlan of authorized view threw: ") + e.what());
+		}
+		ExpectThrowContains([&] { box_av.Execute("SELECT * FROM deals, secrets"); }, "allowlisted",
+		                    "JOIN of authorized view with secrets is denied");
+		ExpectThrowContains(
+		    [&] { box_av.Execute("SELECT title FROM deals UNION SELECT note FROM secrets"); }, "allowlisted",
+		    "UNION of authorized view with secrets is denied");
+		auto twice = box_av.Execute("SELECT a.title, b.title FROM deals a, deals b");
+		Expect(twice.text_table.find("should never") != std::string::npos,
+		       "repeated FROM deals a, deals b is allowed");
+		auto after = box_av.Execute("SELECT title FROM deals");
+		Expect(after.text_table.find("should never") != std::string::npos,
+		       "denied JOIN/UNION does not poison the next authorized-view query");
+	}
+
+	{
+		auto view_pol = policy;
 		TablePolicy qv;
 		qv.name = "qv";
 		qv.columns = {"x"};
