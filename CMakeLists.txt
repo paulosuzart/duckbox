@@ -219,7 +219,8 @@ target_include_directories(duckbox_core
     ${DUCKBOX_DEPS}/duckdb/include
     ${DUCKBOX_DEPS}/httplib
     ${DUCKBOX_DEPS}/nlohmann
-    ${DUCKBOX_DEPS}/jwt-cpp/include)
+    ${DUCKBOX_DEPS}/jwt-cpp/include
+    ${DUCKBOX_DEPS}/cppcodec)
 target_compile_definitions(duckbox_core PUBLIC DUCKBOX_DUCKDB_VERSION="${DUCKBOX_DUCKDB_VERSION}")
 if(NOT MSVC)
   target_compile_options(duckbox_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
