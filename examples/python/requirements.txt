@@ -1,4 +1,5 @@
 numpy>=2.0
+pandas>=2.0
 pyarrow>=17
 adbc-driver-flightsql>=1.2
 adbc-driver-manager>=1.2

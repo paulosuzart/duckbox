@@ -4,6 +4,39 @@ A **deny-by-default SQL sandbox** for untrusted, often AI-generated, SQL over a 
 
 This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/include/duckbox/duckdb_layer.hpp` for a later DuckDB 2.0 upgrade. Development is DuckDB **1.5.6**.
 
+## Quickstart in 5 minutes
+
+You need Docker (Postgres + an S3 emulator), a built `./build/duckbox`, and Python 3.
+
+```bash
+docker compose up -d
+python3 -m venv .venv && .venv/bin/pip install -r examples/python/requirements.txt
+export DUCKBOX_S3_KEY=rustfsadmin DUCKBOX_S3_SECRET=rustfsadmin
+export DUCKBOX_LAKE_CATALOG='ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox'
+.venv/bin/python scripts/seed_ducklake.py
+./build/duckbox serve --daemon ./daemons/ducklake.yaml
+```
+
+In another terminal:
+
+```bash
+.venv/bin/python examples/python/quickstart.py
+# or open examples/python/quickstart.ipynb  (same steps, pandas DataFrames)
+```
+
+The helper is three or four lines in your own code:
+
+```python
+import sys
+sys.path.append("examples/python")
+from duckbox_client import connect
+
+db = connect()  # tenant_21, localhost, bundled analyst spec
+print(db.query("SELECT id, title, amount FROM deals"))
+```
+
+`DUCKBOX_URL` / `DUCKBOX_SPEC` override the defaults. Memory lake (no Docker): serve `daemons/memory.yaml` and set `DUCKBOX_SPEC=policies/memory/analyst.yaml`. A flag-oriented one-shot lives at `examples/python/query_cli.py`.
+
 ## The sandbox spec is the contract
 
 A duckbox **daemon is a control plane**. It has **no data access**. It owns:
@@ -85,21 +118,7 @@ v1 wire protocol. JDBC and ADBC work. Headers:
 
 `GetCatalogs` / `GetDbSchemas` / `GetTables` / `GetSqlInfo` are answered **by the sandbox** and filtered to spec-whitelisted tables/columns.
 
-Python (ADBC):
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r examples/python/requirements.txt
-# terminal 1
-./build/duckbox serve --daemon ./daemons/memory.yaml
-# terminal 2
-.venv/bin/python examples/python/query.py \
-  --url grpc://127.0.0.1:4747 \
-  --spec ./policies/memory/analyst.yaml \
-  --key tenant_21:user_sergio
-```
-
-Prepared with parameters: `--sql 'SELECT id FROM deals WHERE id = ?' --params 1`.
+Python is Arrow Flight SQL via ADBC. Use `examples/python/quickstart.ipynb` (or `quickstart.py`) after the daemon is up. `duckbox_client.connect()` sends the key and spec headers for you.
 
 ## Build
 
@@ -124,7 +143,7 @@ export DUCKBOX_S3_KEY=rustfsadmin DUCKBOX_S3_SECRET=rustfsadmin
 export DUCKBOX_LAKE_CATALOG='ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox'
 .venv/bin/python scripts/seed_ducklake.py
 ./build/duckbox serve --daemon ./daemons/ducklake.yaml
-.venv/bin/python examples/python/isolation_check.py --spec ./policies/ducklake/analyst.yaml
+.venv/bin/python examples/python/quickstart.py
 ```
 
 CI job `ducklake-e2e` runs this on GitHub Actions (Docker available there). This VM has no Docker, so local compose is the laptop/CI path. **RustFS** is the emulator in `docker-compose.yml` to match the product S3 target; if the image is unusable, MinIO is the fallback (same path-style endpoint).
@@ -138,7 +157,7 @@ Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match)
 | `daemons/` | Control-plane YAML (listen, limits, optional lease) |
 | `policies/` | Sandbox specs (lake + tables + key + functions) |
 | `server/` | C++ daemon + enforcement |
-| `examples/python/` | ADBC Flight SQL client |
+| `examples/python/` | Quickstart notebook/script, `duckbox_client`, CLI utility |
 | `test/` | AST, isolation, handles, initSQL, policy-hash cache |
 
 ## Stubbed

@@ -1,43 +1,25 @@
 #!/usr/bin/env python3
-"""Tenant A must never see tenant B rows over Flight SQL."""
+"""Utility: assert two tenant keys see disjoint deals rows. Prefer quickstart.py."""
 
 from __future__ import annotations
 
-import argparse
-import pathlib
 import sys
+from pathlib import Path
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from query import connect
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-
-def ids_for(url: str, spec: str, key: str) -> list[int]:
-    path = pathlib.Path(spec)
-    yaml = path.read_text()
-    with connect(url, key, yaml, spec_dir=str(path.resolve().parent)) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, title FROM deals ORDER BY id")
-            table = cur.fetch_arrow_table()
-    return [int(v) for v in table.column("id").to_pylist()]
+from duckbox_client import connect  # noqa: E402
 
 
 def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("--url", default="grpc://127.0.0.1:4747")
-    p.add_argument("--spec", default="policies/ducklake/analyst.yaml")
-    args = p.parse_args()
-    a = ids_for(args.url, args.spec, "tenant_21:user_sergio")
-    b = ids_for(args.url, args.spec, "tenant_22:user_kim")
+    sql = "SELECT id, title FROM deals ORDER BY id"
+    with connect(key="tenant_21:user_sergio") as a_db, connect(key="tenant_22:user_kim") as b_db:
+        a = [int(v) for v in a_db.query(sql)["id"].tolist()]
+        b = [int(v) for v in b_db.query(sql)["id"].tolist()]
     print("tenant_21 ids:", a)
     print("tenant_22 ids:", b)
-    if a != [1]:
-        print("FAIL: tenant 21 should see only id 1", file=sys.stderr)
-        return 1
-    if sorted(b) != [3, 4]:
-        print("FAIL: tenant 22 should see ids 3,4", file=sys.stderr)
-        return 1
-    if set(a) & set(b):
-        print("FAIL: tenant overlap", file=sys.stderr)
+    if a != [1] or sorted(b) != [3, 4] or set(a) & set(b):
+        print("FAIL: tenant isolation", file=sys.stderr)
         return 1
     print("isolation ok")
     return 0

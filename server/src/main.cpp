@@ -96,7 +96,7 @@ int main(int argc, char **argv) {
 			return duckbox::RunValidateCommand(daemon, spec);
 		}
 		if (cmd == "query") {
-			std::cerr << "duckbox query: use examples/python/query.py (ADBC Flight SQL).\n"
+			std::cerr << "duckbox query: use examples/python/quickstart.py (or query_cli.py).\n"
 			          << "Or: duckbox run --spec FILE --key KEY --sql SQL\n";
 			return 1;
 		}

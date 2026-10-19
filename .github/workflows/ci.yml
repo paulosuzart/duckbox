@@ -60,7 +60,7 @@ jobs:
           .venv/bin/pip install -r examples/python/requirements.txt
       - name: Seed DuckLake
         run: .venv/bin/python scripts/seed_ducklake.py
-      - name: Serve Flight SQL and isolation check
+      - name: Serve Flight SQL, quickstart, and scrape /metrics
         env:
           DUCKBOX_S3_KEY: rustfsadmin
           DUCKBOX_S3_SECRET: rustfsadmin
@@ -74,15 +74,7 @@ jobs:
             fi
             sleep 1
           done
-          .venv/bin/python examples/python/isolation_check.py \
-            --url grpc://127.0.0.1:4747 \
-            --spec policies/ducklake/analyst.yaml
-          .venv/bin/python examples/python/query.py \
-            --url grpc://127.0.0.1:4747 \
-            --spec policies/ducklake/analyst.yaml \
-            --key tenant_21:user_sergio \
-            --sql 'SELECT id, title, amount FROM deals WHERE id = ?' \
-            --params 1
+          .venv/bin/python examples/python/quickstart.py
           curl -sf http://127.0.0.1:9477/metrics > /tmp/duckbox-metrics.txt
           grep -q 'duckbox_query_duration_seconds' /tmp/duckbox-metrics.txt
           grep -q 'duckbox_queries_active' /tmp/duckbox-metrics.txt
