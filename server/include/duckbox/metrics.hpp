@@ -173,6 +173,8 @@ void SetMetrics(std::shared_ptr<IMetrics> m);
 // stderr JSON. Includes tenant/user/key — those must not appear on /metrics.
 void WriteAuditLog(const TenantKey &key, const Policy &policy, double seconds, int64_t rows, int64_t bytes,
                    const char *outcome, const char *reason);
+// Warmup audit of trusted initSQL. Secrets (password=, SECRET ', URI userinfo) are redacted.
+void WriteInitSqlAudit(const TenantKey &key, const Policy &policy, const std::string &sql, const char *outcome);
 
 void ObserveFailure(IMetrics &m, const Policy *policy, const TenantKey *key, const std::exception &e, bool cold,
                     double seconds);

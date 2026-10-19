@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <iostream>
+#include <unordered_set>
 
 namespace duckbox {
 
@@ -42,6 +43,7 @@ const char *kUserStmtState = "duckbox.user_statement";
 struct UserStatementGuardState : ddb::ClientContextState {
 	int scopes = 0;
 	int optimizer_depth = 0;
+	std::unordered_set<std::string> trusted_scan_keys;
 };
 
 bool ValuesEqual(const ddb::Value &got, const ddb::Value &want) {
@@ -275,18 +277,137 @@ bool ScanHasTypedPred(ddb::LogicalGet &get, const MandatoryPred &pred, const std
 	return false;
 }
 
-std::string BoundTableName(ddb::LogicalGet &get) {
+std::string BoundTableName(const ddb::LogicalGet &get) {
 	if (auto table = get.GetTable()) {
 		return table->name;
 	}
 	return "";
 }
 
-void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, const std::vector<BoundEq> &inherited) {
+std::string ScanKeyOf(const ddb::LogicalGet &get) {
+	auto fname = ddb::StringUtil::Lower(get.function.name);
+	auto tname = ddb::StringUtil::Lower(BoundTableName(get));
+	std::string k = fname;
+	k.push_back('\n');
+	k += tname;
+	for (auto &p : get.parameters) {
+		k.push_back('\n');
+		k += p.IsNull() ? "NULL" : p.ToString();
+	}
+	return k;
+}
+
+void CollectGets(ddb::LogicalOperator &op, std::unordered_set<std::string> &out) {
+	if (op.type == ddb::LogicalOperatorType::LOGICAL_GET) {
+		out.insert(ScanKeyOf(op.Cast<ddb::LogicalGet>()));
+	}
+	for (auto &child : op.children) {
+		if (child) {
+			CollectGets(*child, out);
+		}
+	}
+}
+
+void CollectBaseTables(ddb::TableRef &ref, std::vector<std::string> &out) {
+	switch (ref.type) {
+	case ddb::TableReferenceType::BASE_TABLE: {
+		out.push_back(ddb::StringUtil::Lower(ref.Cast<ddb::BaseTableRef>().table_name));
+		break;
+	}
+	case ddb::TableReferenceType::SUBQUERY: {
+		auto &sq = ref.Cast<ddb::SubqueryRef>();
+		if (sq.subquery && sq.subquery->node) {
+			std::function<void(ddb::QueryNode &)> walk;
+			walk = [&](ddb::QueryNode &node) {
+				for (auto &kv : node.cte_map.map) {
+					if (kv.second && kv.second->query && kv.second->query->node) {
+						walk(*kv.second->query->node);
+					}
+				}
+				if (node.type == ddb::QueryNodeType::SELECT_NODE) {
+					auto &sel = node.Cast<ddb::SelectNode>();
+					if (sel.from_table) {
+						CollectBaseTables(*sel.from_table, out);
+					}
+				} else if (node.type == ddb::QueryNodeType::SET_OPERATION_NODE) {
+					auto &setop = node.Cast<ddb::SetOperationNode>();
+					for (auto &child : setop.children) {
+						if (child) {
+							walk(*child);
+						}
+					}
+				}
+			};
+			walk(*sq.subquery->node);
+		}
+		break;
+	}
+	case ddb::TableReferenceType::JOIN: {
+		auto &join = ref.Cast<ddb::JoinRef>();
+		if (join.left) {
+			CollectBaseTables(*join.left, out);
+		}
+		if (join.right) {
+			CollectBaseTables(*join.right, out);
+		}
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+void CollectBaseTablesFromSql(const std::string &sql, std::vector<std::string> &out) {
+	if (sql.empty()) {
+		return;
+	}
+	try {
+		ddb::Parser parser;
+		parser.ParseQuery(sql);
+		for (auto &st : parser.statements) {
+			if (!st || st->type != ddb::StatementType::SELECT_STATEMENT) {
+				continue;
+			}
+			auto &sel = st->Cast<ddb::SelectStatement>();
+			if (!sel.node) {
+				continue;
+			}
+			std::function<void(ddb::QueryNode &)> walk;
+			walk = [&](ddb::QueryNode &node) {
+				for (auto &kv : node.cte_map.map) {
+					if (kv.second && kv.second->query && kv.second->query->node) {
+						walk(*kv.second->query->node);
+					}
+				}
+				if (node.type == ddb::QueryNodeType::SELECT_NODE) {
+					auto &sn = node.Cast<ddb::SelectNode>();
+					if (sn.from_table) {
+						CollectBaseTables(*sn.from_table, out);
+					}
+				} else if (node.type == ddb::QueryNodeType::SET_OPERATION_NODE) {
+					auto &setop = node.Cast<ddb::SetOperationNode>();
+					for (auto &child : setop.children) {
+						if (child) {
+							walk(*child);
+						}
+					}
+				}
+			};
+			walk(*sel.node);
+		}
+	} catch (...) {
+	}
+}
+
+void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, const std::vector<BoundEq> &inherited,
+              const std::unordered_set<std::string> *trusted_view_scans) {
 	auto fname = ddb::StringUtil::Lower(get.function.name);
 	auto table = get.GetTable();
 	auto tname = BoundTableName(get);
 
+	if (trusted_view_scans && trusted_view_scans->count(ScanKeyOf(get))) {
+		return;
+	}
 	auto require_preds = [&](const TablePolicy &spec, const std::string &shown) {
 		for (auto &pred : PredicatesFor(spec, key)) {
 			if (!ScanHasTypedPred(get, pred, inherited)) {
@@ -341,7 +462,8 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 	// seq_scan without a catalog entry is a CTE / VALUES materialization — no lake table.
 }
 
-void Walk(ddb::LogicalOperator &op, const Policy &policy, const TenantKey &key, std::vector<BoundEq> inherited) {
+void Walk(ddb::LogicalOperator &op, const Policy &policy, const TenantKey &key, std::vector<BoundEq> inherited,
+          const std::unordered_set<std::string> *trusted_view_scans) {
 	if (op.type == ddb::LogicalOperatorType::LOGICAL_FILTER) {
 		for (auto &e : op.expressions) {
 			if (e) {
@@ -350,17 +472,26 @@ void Walk(ddb::LogicalOperator &op, const Policy &policy, const TenantKey &key, 
 		}
 	}
 	if (op.type == ddb::LogicalOperatorType::LOGICAL_GET) {
-		CheckGet(op.Cast<ddb::LogicalGet>(), policy, key, inherited);
+		CheckGet(op.Cast<ddb::LogicalGet>(), policy, key, inherited, trusted_view_scans);
 	}
 	for (auto &child : op.children) {
-		Walk(*child, policy, key, inherited);
+		Walk(*child, policy, key, inherited, trusted_view_scans);
 	}
 }
 
 } // namespace
 
-void CheckLogicalPlan(ddb::LogicalOperator &plan, const Policy &policy, const TenantKey &key) {
-	Walk(plan, policy, key, {});
+void CheckLogicalPlan(ddb::LogicalOperator &plan, const Policy &policy, const TenantKey &key,
+                      const std::unordered_set<std::string> *trusted_view_scans) {
+	Walk(plan, policy, key, {}, trusted_view_scans);
+}
+
+std::string LogicalGetScanKey(const ddb::LogicalGet &get) {
+	return ScanKeyOf(get);
+}
+
+void CollectScanKeys(ddb::LogicalOperator &plan, std::unordered_set<std::string> &out) {
+	CollectGets(plan, out);
 }
 
 void PlanChecker::Check(ddb::LogicalOperator &plan, const Policy &policy, const TenantKey &key) const {
@@ -385,9 +516,31 @@ UserStatementScope::~UserStatementScope() {
 	if (st.scopes > 0) {
 		st.scopes--;
 	}
+	if (st.scopes == 0) {
+		st.trusted_scan_keys.clear();
+	}
 }
 
-void RegisterPlanGuard(ddb::DBConfig &config, const Policy &policy, const TenantKey &key) {
+void NoteAuthorizedViews(ddb::ClientContext &ctx, const PlanGuardInfo &info, const std::string &sql) {
+	auto st = ctx.registered_state->Get<UserStatementGuardState>(kUserStmtState);
+	if (!st || st->scopes <= 0) {
+		return;
+	}
+	st->trusted_scan_keys.clear();
+	std::vector<std::string> tables;
+	CollectBaseTablesFromSql(sql, tables);
+	for (auto &name : tables) {
+		auto it = info.view_scan_keys.find(name);
+		if (it == info.view_scan_keys.end()) {
+			continue;
+		}
+		for (auto &k : it->second) {
+			st->trusted_scan_keys.insert(k);
+		}
+	}
+}
+
+ddb::shared_ptr<PlanGuardInfo> RegisterPlanGuard(ddb::DBConfig &config, const Policy &policy, const TenantKey &key) {
 	ddb::OptimizerExtension ext;
 	auto info = ddb::make_shared_ptr<PlanGuardInfo>();
 	info->policy = policy;
@@ -412,13 +565,14 @@ void RegisterPlanGuard(ddb::DBConfig &config, const Policy &policy, const Tenant
 			return;
 		}
 		try {
-			CheckLogicalPlan(*plan, info->policy, info->key);
+			CheckLogicalPlan(*plan, info->policy, info->key, &st->trusted_scan_keys);
 		} catch (const PlanRejected &e) {
 			std::clog << "duckbox plan guard: " << e.what() << "\n";
 			throw;
 		}
 	};
 	ddb::OptimizerExtension::Register(config, ext);
+	return info;
 }
 
 } // namespace duckbox

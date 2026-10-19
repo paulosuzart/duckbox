@@ -31,7 +31,7 @@ public:
 	}
 };
 
-// User/initSQL rejected at the AST (not SELECT, table/function not allowlisted).
+// Agent SQL rejected at the AST (not SELECT, table/function not allowlisted).
 class SqlRejected : public Error {
 public:
 	explicit SqlRejected(const std::string &msg) : Error(msg) {

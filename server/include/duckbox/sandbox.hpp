@@ -7,6 +7,7 @@
 
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/lease.hpp"
+#include "duckbox/plan_check.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/sandbox_registry.hpp"
 #include "duckbox/secrets.hpp"
@@ -44,7 +45,7 @@ public:
 	              std::string sandbox_id = "", int version = 0, std::shared_ptr<SecretResolver> secrets = {});
 	~TenantSandbox();
 
-	void Warmup(bool validate_lake); // attach lake, initSQL, lock_configuration; no-op if already warm
+	void Warmup(bool validate_lake); // attach lake, trusted initSQL, then disable external access + lock_configuration
 	void Passivate(const char *reason = "shutdown"); // frees DuckDB; definition stays in the registry
 	bool Warm() const {
 		return static_cast<bool>(db_);
@@ -87,6 +88,7 @@ public:
 
 private:
 	QueryOutput RunTimed(const std::string &sql, std::vector<ddb::Value> params);
+	void SnapshotAuthorizedViews();
 	// ROLLBACK so a plan-guard / binder / timeout failure cannot leave DuckLake's
 	// catalog transaction aborted (next query would be a cheap DoS).
 	void RecoverAfterFailure();
@@ -101,6 +103,7 @@ private:
 	std::shared_ptr<SecretResolver> secrets_;
 	std::unique_ptr<ddb::DuckDB> db_;
 	std::unique_ptr<ddb::Connection> con_;
+	ddb::shared_ptr<PlanGuardInfo> plan_info_;
 	std::mutex mu_; // held for the whole user statement; see UserStatementScope
 	std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
 	int64_t last_used_wall_ms_ = 0;

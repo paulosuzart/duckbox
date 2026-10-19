@@ -93,13 +93,16 @@ struct ColumnMeta {
 	std::string lake_type;
 };
 
-// Allowlisted table. filters are typed equalities (tenant_id, _deleted, …) verified on the bound plan.
+// Allowlisted table or authorized view. filters are typed equalities (tenant_id,
+// _deleted, …) verified on the bound plan for direct table access. authorized_view
+// is set at warmup when the spec name is an initSQL view (not YAML).
 struct TablePolicy {
 	std::string name;
 	std::vector<std::string> columns;
 	std::vector<std::string> filters;
 	std::string tenant_column = "tenant_id";
 	std::vector<ColumnMeta> lake_columns;
+	bool authorized_view = false;
 };
 
 struct SandboxSpec {

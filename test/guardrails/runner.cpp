@@ -50,14 +50,17 @@ int main() {
 	}
 
 	std::map<std::string, std::unique_ptr<TenantSandbox>> boxes;
-	auto box_for = [&](const std::string &raw, const std::string &init_sql) -> TenantSandbox & {
+	auto box_for = [&](const std::string &raw, const std::string &init_sql, const Policy &pol) -> TenantSandbox & {
 		auto cache_key = raw + "\n" + init_sql;
+		for (auto &kv : pol.tables) {
+			cache_key += "\n" + kv.first;
+		}
 		auto it = boxes.find(cache_key);
 		if (it != boxes.end()) {
 			return *it->second;
 		}
-		auto key = ParseTenantKey(raw, policy.key);
-		auto box = std::make_unique<TenantSandbox>(daemon, policy, key, init_sql, spec_dir);
+		auto key = ParseTenantKey(raw, pol.key);
+		auto box = std::make_unique<TenantSandbox>(daemon, pol, key, init_sql, spec_dir);
 		auto *ptr = box.get();
 		boxes.emplace(cache_key, std::move(box));
 		return *ptr;
@@ -71,7 +74,7 @@ int main() {
 		}
 		YamlRejectUnknownKeys(node, {"id", "sql", "expect", "reason", "stage", "contains", "not_contains", "key",
 		                             "init_sql", "rewrite_contains", "rewrite_not_contains", "extra_functions",
-		                             "deny_table_functions", "spec_yaml", "scan_fn"});
+		                             "deny_table_functions", "spec_yaml", "scan_fn", "extra_tables"});
 		auto id = node.GetString("id");
 		auto sql = Trim(node.GetString("sql"));
 		auto expect = node.GetString("expect");
@@ -97,7 +100,32 @@ int main() {
 		bool do_plan = stage == "plan";
 		bool do_spec = stage == "spec";
 		auto init_sql = Trim(node.GetString("init_sql"));
-		auto key = ParseTenantKey(key_raw, policy.key);
+		auto case_policy = policy;
+		if (auto *extra_tbl = node.Get("extra_tables")) {
+			if (!extra_tbl->IsSeq()) {
+				g_failed++;
+				std::cerr << "FAIL: " << id << " extra_tables must be a sequence\n";
+				continue;
+			}
+			for (auto &tn : extra_tbl->seq) {
+				YamlRejectUnknownKeys(tn, {"name", "columns", "filters", "tenant_column"});
+				TablePolicy tp;
+				tp.name = tn.GetString("name");
+				tp.columns = YamlStringList(tn.Get("columns"), tn.path + ".columns");
+				tp.filters = YamlStringList(tn.Get("filters"), tn.path + ".filters");
+				auto tc = tn.GetString("tenant_column");
+				if (!tc.empty()) {
+					tp.tenant_column = tc;
+				}
+				if (tp.name.empty()) {
+					g_failed++;
+					std::cerr << "FAIL: " << id << " extra_tables entry needs name\n";
+					continue;
+				}
+				case_policy.tables[ddb::StringUtil::Lower(tp.name)] = tp;
+			}
+		}
+		auto key = ParseTenantKey(key_raw, case_policy.key);
 		auto contains = YamlStringList(node.Get("contains"), node.path + ".contains");
 		auto not_contains = YamlStringList(node.Get("not_contains"), node.path + ".not_contains");
 		auto rw_contains = YamlStringList(node.Get("rewrite_contains"), node.path + ".rewrite_contains");
@@ -195,7 +223,7 @@ int main() {
 					auto get = duckbox::test::MakeScan(scan_fn, {});
 					CheckLogicalPlan(*get, policy, key);
 				} else {
-					box_for(key_raw, init_sql).ExtractPlan(sql);
+					box_for(key_raw, init_sql, case_policy).ExtractPlan(sql);
 				}
 				if (expect == "deny") {
 					g_failed++;
@@ -240,7 +268,7 @@ int main() {
 
 		if (do_execute) {
 			try {
-				auto out = box_for(key_raw, init_sql).Execute(sql);
+				auto out = box_for(key_raw, init_sql, case_policy).Execute(sql);
 				if (expect == "deny") {
 					g_failed++;
 					std::cerr << "FAIL: " << id << " expected execute deny of " << sql << "\n";

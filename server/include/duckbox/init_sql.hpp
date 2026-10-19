@@ -1,10 +1,10 @@
 #pragma once
 
-// initSQL allowlist: SET (permitted names), CREATE TEMP VIEW/MACRO/TABLE,
-// USE, LOAD of spec-listed extensions. Reject ATTACH/DETACH, COPY/EXPORT,
-// INSTALL, and security settings. VIEW/MACRO/CTAS bodies get the same AST
-// checks as user SQL (no table functions, function allowlist, table allowlist).
-// Runs before lock_configuration on warmup.
+// Trusted SaaS initSQL. No AST allowlist or body validation — the caller that
+// creates the sandbox supplies this SQL. It runs at warmup before
+// enable_external_access=false and lock_configuration. The agent never runs
+// in this phase. Views/macros it creates are authorized if the spec exposes
+// them (see PlanGuardInfo::view_scan_keys).
 
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/policy.hpp"
@@ -19,17 +19,17 @@ class IInitSqlGuard {
 public:
 	virtual ~IInitSqlGuard() = default;
 	virtual void Check(const std::string &sql, const DaemonConfig &daemon, const SandboxSpec &spec,
-	                   const TenantKey *key = nullptr) const = 0; // SqlRejected; key rewrites VIEW bodies
+	                   const TenantKey *key = nullptr) const = 0;
 };
 
 class InitSqlGuard : public IInitSqlGuard {
 public:
-	// Empty allowed_init_settings is deny-all. VIEW/MACRO bodies are rewritten with the tenant key.
+	// No-op: initSQL is trusted. Kept so older tests/callers compile.
 	void Check(const std::string &sql, const DaemonConfig &daemon, const SandboxSpec &spec,
 	           const TenantKey *key = nullptr) const override;
 };
 
-// Enforces init_sql_timeout_ms via a watchdog Interrupt.
+// Runs sql as-is (timeout via watchdog Interrupt). No rewrite.
 void RunInitSql(ddb::Connection &con, const std::string &sql, const DaemonConfig &daemon, const SandboxSpec &spec,
                 const TenantKey *key = nullptr);
 

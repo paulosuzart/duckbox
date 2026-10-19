@@ -47,6 +47,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/enums/catalog_type.hpp"
 #include "duckdb/common/enums/statement_type.hpp"
+#include "duckdb/parser/tableref.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/parser/tableref/expressionlistref.hpp"
 #include "duckdb/parser/tableref/joinref.hpp"

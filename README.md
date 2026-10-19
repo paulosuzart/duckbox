@@ -4,6 +4,14 @@ A **deny-by-default SQL sandbox** for untrusted, often AI-generated, SQL over a 
 
 This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/include/duckbox/duckdb_layer.hpp` for a later DuckDB 2.0 upgrade. Development is DuckDB **1.5.6**.
 
+## Actors and trust model
+
+1. **AI agent** (untrusted). Generates SQL and runs it via ADBC / Flight SQL on an **existing** sandbox. It cannot create sandboxes, cannot run initSQL, and cannot `CREATE VIEW`.
+2. **SaaS** (trusted caller). Creates, updates, expires, and deletes sandboxes through its own harness (CRUD is authenticated and scoped by key prefix). It supplies **initSQL**. Duckbox does not AST-check that SQL.
+3. **Sandbox**. Exposes spec-whitelisted tables/views and scalar functions. Agent SQL is fully guarded (AST + plan): only those names, plus tenant filters on **direct table** access.
+
+**initSQL** is trusted. It runs at warmup **before** `enable_external_access=false` and `lock_configuration`. The agent never executes in that phase. Views (and macros) created there are **authorized views** (BigQuery-style): if the spec exposes the view, scans and table functions inside its expansion are trusted. The same function called directly by the agent is denied. initSQL is written to the audit log with secrets redacted.
+
 ## Quickstart in 5 minutes
 
 You need Docker (Postgres + an S3 emulator), a built `./build/duckbox`, and Python 3.
@@ -91,7 +99,7 @@ Each node also serves Prometheus **text** on `/metrics` (default `127.0.0.1:9477
 
 ### Validation
 
-1. **Static** (create/update): schema, types, key extractors, filters, `:vars`, function names, initSQL allowlist, secret-ref syntax, `handles.stale_version_grace` (duration, cap 1h). **All** errors, with field paths (`tables.deals.filters[0]: …`).
+1. **Static** (create/update): schema, types, key extractors, filters, `:vars`, function names, secret-ref syntax, `handles.stale_version_grace` (duration, cap 1h). **All** errors, with field paths (`tables.deals.filters[0]: …`). initSQL is not AST-validated (trusted SaaS input).
 2. **Lake** (inside the sandbox on first warmup for that **(id, version)**): whitelisted tables/columns exist. Cached on the registry record so later warmups skip it. `duckbox validate` uses a throwaway sandbox.
 
 Daemon startup validates **only** daemon config (listen, limits, optional lease prefix reachability / If-None-Match probe). Not the lake.
@@ -100,7 +108,7 @@ Daemon startup validates **only** daemon config (listen, limits, optional lease 
 
 Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap. Spec `lifecycle.idle_timeout` overrides the daemon default (capped by `limits.max_idle_timeout`). Spec `lifecycle.ttl` / `expires_at` tombstone the named definition when due.
 
-**initSQL**: SET of permitted names (empty allowlist is deny-all), `CREATE [OR REPLACE] TEMP VIEW|MACRO|TABLE`, `USE`, `LOAD` of spec-listed extensions (exact name). Reject `ATTACH`/`DETACH`, `COPY`/`EXPORT`, `INSTALL`, security settings. VIEW/MACRO bodies are rewritten with the tenant key and AST-checked. Objects it creates are visible to user SQL **only if the spec whitelists them**. After lake attach, `enable_external_access` is false (allowed_directories/paths cover the lake only).
+**initSQL**: trusted SaaS SQL, rerun on every warmup, then `enable_external_access=false` and `lock_configuration`. Objects it creates are visible to agent SQL **only if the spec lists them**. Exposed views are authorized (body trusted in the plan guard). After initSQL, `allowed_directories`/`allowed_paths` cover the lake; agent SQL cannot `COPY`/`read_*` except through those views.
 
 ### Metrics
 

@@ -58,22 +58,20 @@ cases:
     reason: not allowlisted
     stage: both
 
+  # initSQL is trusted SaaS SQL (no AST allowlist).
   - id: initsql_view_postgres_scan
     sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
-    expect: deny
-    reason: table functions
+    expect: allow
     stage: initsql
 
   - id: initsql_macro_postgres_scan
     sql: "CREATE TEMP MACRO sneak() AS TABLE SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
-    expect: deny
-    reason: table functions
+    expect: allow
     stage: initsql
 
   - id: initsql_view_replacement_scan
     sql: "CREATE TEMP VIEW v AS SELECT * FROM 's3://duckbox-lake/data/secret.parquet'"
-    expect: deny
-    reason: replacement scans
+    expect: allow
     stage: initsql
 
   - id: parquet_scan
@@ -175,15 +173,47 @@ cases:
 
   - id: initsql_view_postgres_scan_pushdown
     sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_scan_pushdown('dbname=x', 'public', 'deals')"
-    expect: deny
-    reason: table functions
+    expect: allow
     stage: initsql
 
   - id: initsql_view_postgres_query
     sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_query('SELECT 1')"
+    expect: allow
+    stage: initsql
+
+  - id: agent_create_view
+    sql: "CREATE TEMP VIEW x AS SELECT 1 AS x"
+    expect: deny
+    reason: only SELECT
+
+  - id: agent_range_denied
+    sql: "SELECT * FROM range(1, 4)"
     expect: deny
     reason: table functions
-    stage: initsql
+
+  - id: authorized_view_query
+    sql: "SELECT * FROM qv"
+    expect: allow
+    stage: execute
+    init_sql: "CREATE TEMP VIEW qv AS SELECT * FROM query('SELECT 1 AS x')"
+    extra_tables:
+      - name: qv
+        columns:
+          - x
+    contains:
+      - "1"
+
+  - id: authorized_view_range
+    sql: "SELECT i FROM ext_v ORDER BY i"
+    expect: allow
+    stage: execute
+    init_sql: "CREATE TEMP VIEW ext_v AS SELECT range AS i FROM range(1, 4)"
+    extra_tables:
+      - name: ext_v
+        columns:
+          - i
+    contains:
+      - "1"
 
   - id: duckdb_tables
     sql: "SELECT * FROM duckdb_tables()"

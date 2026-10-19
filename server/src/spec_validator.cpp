@@ -1,5 +1,4 @@
 #include "duckbox/spec_validator.hpp"
-#include "duckbox/init_sql.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/plan_check.hpp"
 #include "duckbox/rewriter.hpp"
@@ -210,14 +209,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 			add("functions", "not a valid function identifier: " + fn);
 		}
 	}
-	if (!spec.init_sql.empty()) {
-		try {
-			DaemonConfig dummy = DefaultDaemonConfig();
-			InitSqlGuard{}.Check(spec.init_sql, dummy, spec);
-		} catch (const std::exception &e) {
-			add("init_sql", e.what());
-		}
-	}
+	// initSQL is trusted SaaS input; no AST allowlist at spec load.
 	if (!spec.handles.stale_version_grace_raw.empty() && spec.handles.stale_version_grace_ms < 0) {
 		add("handles.stale_version_grace", "expected duration like 0s, 30s, 5m, 1h (cap 1h)");
 	} else if (spec.handles.stale_version_grace_ms < 0) {
@@ -271,7 +263,16 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
 				add(prefix + ".columns", "column '" + col + "' does not exist on lake table '" + kv.second.name + "'");
 			}
 		}
-		if (!coltypes.count(ddb::StringUtil::Lower(kv.second.tenant_column))) {
+		bool is_view = false;
+		{
+			auto vr = con.Query("SELECT 1 FROM duckdb_views() WHERE lower(view_name)='" +
+			                    EscapeSqlString(ddb::StringUtil::Lower(kv.second.name)) + "' LIMIT 1");
+			if (vr && !vr->HasError()) {
+				auto chunk = vr->Fetch();
+				is_view = chunk && chunk->size() > 0;
+			}
+		}
+		if (!is_view && !coltypes.count(ddb::StringUtil::Lower(kv.second.tenant_column))) {
 			add(prefix + ".tenant_column", "column '" + kv.second.tenant_column + "' does not exist");
 		}
 		for (size_t i = 0; i < kv.second.filters.size(); i++) {

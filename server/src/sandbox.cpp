@@ -39,6 +39,7 @@ void TenantSandbox::Passivate(const char *reason) {
 	bool was_warm = static_cast<bool>(db_);
 	con_.reset();
 	db_.reset();
+	plan_info_.reset();
 	if (was_warm) {
 		Metrics().IncPassivation(reason ? reason : "shutdown");
 	}
@@ -59,7 +60,7 @@ void TenantSandbox::Warmup(bool validate_lake) {
 		}
 	}
 	ddb::DBConfig config;
-	RegisterPlanGuard(config, policy_, key_);
+	plan_info_ = RegisterPlanGuard(config, policy_, key_);
 	try {
 		db_ = std::make_unique<ddb::DuckDB>(nullptr, &config);
 		con_ = std::make_unique<ddb::Connection>(*db_);
@@ -86,12 +87,16 @@ void TenantSandbox::Warmup(bool validate_lake) {
 				throw Error("allowed_paths did not take effect for the lake data_path");
 			}
 		}
+		auto i0 = std::chrono::steady_clock::now();
 		try {
-			// After attach the lake paths are already allowed; keep COPY/read_csv from reaching the host.
-			ExecOrThrow(*con_, "SET enable_external_access=false");
-		} catch (const std::exception &) {
-			// lock_configuration / older builds; still refuse COPY via validator + plan guard
+			RunInitSql(*con_, init_sql_, daemon_, policy_, &key_);
+			WriteInitSqlAudit(key_, policy_, init_sql_, "ok");
+		} catch (...) {
+			WriteInitSqlAudit(key_, policy_, init_sql_, "error");
+			throw;
 		}
+		Metrics().ObserveInitSql(std::chrono::duration<double>(std::chrono::steady_clock::now() - i0).count());
+		SnapshotAuthorizedViews();
 		if (validate_lake) {
 			auto v0 = std::chrono::steady_clock::now();
 			SpecValidator v;
@@ -106,9 +111,12 @@ void TenantSandbox::Warmup(bool validate_lake) {
 				throw;
 			}
 		}
-		auto i0 = std::chrono::steady_clock::now();
-		RunInitSql(*con_, init_sql_, daemon_, policy_, &key_);
-		Metrics().ObserveInitSql(std::chrono::duration<double>(std::chrono::steady_clock::now() - i0).count());
+		try {
+			// Agent SQL runs after this. initSQL already ran with external access on.
+			ExecOrThrow(*con_, "SET enable_external_access=false");
+		} catch (const std::exception &) {
+			// lock_configuration / older builds; still refuse COPY via validator + plan guard
+		}
 		auto &r = policy_.resources;
 		ExecOrThrow(*con_, "SET memory_limit='" + EscapeSqlString(r.memory_limit) + "'");
 		ExecOrThrow(*con_, "SET threads=" + std::to_string(r.threads));
@@ -121,8 +129,80 @@ void TenantSandbox::Warmup(bool validate_lake) {
 		RecoverAfterFailure();
 		con_.reset();
 		db_.reset();
+		plan_info_.reset();
 		throw;
 	}
+}
+
+void TenantSandbox::SnapshotAuthorizedViews() {
+	if (!con_ || !plan_info_) {
+		return;
+	}
+	plan_info_->view_scan_keys.clear();
+	auto quote = [](const std::string &n) {
+		std::string o = "\"";
+		for (char c : n) {
+			o += (c == '"') ? "\"\"" : std::string(1, c);
+		}
+		o += '"';
+		return o;
+	};
+	for (auto &kv : policy_.tables) {
+		auto lower = ddb::StringUtil::Lower(kv.second.name);
+		bool has_base = false;
+		{
+			auto bt = con_->Query("SELECT 1 FROM information_schema.tables WHERE lower(table_name)='" +
+			                      EscapeSqlString(lower) + "' AND table_type='BASE TABLE' LIMIT 1");
+			if (bt && !bt->HasError()) {
+				auto chunk = bt->Fetch();
+				has_base = chunk && chunk->size() > 0;
+			}
+		}
+		auto q = con_->Query("SELECT sql FROM duckdb_views() WHERE lower(view_name)='" + EscapeSqlString(lower) +
+		                     "' LIMIT 1");
+		std::string view_sql;
+		if (q && !q->HasError()) {
+			auto chunk = q->Fetch();
+			if (chunk && chunk->size() > 0 && !chunk->data[0].GetValue(0).IsNull()) {
+				view_sql = chunk->data[0].GetValue(0).ToString();
+			}
+		}
+		// A temp view that shadows a lake table is not an authorized view; the
+		// rewriter keeps qualifying the base table (tenant filters still apply).
+		if (view_sql.empty() || has_base) {
+			kv.second.authorized_view = false;
+			continue;
+		}
+		kv.second.authorized_view = true;
+		// Plan the view body, not `SELECT * FROM view` — a view named like a
+		// base table would recurse in the binder (CREATE VIEW deals AS … deals).
+		auto body = view_sql;
+		ddb::StringUtil::Trim(body);
+		auto trimmed = ddb::StringUtil::Lower(body);
+		if (trimmed.rfind("create ", 0) == 0) {
+			auto as_pos = trimmed.find(" as ");
+			if (as_pos != std::string::npos) {
+				body = body.substr(as_pos + 4);
+			}
+		}
+		try {
+			auto plan = con_->ExtractPlan(body);
+			if (plan) {
+				CollectScanKeys(*plan, plan_info_->view_scan_keys[lower]);
+			}
+		} catch (const std::exception &e) {
+			try {
+				auto plan = con_->ExtractPlan("SELECT * FROM " + quote(kv.second.name));
+				if (plan) {
+					CollectScanKeys(*plan, plan_info_->view_scan_keys[lower]);
+				}
+			} catch (const std::exception &e2) {
+				throw Error(std::string("authorized view '") + kv.second.name + "' plan snapshot failed: " + e.what() +
+				            " / " + e2.what());
+			}
+		}
+	}
+	plan_info_->policy = policy_;
 }
 
 void TenantSandbox::RecoverAfterFailure() {
@@ -143,6 +223,9 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
 		RecoverAfterFailure();
 	}
 	UserStatementScope user(*con_->context);
+	if (plan_info_) {
+		NoteAuthorizedViews(*con_->context, *plan_info_, sql);
+	}
 	std::mutex wait_mu;
 	std::condition_variable cv;
 	bool finished = false;
@@ -283,6 +366,9 @@ ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::stri
 	}
 	try {
 		UserStatementScope user(*con_->context);
+		if (plan_info_) {
+			NoteAuthorizedViews(*con_->context, *plan_info_, sql);
+		}
 		return con_->ExtractPlan(sql);
 	} catch (...) {
 		RecoverAfterFailure();
@@ -300,6 +386,9 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
 	try {
 		UserStatementScope user(*con_->context);
 		auto rewritten = RewriteUserSql(sql, policy_, key_);
+		if (plan_info_) {
+			NoteAuthorizedViews(*con_->context, *plan_info_, rewritten);
+		}
 		auto ps = con_->Prepare(rewritten);
 		if (ps->HasError()) {
 			throw Error(ps->GetError());

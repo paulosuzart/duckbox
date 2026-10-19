@@ -4,6 +4,7 @@
 #include "duckbox/arrow_ipc.hpp"
 #include "duckbox/http_server.hpp"
 #include "duckbox/init_sql.hpp"
+#include "duckbox/lake.hpp"
 #include "duckbox/plan_check.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/sandbox.hpp"
@@ -91,6 +92,45 @@ void duckbox::test::RunSandboxExecTests() {
 		                    "CREATE TEMP VIEW deals AS (WITH deals AS (SELECT 1) SELECT * FROM main.deals)", spec_dir);
 		auto v = boxed.Execute("SELECT * FROM deals");
 		Expect(v.text_table.find("alpha deleted") == std::string::npos, "C1 initSQL view of deals is still filtered");
+	}
+
+	{
+		auto view_pol = policy;
+		TablePolicy qv;
+		qv.name = "qv";
+		qv.columns = {"x"};
+		view_pol.tables["qv"] = qv;
+		TablePolicy pv;
+		pv.name = "parquet_v";
+		pv.columns = {"id", "title"};
+		view_pol.tables["parquet_v"] = pv;
+		auto parquet_dir = std::string("/tmp/duckbox-authz-view");
+		std::filesystem::create_directories(parquet_dir);
+		auto parquet_path = parquet_dir + "/t.parquet";
+		{
+			ddb::DuckDB db(nullptr);
+			ddb::Connection con(db);
+			ExecOrThrow(con, "COPY (SELECT 1 AS id, 'from_parquet' AS title) TO '" + parquet_path + "' (FORMAT PARQUET)");
+		}
+		view_pol.lake.data_path = parquet_dir;
+		auto init = std::string("CREATE TEMP VIEW qv AS SELECT * FROM query('SELECT 42 AS x');\n"
+		                        "CREATE TEMP VIEW parquet_v AS SELECT * FROM read_parquet('") +
+		            parquet_path + "');";
+		TenantSandbox box_v(daemon, view_pol, key_a, init, spec_dir);
+		auto from_q = box_v.Execute("SELECT * FROM qv");
+		Expect(from_q.text_table.find("42") != std::string::npos,
+		       "agent can SELECT an authorized query() view (same class as postgres_query)");
+		ExpectThrowContains([&] { box_v.Execute("SELECT * FROM query('SELECT 42 AS x')"); }, "table functions",
+		                    "agent cannot call query() directly");
+		ExpectThrowContains([&] { box_v.Execute("SELECT * FROM postgres_query('SELECT 1')"); }, "table functions",
+		                    "agent cannot call postgres_query directly");
+		auto from_p = box_v.Execute("SELECT * FROM parquet_v");
+		Expect(from_p.text_table.find("from_parquet") != std::string::npos,
+		       "agent can SELECT an authorized read_parquet view");
+		ExpectThrowContains([&] { box_v.Execute("SELECT * FROM read_parquet('" + parquet_path + "')"); },
+		                    "table functions", "agent cannot call read_parquet directly");
+		ExpectThrowContains([&] { box_v.Execute("CREATE TEMP VIEW sneak AS SELECT 1 AS x"); }, "only SELECT",
+		                    "agent cannot CREATE VIEW");
 	}
 
 	{

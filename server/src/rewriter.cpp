@@ -115,7 +115,7 @@ ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> 
 	auto inner_from = base->Copy();
 	inner_from->alias = "";
 	inner_from->column_name_alias.clear();
-	if (inner_from->type == ddb::TableReferenceType::BASE_TABLE) {
+	if (inner_from->type == ddb::TableReferenceType::BASE_TABLE && !spec.authorized_view) {
 		auto &b = inner_from->Cast<ddb::BaseTableRef>();
 		if (b.schema_name.empty()) {
 			b.schema_name = "main";
