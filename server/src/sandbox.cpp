@@ -53,69 +53,74 @@ void TenantSandbox::Warmup(bool validate_lake) {
 	auto t0 = std::chrono::steady_clock::now();
 	ddb::DBConfig config;
 	RegisterPlanGuard(config, policy_, key_);
-	db_ = std::make_unique<ddb::DuckDB>(nullptr, &config);
-	con_ = std::make_unique<ddb::Connection>(*db_);
-	ExecOrThrow(*con_, "SET autoinstall_known_extensions=false");
-	ExecOrThrow(*con_, "SET autoload_known_extensions=false");
-	AttachLakeFromSpec(*con_, policy_, spec_dir_, *secrets_, daemon_);
 	try {
-		// After attach the lake paths are already allowed; keep COPY/read_csv from reaching the host.
-		ExecOrThrow(*con_, "SET enable_external_access=false");
-	} catch (const std::exception &) {
-		// lock_configuration / older builds; still refuse COPY via validator + plan guard
-	}
-	if (!policy_.lake.data_path.empty()) {
+		db_ = std::make_unique<ddb::DuckDB>(nullptr, &config);
+		con_ = std::make_unique<ddb::Connection>(*db_);
+		ExecOrThrow(*con_, "SET autoinstall_known_extensions=false");
+		ExecOrThrow(*con_, "SET autoload_known_extensions=false");
+		AttachLakeFromSpec(*con_, policy_, spec_dir_, *secrets_, daemon_);
 		try {
-			ExecOrThrow(*con_, "SET allowed_paths=['" + EscapeSqlString(policy_.lake.data_path) + "']");
+			// After attach the lake paths are already allowed; keep COPY/read_csv from reaching the host.
+			ExecOrThrow(*con_, "SET enable_external_access=false");
 		} catch (const std::exception &) {
+			// lock_configuration / older builds; still refuse COPY via validator + plan guard
 		}
-	}
-	if (validate_lake) {
-		auto v0 = std::chrono::steady_clock::now();
-		SpecValidator v;
-		auto issues = v.ValidateLake(policy_, *con_);
-		try {
-			v.ThrowIf(issues);
-			Metrics().ObservePolicyValidation(
-			    std::chrono::duration<double>(std::chrono::steady_clock::now() - v0).count(), "ok");
-		} catch (...) {
-			Metrics().ObservePolicyValidation(
-			    std::chrono::duration<double>(std::chrono::steady_clock::now() - v0).count(), "error");
-			throw;
+		if (!policy_.lake.data_path.empty()) {
+			try {
+				ExecOrThrow(*con_, "SET allowed_paths=['" + EscapeSqlString(policy_.lake.data_path) + "']");
+			} catch (const std::exception &) {
+			}
 		}
+		if (validate_lake) {
+			auto v0 = std::chrono::steady_clock::now();
+			SpecValidator v;
+			auto issues = v.ValidateLake(policy_, *con_);
+			try {
+				v.ThrowIf(issues);
+				Metrics().ObservePolicyValidation(
+				    std::chrono::duration<double>(std::chrono::steady_clock::now() - v0).count(), "ok");
+			} catch (...) {
+				Metrics().ObservePolicyValidation(
+				    std::chrono::duration<double>(std::chrono::steady_clock::now() - v0).count(), "error");
+				throw;
+			}
+		}
+		auto i0 = std::chrono::steady_clock::now();
+		RunInitSql(*con_, init_sql_, daemon_, policy_, &key_);
+		Metrics().ObserveInitSql(std::chrono::duration<double>(std::chrono::steady_clock::now() - i0).count());
+		auto &r = policy_.resources;
+		ExecOrThrow(*con_, "SET memory_limit='" + EscapeSqlString(r.memory_limit) + "'");
+		ExecOrThrow(*con_, "SET threads=" + std::to_string(r.threads));
+		ExecOrThrow(*con_, "SET lock_configuration=true");
+		warmup_count_++;
+		Touch();
+		Metrics().IncColdStart();
+		Metrics().ObserveWarmup(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+	} catch (...) {
+		RecoverAfterFailure();
+		con_.reset();
+		db_.reset();
+		throw;
 	}
-	auto i0 = std::chrono::steady_clock::now();
-	RunInitSql(*con_, init_sql_, daemon_, policy_, &key_);
-	Metrics().ObserveInitSql(std::chrono::duration<double>(std::chrono::steady_clock::now() - i0).count());
-	auto &r = policy_.resources;
-	ExecOrThrow(*con_, "SET memory_limit='" + EscapeSqlString(r.memory_limit) + "'");
-	ExecOrThrow(*con_, "SET threads=" + std::to_string(r.threads));
-	ExecOrThrow(*con_, "SET lock_configuration=true");
-	warmup_count_++;
-	Touch();
-	Metrics().IncColdStart();
-	Metrics().ObserveWarmup(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
 void TenantSandbox::RecoverAfterFailure() {
 	if (!con_) {
 		return;
 	}
+	// Always ROLLBACK after a failed statement. DuckLake's postgres session stays
+	// aborted until ROLLBACK even when DuckDB reports no ClientContext transaction
+	// (HasActiveTransaction() == false after an optimizer throw).
 	try {
-		if (!con_->HasActiveTransaction()) {
-			return;
-		}
 		con_->Rollback();
 	} catch (...) {
-		try {
-			con_->Rollback();
-		} catch (...) {
-		}
 	}
 }
 
 QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Value> params) {
-	RecoverAfterFailure();
+	if (con_ && con_->HasActiveTransaction()) {
+		RecoverAfterFailure();
+	}
 	std::mutex wait_mu;
 	std::condition_variable cv;
 	bool finished = false;
@@ -252,7 +257,9 @@ ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::stri
 	Warmup(false);
 	std::lock_guard<std::mutex> hold(mu_);
 	Touch();
-	RecoverAfterFailure();
+	if (con_ && con_->HasActiveTransaction()) {
+		RecoverAfterFailure();
+	}
 	try {
 		return con_->ExtractPlan(sql);
 	} catch (...) {
@@ -265,7 +272,9 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
 	Warmup(false);
 	std::lock_guard<std::mutex> hold(mu_);
 	Touch();
-	RecoverAfterFailure();
+	if (con_ && con_->HasActiveTransaction()) {
+		RecoverAfterFailure();
+	}
 	try {
 		auto ps = con_->Prepare(sql);
 		if (ps->HasError()) {

@@ -84,6 +84,30 @@ cases:
     expect: deny
     reason: table functions
 
+  - id: postgres_scan_pushdown
+    sql: "SELECT * FROM postgres_scan_pushdown('dbname=x', 'public', 'deals')"
+    expect: deny
+    reason: table functions
+    stage: both
+
+  - id: postgres_query
+    sql: "SELECT * FROM postgres_query('SELECT 1')"
+    expect: deny
+    reason: table functions
+    stage: both
+
+  - id: initsql_view_postgres_scan_pushdown
+    sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_scan_pushdown('dbname=x', 'public', 'deals')"
+    expect: deny
+    reason: table functions
+    stage: initsql
+
+  - id: initsql_view_postgres_query
+    sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_query('SELECT 1')"
+    expect: deny
+    reason: table functions
+    stage: initsql
+
   - id: duckdb_tables
     sql: "SELECT * FROM duckdb_tables()"
     expect: deny

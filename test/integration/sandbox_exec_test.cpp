@@ -35,6 +35,8 @@ void duckbox::test::RunSandboxExecTests() {
 
 	ExpectThrowContains([&] { box_a.ExecuteRewritten("COPY deals TO '/tmp/x.csv'", {}); }, "only SELECT",
 	                    "A2 handle SQL is re-validated");
+	auto after_copy = box_a.Execute("SELECT id FROM deals ORDER BY id");
+	Expect(after_copy.row_count == 1, "validator rejection does not poison the next Execute");
 	ExpectThrowContains([&] { box_a.Execute("SELECT * FROM secrets"); }, "allowlisted", "denied query is rejected");
 	auto after_deny = box_a.Execute("SELECT id, title FROM deals ORDER BY id");
 	Expect(after_deny.row_count == 1 && after_deny.text_table.find("alpha deal") != std::string::npos,
@@ -43,6 +45,14 @@ void duckbox::test::RunSandboxExecTests() {
 	                    "binder/column error is a rejection");
 	auto after_binder = box_a.Execute("SELECT id FROM deals ORDER BY id");
 	Expect(after_binder.row_count == 1, "binder rejection does not poison the next Execute");
+	ExpectThrowContains([&] { box_a.Execute("SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"); },
+	                    "table functions", "user postgres_scan is AST-denied");
+	auto after_tf = box_a.Execute("SELECT id FROM deals ORDER BY id");
+	Expect(after_tf.row_count == 1, "table-function rejection does not poison the next Execute");
+	auto capped = box_a.Execute("SELECT id FROM deals LIMIT 99999");
+	Expect(capped.row_count <= 100, "user LIMIT is capped at rewrite (never starts a poisoned txn)");
+	auto after_limit = box_a.Execute("SELECT id FROM deals ORDER BY id");
+	Expect(after_limit.row_count == 1, "capped LIMIT does not poison the next Execute");
 
 	{
 		auto leaked = box_a.Execute("WITH deals AS (SELECT 1) SELECT * FROM main.deals WHERE tenant_id=21");

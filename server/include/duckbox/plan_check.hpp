@@ -2,12 +2,13 @@
 
 // Optimizer-extension plan guard. Last line of defense after rewrite: a CTE
 // name must not become a lake scan. Scan functions are an allowlist
-// (seq_scan / ducklake_scan / postgres_scan / pragma_table_info). Bound tables
+// (seq_scan / ducklake_scan / postgres_* / pragma_table_info). Bound tables
 // come from GetTable()/ParentCatalog(), never AST or DSN strings. On a
-// ducklake spec, postgres_scan is catalog I/O (throwing aborts the postgres
-// transaction). ducklake_scan of a spec table still needs typed tenant
-// filters; metadata scans are allowed. User table functions are denied at
-// the AST. Mandatory filters are typed ConstantFilter / BoundComparison.
+// ducklake spec, postgres_scan / postgres_scan_pushdown / postgres_query are
+// catalog I/O (throwing aborts the postgres transaction). ducklake_scan of a
+// spec table still needs typed tenant filters; metadata scans are allowed.
+// User table functions are denied at the AST. Mandatory filters are typed
+// ConstantFilter / BoundComparison.
 
 #include "duckbox/policy.hpp"
 #include "duckbox/tenant_key.hpp"

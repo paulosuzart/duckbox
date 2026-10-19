@@ -5,12 +5,14 @@
 #include "duckdb/common/enum_util.hpp"
 
 #include <functional>
+#include <iostream>
 #include <unordered_set>
 
 namespace duckbox {
 namespace {
 
-const char *kAllowedScans[] = {"seq_scan", "ducklake_scan", "postgres_scan", "pragma_table_info"};
+const char *kAllowedScans[] = {"seq_scan", "ducklake_scan", "postgres_scan", "postgres_scan_pushdown",
+                               "postgres_query", "pragma_table_info"};
 
 bool IsAllowedScan(const std::string &lower) {
 	for (auto *a : kAllowedScans) {
@@ -25,8 +27,19 @@ bool IsDucklakeScan(const std::string &lower) {
 	return lower == "ducklake_scan";
 }
 
-bool IsPostgresScan(const std::string &lower) {
-	return lower == "postgres_scan";
+// DuckLake catalog I/O uses postgres_scan, postgres_scan_pushdown, postgres_query,
+// and occasionally postgres_execute / pg_clear_cache. User SQL naming any of these
+// is denied at the AST (deny_table_functions).
+bool IsPostgresCatalogScan(const std::string &lower) {
+	return ddb::StringUtil::StartsWith(lower, "postgres_") || lower == "pg_clear_cache";
+}
+
+bool IsDuckdbCatalogScan(const std::string &lower) {
+	if (!ddb::StringUtil::StartsWith(lower, "duckdb_")) {
+		return false;
+	}
+	// Never treat secret introspection as catalog I/O.
+	return lower.find("secret") == std::string::npos;
 }
 
 bool ValuesEqual(const ddb::Value &got, const ddb::Value &want) {
@@ -286,8 +299,10 @@ bool CatalogIsAttachedLake(const std::string &catalog, const Policy &policy) {
 	if (policy.lake.kind == LakeKind::Memory && (cat == "memory" || cat == "main")) {
 		return true;
 	}
-	// DuckLake's postgres metadata catalog is not always named the spec alias.
-	if (policy.lake.kind == LakeKind::Ducklake && cat.find("ducklake") != std::string::npos) {
+	// DuckLake's postgres metadata catalog is not always named the spec alias
+	// (__ducklake_metadata_<alias>, postgres, …).
+	if (policy.lake.kind == LakeKind::Ducklake &&
+	    (cat.find("ducklake") != std::string::npos || cat.find("postgres") != std::string::npos)) {
 		return true;
 	}
 	return false;
@@ -295,15 +310,33 @@ bool CatalogIsAttachedLake(const std::string &catalog, const Policy &policy) {
 
 void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, const std::vector<BoundEq> &inherited) {
 	auto fname = ddb::StringUtil::Lower(get.function.name);
-	if (!IsAllowedScan(fname)) {
-		throw PlanRejected("plan contains denied scan function: " + get.function.name);
-	}
 	auto table = get.GetTable();
 	auto tname = BoundTableName(get);
 	auto catalog = BoundCatalogName(get);
 
 	if (fname == "pragma_table_info" || ddb::StringUtil::StartsWith(fname, "pragma_")) {
 		return;
+	}
+
+	// Residual risk: on a ducklake spec the plan guard cannot tell DuckLake catalog
+	// I/O (postgres_scan / postgres_scan_pushdown / postgres_query, duckdb_tables,
+	// seq_scan of information_schema or ducklake_inlined_data_*) from a smuggled
+	// scan of the same kind. Users still cannot name those in SQL (AST), hide them
+	// in initSQL VIEW/MACRO bodies, or reach them via replacement scans. A
+	// rewrite/AST skip would let a ducklake sandbox read postgres metadata or
+	// inlined rows. Keep deny_table_functions. Do not DSN-match. Throwing here
+	// aborts the postgres transaction; RecoverAfterFailure rolls it back.
+	if (IsPostgresCatalogScan(fname)) {
+		if (policy.lake.kind != LakeKind::Ducklake) {
+			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
+		}
+		return;
+	}
+	if (policy.lake.kind == LakeKind::Ducklake && IsDuckdbCatalogScan(fname)) {
+		return;
+	}
+	if (!IsAllowedScan(fname)) {
+		throw PlanRejected("plan contains denied scan function: " + get.function.name);
 	}
 	auto require_preds = [&](const TablePolicy &spec, const std::string &shown) {
 		for (auto &pred : PredicatesFor(spec, key)) {
@@ -312,19 +345,6 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 			}
 		}
 	};
-
-	if (IsPostgresScan(fname)) {
-		if (policy.lake.kind != LakeKind::Ducklake) {
-			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
-		}
-		// Residual risk: this cannot tell DuckLake catalog I/O from a smuggled
-		// postgres_scan. Users still cannot name postgres_scan, replacement scans,
-		// or ducklake_inlined_data_* in SQL (AST) or hide them in initSQL VIEW/MACRO
-		// bodies. A rewrite/AST skip would let a ducklake sandbox read postgres
-		// metadata or inlined rows. Keep deny_table_functions. Do not DSN-match.
-		// Throwing here aborts the postgres transaction; RecoverAfterFailure rolls it back.
-		return;
-	}
 	if (IsDucklakeScan(fname)) {
 		if (policy.lake.kind != LakeKind::Ducklake) {
 			throw PlanRejected(get.function.name + " is not an internal scan of the spec's attached DuckLake catalog");
@@ -367,11 +387,16 @@ void CheckGet(ddb::LogicalGet &get, const Policy &policy, const TenantKey &key, 
 			return;
 		}
 		auto *spec = policy.FindTable(tname);
-		if (!spec) {
-			throw PlanRejected("scan of table not allowlisted: " + tname);
+		if (spec) {
+			require_preds(*spec, tname);
+			return;
 		}
-		require_preds(*spec, tname);
-		return;
+		// DuckLake probes information_schema / pg_catalog via seq_scan of the
+		// attached postgres metadata catalog. Spec tables still need tenant preds.
+		if (policy.lake.kind == LakeKind::Ducklake && CatalogIsAttachedLake(catalog, policy)) {
+			return;
+		}
+		throw PlanRejected("scan of table not allowlisted: " + tname);
 	}
 	// seq_scan without a catalog entry is a CTE / VALUES materialization — no lake table.
 }
@@ -414,7 +439,12 @@ void RegisterPlanGuard(ddb::DBConfig &config, const Policy &policy, const Tenant
 	ext.optimizer_info = info;
 	ext.optimize_function = [](ddb::OptimizerExtensionInput &input, ddb::unique_ptr<ddb::LogicalOperator> &plan) {
 		auto *info = static_cast<PlanGuardInfo *>(input.info.get());
-		CheckLogicalPlan(*plan, info->policy, info->key);
+		try {
+			CheckLogicalPlan(*plan, info->policy, info->key);
+		} catch (const PlanRejected &e) {
+			std::clog << "duckbox plan guard: " << e.what() << "\n";
+			throw;
+		}
 	};
 	ddb::OptimizerExtension::Register(config, ext);
 }

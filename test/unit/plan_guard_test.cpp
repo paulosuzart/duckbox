@@ -31,6 +31,33 @@ void duckbox::test::RunPlanGuardTests() {
 		             "ducklake catalog postgres_scan with DSN in bind_data (not plan params) is allowed");
 	}
 	{
+		auto get = MakeScan("postgres_scan_pushdown", {"dbname=ducklake", "public", "ducklake_metadata"});
+		ExpectPlanOk(*get, lake, key_a, "postgres_scan_pushdown is DuckLake catalog I/O on a ducklake spec");
+	}
+	{
+		auto get = MakeScan("postgres_query", {"SELECT 1"});
+		ExpectPlanOk(*get, lake, key_a, "postgres_query is DuckLake catalog I/O on a ducklake spec");
+	}
+	{
+		auto get = MakeScan("postgres_scan_pushdown", {"dbname=x", "public", "deals"});
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, policy, key_a); }, "attached DuckLake",
+		                    "memory spec rejects postgres_scan_pushdown");
+	}
+	{
+		auto get = MakeScan("duckdb_tables", {});
+		ExpectPlanOk(*get, lake, key_a, "duckdb_tables is a DuckLake catalog probe on a ducklake spec");
+	}
+	{
+		auto get = MakeScan("duckdb_secrets", {});
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "denied scan",
+		                    "duckdb_secrets is never catalog I/O");
+	}
+	{
+		auto get = MakeScan("duckdb_tables", {});
+		ExpectThrowContains([&] { CheckLogicalPlan(*get, policy, key_a); }, "denied scan",
+		                    "memory spec rejects duckdb_tables in the plan");
+	}
+	{
 		auto get = MakeScan("ducklake_scan", {"deals"});
 		ExpectThrowContains([&] { CheckLogicalPlan(*get, lake, key_a); }, "typed equality",
 		                    "unbound ducklake_scan of a spec table still needs tenant filters");

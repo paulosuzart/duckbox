@@ -34,6 +34,15 @@ void duckbox::test::RunInitSqlTests() {
 		                daemon, policy);
 	    },
 	    "table functions", "initSQL table macro cannot smuggle postgres_scan");
+	ExpectThrowContains(
+	    [&] {
+		    guard.Check("CREATE TEMP VIEW v AS SELECT * FROM postgres_scan_pushdown('dbname=x', 'public', 'deals')",
+		                daemon, policy);
+	    },
+	    "table functions", "initSQL view cannot smuggle postgres_scan_pushdown");
+	ExpectThrowContains(
+	    [&] { guard.Check("CREATE TEMP VIEW v AS SELECT * FROM postgres_query('SELECT 1')", daemon, policy); },
+	    "table functions", "initSQL view cannot smuggle postgres_query");
 	ExpectThrowContains([&] { guard.Check("CREATE TEMP MACRO h(x) AS md5(x)", daemon, policy); },
 	                    "function not allowlisted", "initSQL scalar macro body uses function allowlist");
 	ExpectThrowContains(

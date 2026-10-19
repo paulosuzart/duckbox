@@ -12,4 +12,4 @@ Add a new bypass as a YAML case (`id`, `sql`, `expect: allow|deny`, optional `re
 
 Shared fixtures: `test/support/check.hpp`.
 
-Local coverage (assertion counts, not gcov): unit 163, guardrails 72, integration 100 (335 total). CI also runs `ducklake-e2e`.
+Local coverage (assertion counts, not gcov): unit 171, guardrails 78, integration 105 (354 total). CI also runs `ducklake-e2e`.
