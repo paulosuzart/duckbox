@@ -161,6 +161,9 @@ private:
 	std::unique_ptr<DuckboxFlightSqlServer> sql_;
 };
 
+// Block SIGINT/SIGTERM in this thread so later-spawned threads inherit the mask.
+// RunServer starts a sigwait thread; the first signal is graceful, the second _Exit.
+void BlockTerminationSignals();
 int RunServer(const ServerOptions &opt); // ValidateDaemonOrThrow then listen; returns process exit code
 int RunLocalQuery(const DaemonConfig &daemon, const std::string &spec_path, const std::string &key,
                   const std::string &sql, const std::string &init_sql);

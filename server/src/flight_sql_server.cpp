@@ -29,6 +29,9 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <memory>
+#include <pthread.h>
+#include <signal.h>
 #include <sstream>
 #include <thread>
 
@@ -1173,7 +1176,18 @@ arrow::Status DuckboxFlightServer::DoAction(const ServerCallContext &context, co
 	return sql_->DoAction(context, action, result);
 }
 
+void BlockTerminationSignals() {
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, SIGINT);
+	sigaddset(&set, SIGTERM);
+	if (pthread_sigmask(SIG_BLOCK, &set, nullptr) != 0) {
+		std::cerr << "pthread_sigmask(SIG_BLOCK) failed for SIGINT/SIGTERM\n";
+	}
+}
+
 int RunServer(const ServerOptions &opt_in) {
+	BlockTerminationSignals();
 	ServerOptions opt = opt_in;
 	FinalizeDaemonListen(opt.daemon);
 	ValidateDaemonOrThrow(opt.daemon);
@@ -1290,33 +1304,70 @@ int RunServer(const ServerOptions &opt_in) {
 		std::thread([dbg, defs, runtime]() { StartDebugHttp(dbg, defs, runtime); }).detach();
 		std::cout << "debug HTTP /v1/query on " << opt.daemon.debug_http << "\n";
 	}
-	st = pub->SetShutdownOnSignals({SIGINT, SIGTERM});
-	(void)st;
+
+	auto signals = std::make_shared<std::atomic<int>>(0);
+	auto shutting_down = std::make_shared<std::atomic<bool>>(false);
+	auto servers_gone = std::make_shared<std::atomic<bool>>(false);
+	auto graceful = [&]() {
+		if (shutting_down->exchange(true)) {
+			return;
+		}
+		running.store(false);
+		try {
+			runtime->Drain(2000);
+		} catch (const std::exception &e) {
+			Json de;
+			de["event"] = "sigterm_drain";
+			de["error"] = e.what();
+			std::clog << de.dump() << "\n";
+		}
+		if (nodes) {
+			try {
+				nodes->Deregister();
+			} catch (const std::exception &) {
+			}
+		}
+		auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
+		(void)internal->Shutdown(&deadline);
+		(void)pub->Shutdown(&deadline);
+	};
+	sigset_t waitset;
+	sigemptyset(&waitset);
+	sigaddset(&waitset, SIGINT);
+	sigaddset(&waitset, SIGTERM);
+	std::thread sig_th([waitset, signals, shutting_down, servers_gone, graceful]() {
+		sigset_t set = waitset;
+		for (;;) {
+			int sig = 0;
+			if (sigwait(&set, &sig) != 0) {
+				continue;
+			}
+			int n = signals->fetch_add(1) + 1;
+			if (n >= 2 || servers_gone->load()) {
+				Json forced;
+				forced["event"] = "signal_forced_exit";
+				forced["signal"] = sig;
+				std::clog << forced.dump() << "\n";
+				std::_Exit(1);
+			}
+			Json ev;
+			ev["event"] = "signal_shutdown";
+			ev["signal"] = sig;
+			std::clog << ev.dump() << "\n";
+			graceful();
+		}
+	});
+	sig_th.detach();
+
 	st = pub->Serve();
-	running = false;
+	graceful();
 	if (renew.joinable()) {
 		renew.join();
 	}
-	try {
-		runtime->Drain(2000);
-	} catch (const std::exception &e) {
-		Json de;
-		de["event"] = "sigterm_drain";
-		de["error"] = e.what();
-		std::clog << de.dump() << "\n";
-	}
-	if (nodes) {
-		try {
-			nodes->Deregister();
-		} catch (const std::exception &) {
-		}
-	}
-	auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
-	(void)internal->Shutdown(&deadline);
-	(void)pub->Shutdown(&deadline);
 	if (internal_th.joinable()) {
 		internal_th.join();
 	}
+	servers_gone->store(true);
 	StopMetricsHttp();
 	SetMetrics(nullptr);
 	if (!st.ok()) {

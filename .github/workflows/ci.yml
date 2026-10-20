@@ -76,9 +76,11 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)"
           JOBS="$(sysctl -n hw.ncpu)"
-          cmake --build build --parallel "$JOBS" --target duckbox_unit_tests duckbox_guardrail_tests
-      - name: Unit and guardrail tests
-        run: ctest --test-dir build -L 'unit|guardrails' --output-on-failure
+          cmake --build build --parallel "$JOBS" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests
+      - name: Unit, guardrail, and integration tests
+        env:
+          DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+        run: ctest --test-dir build -L 'unit|guardrails|integration' --output-on-failure
 
   coverage:
     name: Line coverage (gcovr)
@@ -228,6 +230,9 @@ jobs:
       - name: Multi-node failover e2e
         timeout-minutes: 8
         run: DUCKBOX_PYTHON=.venv/bin/python bash scripts/e2e_multi_node.sh
+      - name: SIGINT/SIGTERM exit and deregister
+        timeout-minutes: 5
+        run: DUCKBOX_PYTHON=.venv/bin/python bash scripts/e2e_signal_shutdown.sh
       - name: Compose logs on failure
         if: failure()
         run: docker compose logs

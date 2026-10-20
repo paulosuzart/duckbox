@@ -171,16 +171,28 @@ print("restart same node_id after SIGKILL ok", list(df["id"]))
 db.close()
 PY
 
-# SIGTERM should drain + deregister, then the same id comes back.
-kill -TERM "$PID_A" 2>/dev/null || true
-for _ in $(seq 1 20); do
+# SIGTERM should drain + deregister (must exit 0; no SIGKILL).
+kill -TERM "$PID_A"
+term_ok=0
+for _ in $(seq 1 40); do
 	if ! kill -0 "$PID_A" 2>/dev/null; then
+		rc=0
+		wait "$PID_A" || rc=$?
+		if [[ "$rc" -ne 0 ]]; then
+			echo "node-a exited $rc after SIGTERM (want 0)" >&2
+			exit 1
+		fi
+		term_ok=1
 		break
 	fi
 	sleep 0.25
 done
-kill -9 "$PID_A" 2>/dev/null || true
-wait "$PID_A" 2>/dev/null || true
+if [[ "$term_ok" -ne 1 ]]; then
+	echo "node-a did not exit after SIGTERM" >&2
+	kill -9 "$PID_A" 2>/dev/null || true
+	wait "$PID_A" 2>/dev/null || true
+	exit 1
+fi
 PID_A=""
 "$BIN" serve --daemon "$ROOT/daemons/cluster-node-a.yaml" --no-metrics &
 PID_A=$!

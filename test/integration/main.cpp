@@ -8,5 +8,6 @@ int main() {
 	RunS3RegistryTests();
 	RunAuthFlightTests();
 	RunClusterTests();
+	RunSignalShutdownTests();
 	return ReportAndExit("integration");
 }

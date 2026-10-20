@@ -76,6 +76,8 @@ Do **not** stay alive unhealthy. Run the daemon under a supervisor that restarts
 
 Use **unlimited restarts**. After SIGKILL or an S3 outage longer than TTL, every node self-fences (exit 3). Once S3 is healthy, the supervisor must start the same `node_id` again; startup **takes over** the existing node record (If-Match) instead of crashing on If-None-Match `*`.
 
+`SIGINT` / `SIGTERM` are owned by duckbox (blocked in every thread, delivered to a `sigwait` thread). The first signal stops renew, drains, deregisters, and shuts down both Flight listeners with a deadline (exit 0). A second signal `_Exit`s immediately. Do not rely on Arrow `SetShutdownOnSignals` — a second `Serve()` thread would swallow the handler.
+
 Size `lease.ttl` **strictly larger than the longest S3 blip you will tolerate without a restart**, and size the supervisor restart delay **at least one TTL** so a fenced node cannot race a peer that is stealing expired sandbox leases. Example: if object storage can pause for 30s, set TTL to 45s+ (heartbeat ~TTL/3). An outage shorter than TTL is retried; an outage longer than TTL is a fence + restart. `SelfFence` is exit 3 so the supervisor and alerts see a crash-restart, not a hanging process.
 
 ## Lease lifecycle

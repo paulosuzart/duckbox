@@ -8,6 +8,9 @@
 #include <string>
 
 int main(int argc, char **argv) {
+	// Before any library thread: SIGINT/SIGTERM stay blocked so a dedicated
+	// sigwait thread in RunServer owns them (Arrow/gRPC/AWS must not).
+	duckbox::BlockTerminationSignals();
 	CLI::App app{"duckbox — deny-by-default SQL sandbox (named sandboxes + control plane)\n\n"
 	             "The daemon has no data access. Named sandbox definitions (id, key, policy,\n"
 	             "lake, credential refs, initSQL) live in the registry. Queries send id + SQL."};

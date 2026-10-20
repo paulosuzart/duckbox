@@ -374,7 +374,9 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/runtime_test.cpp
   test/integration/s3_registry_test.cpp
   test/integration/auth_flight_test.cpp
-  test/integration/cluster_test.cpp)
+  test/integration/cluster_test.cpp
+  test/integration/signal_shutdown_test.cpp)
+add_dependencies(duckbox_integration_tests duckbox)
 
 enable_testing()
 add_test(NAME unit COMMAND duckbox_unit_tests)
