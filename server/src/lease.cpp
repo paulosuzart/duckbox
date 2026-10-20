@@ -333,38 +333,16 @@ Lease S3ConditionalLeaseManager::Acquire(const std::string &resource_id) {
 		bool free = !missing && current.owner_id.empty();
 		bool expired = !missing && (free || current.expiry_ms + opt_.skew_ms <= now);
 
-		if (!missing && !expired && current.owner_id == opt_.owner_id) {
-			if (current.instance_id.empty() || current.instance_id == instance_id_) {
-				current.owned_locally = true;
-				current.instance_id = instance_id_;
-				Remember(current);
-				return current;
-			}
-			// Same node_id, another process holds the record: take over, keep epoch.
-			Lease next = current;
-			next.owner_id = opt_.owner_id;
-			next.flight = opt_.flight;
-			next.instance_id = instance_id_;
-			next.released_ms = 0;
-			next.expiry_ms = now + opt_.ttl_ms;
-			next.owned_locally = true;
-			auto t0 = std::chrono::steady_clock::now();
-			auto put = client_->Put(ObjectKey(resource_id), Encode(next), current.etag, "");
-			M().ObserveS3LeaseOp("put", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-			if (HttpOk(put.status)) {
-				next.etag = put.etag;
-				Remember(next);
-				M().IncOwnershipAcquired("handoff");
-				return next;
-			}
-			if (put.status == 412 || put.status == 409) {
-				M().IncCasConflict();
-				continue;
-			}
-			M().IncS3LeaseError("put", S3ErrorCode(put.status));
-			throw Error(put.error.empty() ? "s3 PUT lease failed" : put.error);
+		if (!missing && !expired && current.owner_id == opt_.owner_id &&
+		    (current.instance_id.empty() || current.instance_id == instance_id_)) {
+			current.owned_locally = true;
+			current.instance_id = instance_id_;
+			Remember(current);
+			return current;
 		}
 		if (!missing && !expired) {
+			// Live lease, including same node_id held by another instance_id:
+			// wait for TTL / fence / release. Do not ping-pong ownership.
 			current.owned_locally = false;
 			Remember(current);
 			return current;
@@ -390,7 +368,17 @@ Lease S3ConditionalLeaseManager::Acquire(const std::string &resource_id) {
 		next.tenant_key = resource_id;
 		next.epoch = missing ? 1 : current.epoch + 1;
 		if (missing) {
-			auto marked = LoadEpochMarker(resource_id);
+			uint64_t marked = 0;
+			try {
+				marked = LoadEpochMarker(resource_id);
+			} catch (const std::exception &e) {
+				Json corrupt;
+				corrupt["event"] = "epoch_marker_corrupt";
+				corrupt["resource"] = resource_id;
+				corrupt["reason"] = e.what();
+				std::clog << corrupt.dump() << "\n";
+				throw Error("epoch marker corrupt for " + resource_id);
+			}
 			if (marked > 0) {
 				next.epoch = marked + 1;
 			}
@@ -580,11 +568,13 @@ uint64_t S3ConditionalLeaseManager::LoadEpochMarker(const std::string &resource_
 		JsonRejectUnknown(j, kEpochKeys, kEpochWhat);
 		auto epoch = JsonRequireInt(j, "epoch", kEpochWhat);
 		if (epoch < 0) {
-			return 0;
+			throw Error("epoch marker unparseable: epoch must be >= 0");
 		}
 		return static_cast<uint64_t>(epoch);
-	} catch (const std::exception &) {
-		return 0;
+	} catch (const Error &) {
+		throw;
+	} catch (const std::exception &e) {
+		throw Error(std::string("epoch marker unparseable: ") + e.what());
 	}
 }
 
@@ -619,7 +609,11 @@ bool S3ConditionalLeaseManager::StoreEpochMarker(const std::string &resource_id,
 		return true;
 	}
 	if (put.status == 412 || put.status == 409) {
-		return LoadEpochMarker(resource_id) >= epoch;
+		try {
+			return LoadEpochMarker(resource_id) >= epoch;
+		} catch (const std::exception &) {
+			return false;
+		}
 	}
 	return false;
 }
@@ -766,6 +760,7 @@ bool S3NodeDirectory::IsKnownFlight(const std::string &flight) {
 					return true;
 				}
 			}
+			return false; // negative cache: recent list did not contain this URL
 		}
 	}
 	auto live = ListUncached();

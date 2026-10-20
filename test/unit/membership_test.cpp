@@ -162,8 +162,10 @@ void duckbox::test::RunMembershipTests() {
 		Expect(lists_after_first > lists_after_hb, "cache miss lists the node directory");
 		Expect(d.IsKnownFlight("grpc://127.0.0.1:4792"), "second lookup hits the directory cache");
 		Expect(counted->lists() == lists_after_first, "cache hit does not ListKeys");
-		Expect(!d.IsKnownFlight("grpc://127.0.0.1:65535"), "unknown flight falls back to uncached");
-		Expect(counted->lists() > lists_after_first, "cache miss for an unknown flight lists again");
+		Expect(!d.IsKnownFlight("grpc://127.0.0.1:65535"), "unknown flight is a negative cache hit");
+		Expect(counted->lists() == lists_after_first, "negative cache does not ListKeys for unknown targets");
+		Expect(!d.IsKnownFlight("grpc://127.0.0.1:1"), "another unknown target stays negatively cached");
+		Expect(counted->lists() == lists_after_first, "second unknown dial does not list S3");
 		int lists_before_expire = counted->lists();
 		clock->AdvanceMs(1000);
 		Expect(d.IsKnownFlight("grpc://127.0.0.1:4792"), "expired cache refreshes uncached");

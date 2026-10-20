@@ -288,17 +288,37 @@ void duckbox::test::RunLeaseTests() {
 		Expect(held.owned_locally && held.instance_id == p1.instance_id() && !held.instance_id.empty(),
 		       "acquire writes this process instance_id on the lease");
 		S3ConditionalLeaseManager p2(s3, inst, {}, clock);
-		auto take = p2.Acquire("inst-box");
-		Expect(take.owned_locally && take.epoch == held.epoch && take.instance_id == p2.instance_id(),
-		       "second process with the same node_id takes over the live lease");
-		bool lost = false;
-		try {
-			p1.Renew(p1.Held("inst-box"));
-		} catch (const LeaseLostError &) {
-			lost = true;
+		int flips = 0;
+		std::string last_owner = p1.instance_id();
+		for (int i = 0; i < 10; i++) {
+			auto a = p1.Acquire("inst-box");
+			auto b = p2.Acquire("inst-box");
+			int owners = (a.owned_locally ? 1 : 0) + (b.owned_locally ? 1 : 0);
+			Expect(owners == 1, "at most one owner at any time while the lease is live");
+			Expect(a.owned_locally && !b.owned_locally && a.instance_id == p1.instance_id() &&
+			           b.instance_id == p1.instance_id(),
+			       "second process does not take a live lease from another instance_id");
+			if (a.instance_id != last_owner) {
+				flips++;
+				last_owner = a.instance_id;
+			}
 		}
-		Expect(lost, "first process cannot renew after instance take-over");
-		p2.Release(take);
+		Expect(flips == 0, "lease never flips back and forth between duplicate processes");
+		p1.Release(p1.Held("inst-box"));
+		auto after_release = p2.Acquire("inst-box");
+		Expect(after_release.owned_locally && after_release.instance_id == p2.instance_id() &&
+		           after_release.epoch == held.epoch + 1,
+		       "instance_id take-over waits for release, then continues epoch");
+		p2.Release(after_release);
+
+		auto live2 = p1.Acquire("inst-ttl");
+		S3ConditionalLeaseManager p3(s3, inst, {}, clock);
+		Expect(!p3.Acquire("inst-ttl").owned_locally, "live lease is not stolen before TTL");
+		clock->AdvanceMs(15'000);
+		auto stolen = p3.Acquire("inst-ttl");
+		Expect(stolen.owned_locally && stolen.instance_id == p3.instance_id() && stolen.epoch == live2.epoch + 1,
+		       "instance_id take-over after TTL expiry steals with epoch++");
+		p3.Release(stolen);
 	}
 
 	{
@@ -324,5 +344,18 @@ void duckbox::test::RunLeaseTests() {
 		auto fresh = gm.Acquire("gc-box");
 		Expect(fresh.owned_locally && fresh.epoch == 2, "acquire after GC continues the epoch from the marker");
 		gm.Release(fresh);
+
+		auto put_bad = s3->Put("leases/epochs/bad-box.json", "not-json{", "", "*");
+		Expect(put_bad.status == 200, "corrupt epoch marker written");
+		bool refused = false;
+		try {
+			(void)gm.Acquire("bad-box");
+		} catch (const Error &e) {
+			refused = std::string(e.what()).find("epoch marker") != std::string::npos;
+		}
+		Expect(refused, "corrupt epoch marker refuses acquire (fail closed)");
+		auto still_missing = gm.Peek("bad-box");
+		Expect(!still_missing.owned_locally && still_missing.epoch == 0,
+		       "failed acquire does not create a lease or reset epoch to 1");
 	}
 }
