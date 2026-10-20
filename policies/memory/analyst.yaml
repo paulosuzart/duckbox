@@ -1,0 +1,51 @@
+id: memory-analyst
+key: tenant_21:user_sergio
+name: analyst
+policy_class: analyst
+auth:
+  key:
+    patterns:
+      - "tenant_{tenant_id}:{user}"
+      - "{tenant_id}:{user}"
+    strip_prefixes:
+      - tenant_
+resources:
+  memory_limit: 256MB
+  threads: 2
+  query_timeout_ms: 8000
+  max_result_rows: 1000
+lake:
+  kind: memory
+  alias: memory
+  read_only: true
+  bootstrap_sql: ../../examples/sql/memory_init.sql
+  extensions: []
+tables:
+  deals:
+    tenant_column: tenant_id
+    columns:
+      - tenant_id
+      - id
+      - title
+      - amount
+      - _deleted
+    filters:
+      - "tenant_id = :tenant_id"
+      - "_deleted = false"
+functions:
+  - count
+  - count_star
+  - sum
+  - avg
+  - min
+  - max
+  - lower
+  - upper
+  - length
+  - coalesce
+  - round
+  - abs
+deny_table_functions: true
+require_prepared_statements: false
+handles:
+  stale_version_grace: 0s

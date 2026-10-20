@@ -1,0 +1,484 @@
+# Table-driven SQL guardrails. Add a bypass as a new case; no C++ required.
+# expect: allow | deny
+# stage: rewrite | execute | both | plan | spec | initsql
+#   deny defaults to rewrite, allow to execute
+# scan_fn: CheckLogicalPlan(MakeScan(name)) — no DuckDB parse / rewrite (AST bypass)
+cases:
+  - id: insert_denied
+    sql: "INSERT INTO deals VALUES (21, 9, 'x', 1, false)"
+    expect: deny
+    reason: only SELECT
+
+  - id: multi_statement
+    sql: "SELECT 1; SELECT 2"
+    expect: deny
+    reason: single statement
+
+  - id: secrets_unqualified
+    sql: "SELECT * FROM secrets"
+    expect: deny
+    reason: not allowlisted
+
+  - id: secrets_main
+    sql: "SELECT * FROM main.secrets"
+    expect: deny
+    reason: not allowlisted
+
+  - id: read_csv_auto
+    sql: "SELECT * FROM read_csv_auto('x.csv')"
+    expect: deny
+    reason: table functions
+
+  - id: replacement_scan_s3
+    sql: "SELECT * FROM 's3://duckbox-lake/data/secret.parquet'"
+    expect: deny
+    reason: replacement scans
+    stage: both
+
+  - id: replacement_scan_parquet_file
+    sql: "SELECT * FROM 'secret.parquet'"
+    expect: deny
+    reason: replacement scans
+
+  - id: ducklake_inlined_data
+    sql: "SELECT * FROM ducklake_inlined_data_deals"
+    expect: deny
+    reason: not allowlisted
+    stage: both
+
+  - id: ducklake_inlined_delete
+    sql: "SELECT * FROM ducklake_inlined_delete_deals"
+    expect: deny
+    reason: not allowlisted
+    stage: both
+
+  - id: ducklake_metadata_table
+    sql: "SELECT * FROM ducklake_metadata"
+    expect: deny
+    reason: not allowlisted
+    stage: both
+
+  # initSQL is trusted SaaS SQL (no AST allowlist).
+  - id: initsql_view_postgres_scan
+    sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
+    expect: allow
+    stage: initsql
+
+  - id: initsql_macro_postgres_scan
+    sql: "CREATE TEMP MACRO sneak() AS TABLE SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
+    expect: allow
+    stage: initsql
+
+  - id: initsql_view_replacement_scan
+    sql: "CREATE TEMP VIEW v AS SELECT * FROM 's3://duckbox-lake/data/secret.parquet'"
+    expect: allow
+    stage: initsql
+
+  - id: parquet_scan
+    sql: "SELECT * FROM parquet_scan('x.parquet')"
+    expect: deny
+    reason: table functions
+
+  - id: postgres_scan
+    sql: "SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
+    expect: deny
+    reason: table functions
+
+  - id: postgres_scan_pushdown
+    sql: "SELECT * FROM postgres_scan_pushdown('dbname=x', 'public', 'deals')"
+    expect: deny
+    reason: table functions
+    stage: both
+
+  - id: postgres_query
+    sql: "SELECT * FROM postgres_query('SELECT 1')"
+    expect: deny
+    reason: table functions
+    stage: both
+
+  - id: postgres_query_ducklake_inlined
+    sql: "SELECT * FROM postgres_query('__ducklake_metadata_lake', 'SELECT * FROM ducklake_inlined_data_1_1')"
+    expect: deny
+    reason: table functions
+    stage: both
+
+  - id: plan_postgres_query_ducklake_inlined
+    sql: "SELECT * FROM postgres_query('__ducklake_metadata_lake', 'SELECT * FROM ducklake_inlined_data_1_1')"
+    expect: deny
+    stage: plan
+
+  - id: plan_duckdb_tables
+    sql: "SELECT * FROM duckdb_tables()"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+
+  - id: plan_duckdb_secrets
+    sql: "SELECT * FROM duckdb_secrets()"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+
+  # CheckLogicalPlan on a constructed LogicalGet — no DuckDB parse / rewrite.
+  - id: plan_query_bypasses_ast
+    sql: "SELECT * FROM query('SELECT 1')"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+    scan_fn: query
+
+  - id: plan_query_table_bypasses_ast
+    sql: "SELECT * FROM query_table('SELECT 1')"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+    scan_fn: query_table
+
+  - id: plan_glob_bypasses_ast
+    sql: "SELECT * FROM glob('*')"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+    scan_fn: glob
+
+  - id: plan_read_csv_bypasses_ast
+    sql: "SELECT * FROM read_csv('x.csv')"
+    expect: deny
+    reason: denied in user SQL
+    stage: plan
+    scan_fn: read_csv
+
+  - id: spec_deny_table_functions_false
+    sql: "SELECT 1"
+    expect: deny
+    reason: always denied
+    stage: spec
+    deny_table_functions: false
+
+  - id: spec_postgres_query_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: never allowlisted
+    stage: spec
+    extra_functions:
+      - postgres_query
+
+  - id: spec_duckdb_tables_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: never allowlisted
+    stage: spec
+    extra_functions:
+      - duckdb_tables
+
+  - id: initsql_view_postgres_scan_pushdown
+    sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_scan_pushdown('dbname=x', 'public', 'deals')"
+    expect: allow
+    stage: initsql
+
+  - id: initsql_view_postgres_query
+    sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_query('SELECT 1')"
+    expect: allow
+    stage: initsql
+
+  - id: agent_create_view
+    sql: "CREATE TEMP VIEW x AS SELECT 1 AS x"
+    expect: deny
+    reason: only SELECT
+
+  - id: agent_range_denied
+    sql: "SELECT * FROM range(1, 4)"
+    expect: deny
+    reason: table functions
+
+  - id: authorized_view_query
+    sql: "SELECT * FROM qv"
+    expect: allow
+    stage: execute
+    init_sql: "CREATE TEMP VIEW qv AS SELECT * FROM query('SELECT 1 AS x')"
+    extra_tables:
+      - name: qv
+        columns:
+          - x
+    contains:
+      - "1"
+
+  - id: authorized_view_range
+    sql: "SELECT i FROM ext_v ORDER BY i"
+    expect: allow
+    stage: execute
+    init_sql: "CREATE TEMP VIEW ext_v AS SELECT range AS i FROM range(1, 4)"
+    extra_tables:
+      - name: ext_v
+        columns:
+          - i
+    contains:
+      - "1"
+
+  - id: authorized_view_opaque_mix
+    sql: "SELECT leaked, i FROM mix ORDER BY i"
+    expect: allow
+    stage: execute
+    init_sql: "CREATE TEMP VIEW mix AS SELECT (SELECT max(note) FROM secrets) AS leaked, r.range AS i FROM range(1, 3) r"
+    extra_tables:
+      - name: mix
+        columns:
+          - leaked
+          - i
+    contains:
+      - "should never"
+
+  - id: authorized_view_join_secrets
+    sql: "SELECT * FROM mix, secrets"
+    expect: deny
+    reason: not allowlisted
+    init_sql: "CREATE TEMP VIEW mix AS SELECT (SELECT max(note) FROM secrets) AS leaked, r.range AS i FROM range(1, 3) r"
+    extra_tables:
+      - name: mix
+        columns:
+          - leaked
+          - i
+
+  - id: authorized_view_deals_constants_from_secrets
+    sql: "SELECT id, title, amount FROM deals"
+    expect: allow
+    stage: execute
+    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
+    extra_tables:
+      - name: deals
+        columns: [id, title, amount]
+        authorized_view: true
+    contains:
+      - "should never"
+
+  - id: authorized_view_deals_join_secrets
+    sql: "SELECT * FROM deals, secrets"
+    expect: deny
+    reason: not allowlisted
+    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
+    extra_tables:
+      - name: deals
+        columns: [id, title, amount]
+        authorized_view: true
+
+  - id: authorized_view_deals_union_secrets
+    sql: "SELECT title FROM deals UNION SELECT note FROM secrets"
+    expect: deny
+    reason: not allowlisted
+    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
+    extra_tables:
+      - name: deals
+        columns: [id, title, amount]
+        authorized_view: true
+
+  - id: authorized_view_deals_repeated_scan
+    sql: "SELECT a.title, b.title FROM deals a, deals b"
+    expect: allow
+    stage: execute
+    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
+    extra_tables:
+      - name: deals
+        columns: [id, title, amount]
+        authorized_view: true
+    contains:
+      - "should never"
+
+  - id: duckdb_tables
+    sql: "SELECT * FROM duckdb_tables()"
+    expect: deny
+    reason: table functions
+
+  - id: duckdb_secrets
+    sql: "SELECT * FROM duckdb_secrets()"
+    expect: deny
+    reason: table functions
+
+  - id: copy_out
+    sql: "COPY deals TO 'out.csv'"
+    expect: deny
+    reason: only SELECT
+
+  - id: pragma_show_tables
+    sql: "PRAGMA show_tables"
+    expect: deny
+    reason: only SELECT
+
+  - id: md5_not_allowlisted
+    sql: "SELECT md5(title) FROM deals"
+    expect: deny
+    reason: function not allowlisted
+
+  - id: window_not_allowlisted
+    sql: "SELECT row_number() OVER (ORDER BY id) FROM deals"
+    expect: deny
+    reason: window function not allowlisted
+
+  - id: attach_user_sql
+    sql: "ATTACH 'foo.db' AS x"
+    expect: deny
+    reason: only SELECT
+
+  - id: install_httpfs
+    sql: "INSTALL httpfs"
+    expect: deny
+    reason: only SELECT
+
+  - id: union_secrets
+    sql: "SELECT id FROM deals UNION SELECT 1 FROM secrets"
+    expect: deny
+    reason: not allowlisted
+
+  - id: exists_secrets
+    sql: "SELECT 1 WHERE EXISTS (SELECT * FROM secrets)"
+    expect: deny
+    reason: not allowlisted
+
+  - id: star_projects_allowlist
+    sql: "SELECT * FROM deals"
+    expect: allow
+    stage: execute
+    not_contains:
+      - note
+      - should never be visible
+
+  - id: c1_cte_shadow_qualified_secrets
+    sql: "WITH secrets AS (SELECT 1) SELECT * FROM memory.main.secrets"
+    expect: deny
+    reason: not allowlisted
+    stage: both
+
+  - id: select_deals_rewrite
+    sql: "SELECT id, title, amount FROM deals"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - tenant_id
+      - "21"
+      - _deleted
+
+  - id: cte_tenant_filter
+    sql: "WITH d AS (SELECT id, amount FROM deals) SELECT sum(amount) FROM d"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - "21"
+
+  - id: mandatory_filter_or_true
+    sql: "SELECT * FROM deals WHERE tenant_id = 22 OR 1=1"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - "21"
+
+  - id: user_question_param
+    sql: "SELECT id FROM deals WHERE id = ?"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - "21"
+
+  - id: limit_capped
+    sql: "SELECT id FROM deals LIMIT 99999"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - "100"
+
+  - id: c3_values_subquery_rewrite
+    sql: "SELECT * FROM (VALUES ((SELECT max(title) FROM deals WHERE tenant_id = 22))) t(x)"
+    expect: allow
+    stage: rewrite
+    rewrite_contains:
+      - "21"
+
+  - id: literal_question_mark
+    sql: "SELECT id FROM deals WHERE title = '?'"
+    expect: allow
+    stage: rewrite
+
+  - id: literal_colon_name
+    sql: "SELECT id FROM deals WHERE title = ':tenant_id'"
+    expect: allow
+    stage: rewrite
+
+  - id: execute_tenant_21
+    sql: "SELECT id, title, amount FROM deals ORDER BY id"
+    expect: allow
+    stage: execute
+    contains:
+      - alpha deal
+    not_contains:
+      - bravo
+      - alpha deleted
+
+  - id: execute_tenant_22
+    sql: "SELECT id, title, amount FROM deals ORDER BY id"
+    expect: allow
+    stage: execute
+    key: tenant_22:user_kim
+    contains:
+      - bravo deal
+    not_contains:
+      - alpha deal
+
+  - id: execute_bypass_tenant_predicate
+    sql: "SELECT id, title FROM deals WHERE tenant_id = 22"
+    expect: allow
+    stage: execute
+    not_contains:
+      - bravo
+
+  - id: execute_cte_aggregate
+    sql: "WITH d AS (SELECT amount FROM deals) SELECT sum(amount) AS total FROM d"
+    expect: allow
+    stage: execute
+    contains:
+      - "100"
+
+  - id: execute_copy_rewritten
+    sql: "COPY deals TO '/tmp/x.csv'"
+    expect: deny
+    reason: only SELECT
+    stage: execute
+
+  - id: execute_secrets
+    sql: "SELECT * FROM secrets"
+    expect: deny
+    reason: allowlisted
+    stage: execute
+
+  - id: execute_read_parquet
+    sql: "SELECT * FROM read_parquet('x.parquet')"
+    expect: deny
+    reason: table functions
+    stage: execute
+
+  - id: c1_execute_qualified_deals_hides_deleted
+    sql: "WITH deals AS (SELECT 1) SELECT * FROM main.deals WHERE tenant_id=21"
+    expect: allow
+    stage: execute
+    not_contains:
+      - alpha deleted
+      - note
+
+  - id: c2_tenant_typed_equality
+    sql: "WITH deals AS (SELECT 1) SELECT * FROM main.deals WHERE tenant_id = 22"
+    expect: allow
+    stage: execute
+    key: tenant_2:mallory
+    not_contains:
+      - bravo
+
+  - id: c3_values_subquery_execute
+    sql: "SELECT * FROM (VALUES ((SELECT max(title) FROM deals WHERE tenant_id = 22))) t(x)"
+    expect: allow
+    stage: execute
+    not_contains:
+      - bravo two
+
+  - id: union_deals_self
+    sql: "SELECT id FROM deals UNION SELECT id FROM deals"
+    expect: allow
+    stage: execute
+    not_contains:
+      - bravo
