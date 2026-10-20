@@ -21,6 +21,15 @@ std::string DuckboxBin() {
 			return env;
 		}
 	}
+#ifdef DUCKBOX_BIN_PATH
+	if (::access(DUCKBOX_BIN_PATH, X_OK) == 0) {
+		return DUCKBOX_BIN_PATH;
+	}
+#endif
+	std::string cov = std::string(DUCKBOX_SOURCE_DIR) + "/build-cov/duckbox";
+	if (::access(cov.c_str(), X_OK) == 0) {
+		return cov;
+	}
 	return std::string(DUCKBOX_SOURCE_DIR) + "/build/duckbox";
 }
 
