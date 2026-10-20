@@ -79,6 +79,16 @@ void duckbox::test::RunArrowTypeMapTests() {
                         "invalid", "injection-style type name is rejected");
     ExpectThrowContains([] { (void)MapTypeName("INTEGER; CREATE TABLE pwned(i INT)"); }, "invalid",
                         "MapTypeName rejects stacked statements in a type name");
+    ExpectThrowContains([] { (void)LogicalTypeFromName(std::string("INTEGER") + '\n'); }, "invalid",
+                        "newline in a type name is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName(std::string("INTEGER") + '\t'); }, "invalid",
+                        "tab in a type name is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER leftover"); }, "invalid",
+                        "trailing garbage after a type name is rejected");
+    ExpectThrowContains([] { (void)MapTypeName("INTEGER[] extra"); }, "invalid",
+                        "trailing garbage after a nested type name is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("NOTATYPE"); }, "invalid",
+                        "unknown type name is not VARCHAR");
 
     {
         std::vector<ColumnSchema> cols{

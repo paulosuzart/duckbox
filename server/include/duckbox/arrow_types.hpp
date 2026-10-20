@@ -19,7 +19,9 @@ namespace duckbox {
 ddb::ClientProperties DefaultArrowClientProperties();
 
 // Parse a type name ("BIGINT", "DECIMAL(10,2)", …) the way pragma_table_info
-// and PreparedStatement::GetTypes().ToString() write them.
+// and PreparedStatement::GetTypes().ToString() write them. Fail closed: the
+// name must round-trip to a valid, exact logical type (no VARCHAR fallback,
+// no leftover tokens, no control characters).
 ddb::LogicalType LogicalTypeFromName(const std::string &logical_type);
 
 std::shared_ptr<arrow::DataType> MapLogicalType(const ddb::LogicalType &type,

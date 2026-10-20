@@ -174,7 +174,7 @@ Each node also serves Prometheus **text** on `/metrics` (default `127.0.0.1:9477
 
 ### Validation
 
-1. **Static** (create/update): schema, types, key extractors, filters, `:vars`, function names, secret-ref syntax, `handles.stale_version_grace` (duration, cap 1h). **All** errors, with field paths (`tables.deals.filters[0]: …`). initSQL is not AST-validated (trusted SaaS input).
+1. **Static** (create/update): schema, types, key extractors, filters, `:vars`, function names, secret-ref syntax, `handles.stale_version_grace` (duration, cap 1h). Table names, column names, and `tenant_column` must be unquoted ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`, not a SQL keyword). **All** errors, with field paths (`tables.deals.filters[0]: …`). initSQL is not AST-validated (trusted SaaS input).
 2. **Lake** (inside the sandbox on first warmup for that **(id, version)**): whitelisted tables/columns exist. Cached on the registry record so later warmups skip it. `duckbox validate` uses a throwaway sandbox.
 
 Daemon startup validates **only** daemon config (listen, limits, optional lease prefix reachability / If-None-Match probe). Not the lake.
@@ -184,6 +184,20 @@ Daemon startup validates **only** daemon config (listen, limits, optional lease 
 Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap. Spec `lifecycle.idle_timeout` overrides the daemon default (capped by `limits.max_idle_timeout`). Spec `lifecycle.ttl` / `expires_at` tombstone the named definition when due.
 
 **initSQL**: trusted SaaS SQL, rerun on every warmup, then `enable_external_access=false` and `lock_configuration`. Objects it creates are visible to agent SQL **only if the spec lists them**. Exposed views are authorized (expansion opaque in the plan guard by catalog-entry oid / table-function operator; agent-written SQL around them is still checked). Authorized views are **not** wrapped with spec tenant filters — put `:tenant_id` (or another key variable) in the view itself. DuckDB `allowed_directories`/`allowed_paths` are derived from `lake.data_path`, path-like `attachments`, and optional `extra_paths` before external access is disabled (prefixes are canonicalized: no `..`, no extra `//`, no query string, trailing slash). Agent SQL cannot `COPY`/`read_*` except through those views, and only for prefixes the spec already declared.
+
+Spec table and column names are ASCII-only (see validation above). A DuckLake table or column whose real name is unicode, quoted, or otherwise not a safe unquoted identifier cannot appear in `tables:` / `columns:`. Give it an ASCII alias with a trusted initSQL authorized view, and list that alias in the spec:
+
+```yaml
+tables:
+  deals:
+    authorized_view: true
+    columns: [id, title]
+init_sql: |
+  CREATE TEMP VIEW deals AS
+    SELECT id, "título" AS title
+    FROM lake."negócios"
+    WHERE tenant_id = :tenant_id
+```
 
 ### Metrics
 

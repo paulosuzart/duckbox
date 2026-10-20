@@ -11,47 +11,73 @@
 namespace duckbox {
 namespace {
 
-ddb::string TrimTypeName(const std::string &s) {
+ddb::string TrimSpaces(const std::string &s) {
     size_t a = 0;
     size_t b = s.size();
-    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) {
+    while (a < b && s[a] == ' ') {
         a++;
     }
-    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) {
+    while (b > a && s[b - 1] == ' ') {
         b--;
     }
     return ddb::string(s.substr(a, b - a));
 }
 
-bool ParseDecimalParams(const std::string &s, uint8_t *width, uint8_t *scale) {
-    auto open = s.find('(');
-    auto close = s.rfind(')');
-    if (open == std::string::npos || close == std::string::npos || close <= open + 1) {
-        return false;
-    }
-    auto inner = s.substr(open + 1, close - open - 1);
-    auto comma = inner.find(',');
-    try {
-        if (comma == std::string::npos) {
-            int w = std::stoi(inner);
-            if (w < 1 || w > 38) {
-                return false;
-            }
-            *width = static_cast<uint8_t>(w);
-            *scale = 0;
+bool HasForbiddenTypeChars(const std::string &s) {
+    for (unsigned char c : s) {
+        if (c < 0x20 || c == 0x7f) {
             return true;
         }
-        int w = std::stoi(inner.substr(0, comma));
-        int sc = std::stoi(inner.substr(comma + 1));
-        if (w < 1 || w > 38 || sc < 0 || sc > w) {
-            return false;
+    }
+    return s.find(';') != std::string::npos || s.find("--") != std::string::npos;
+}
+
+std::string FoldSpacesUpper(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    bool pending_space = false;
+    for (unsigned char c : s) {
+        if (c == ' ') {
+            pending_space = !out.empty();
+            continue;
         }
-        *width = static_cast<uint8_t>(w);
-        *scale = static_cast<uint8_t>(sc);
-        return true;
-    } catch (...) {
+        if (pending_space) {
+            out.push_back(' ');
+            pending_space = false;
+        }
+        out.push_back(static_cast<char>(std::toupper(c)));
+    }
+    return out;
+}
+
+bool IsSingleIdent(const std::string &s) {
+    if (s.empty() || !(std::isalpha(static_cast<unsigned char>(s[0])) || s[0] == '_')) {
         return false;
     }
+    for (unsigned char c : s) {
+        if (!(std::isalnum(c) || c == '_')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsNestedLogicalId(ddb::LogicalTypeId id) {
+    return id == ddb::LogicalTypeId::LIST || id == ddb::LogicalTypeId::STRUCT ||
+           id == ddb::LogicalTypeId::MAP || id == ddb::LogicalTypeId::UNION ||
+           id == ddb::LogicalTypeId::ENUM || id == ddb::LogicalTypeId::ARRAY;
+}
+
+bool IsExactTypeSpelling(const std::string &name, const ddb::LogicalType &type) {
+    auto canon = type.ToString();
+    if (FoldSpacesUpper(name) == FoldSpacesUpper(canon)) {
+        return true;
+    }
+    if (IsSingleIdent(name) && !IsNestedLogicalId(type.id())) {
+        auto id = ddb::TransformStringToLogicalTypeId(name);
+        return id == type.id() && id != ddb::LogicalTypeId::INVALID;
+    }
+    return false;
 }
 
 struct TypeParser {
@@ -90,63 +116,38 @@ ddb::ClientProperties DefaultArrowClientProperties() {
 }
 
 ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
-    auto name = TrimTypeName(logical_type);
-    if (name.empty()) {
-        return ddb::LogicalType(ddb::LogicalTypeId::VARCHAR);
-    }
-    if (name.find(';') != std::string::npos || name.find("--") != std::string::npos) {
+    if (logical_type.empty() || HasForbiddenTypeChars(logical_type)) {
         throw Error("invalid logical type name");
     }
-    auto id = ddb::TransformStringToLogicalTypeId(name);
-    auto looks_decimal = [&]() {
-        auto u = name;
-        for (char &c : u) {
-            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-        }
-        return u.rfind("DECIMAL", 0) == 0 || u.rfind("NUMERIC", 0) == 0;
-    };
-    auto looks_nested = [&]() {
-        auto u = name;
-        for (char &c : u) {
-            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-        }
-        if (u.find('[') != std::string::npos) {
-            return true;
-        }
-        return u.rfind("STRUCT", 0) == 0 || u.rfind("MAP", 0) == 0 || u.rfind("UNION", 0) == 0 ||
-               u.rfind("LIST", 0) == 0 || u.rfind("ARRAY", 0) == 0;
-    };
-    if (id == ddb::LogicalTypeId::DECIMAL || looks_decimal()) {
-        uint8_t width = 18;
-        uint8_t scale = 3;
-        if (ParseDecimalParams(name, &width, &scale)) {
-            return ddb::LogicalType::DECIMAL(width, scale);
-        }
-        return ParseWithContext(name);
+    auto name = TrimSpaces(logical_type);
+    if (name.empty()) {
+        throw Error("invalid logical type name");
     }
-    if (looks_nested()) {
-        return ParseWithContext(name);
+    ddb::LogicalType parsed;
+    try {
+        parsed = ParseWithContext(name);
+    } catch (...) {
+        throw Error("invalid logical type name");
     }
-    switch (id) {
-    case ddb::LogicalTypeId::LIST:
-    case ddb::LogicalTypeId::STRUCT:
-    case ddb::LogicalTypeId::MAP:
-    case ddb::LogicalTypeId::UNION:
-    case ddb::LogicalTypeId::ENUM:
-    case ddb::LogicalTypeId::ARRAY:
-        return ParseWithContext(name);
-    case ddb::LogicalTypeId::INVALID:
-    case ddb::LogicalTypeId::UNBOUND:
-    case ddb::LogicalTypeId::UNKNOWN:
-    case ddb::LogicalTypeId::ANY:
-        try {
-            return ParseWithContext(name);
-        } catch (...) {
-            return ddb::LogicalType(ddb::LogicalTypeId::VARCHAR);
+    auto id = parsed.id();
+    if (id == ddb::LogicalTypeId::INVALID || id == ddb::LogicalTypeId::UNBOUND ||
+        id == ddb::LogicalTypeId::UNKNOWN || id == ddb::LogicalTypeId::ANY) {
+        throw Error("invalid logical type name");
+    }
+    try {
+        auto again = ParseWithContext(parsed.ToString());
+        if (again != parsed) {
+            throw Error("invalid logical type name");
         }
-    default:
-        return ddb::LogicalType(id);
+    } catch (const Error &) {
+        throw;
+    } catch (...) {
+        throw Error("invalid logical type name");
     }
+    if (!IsExactTypeSpelling(name, parsed)) {
+        throw Error("invalid logical type name");
+    }
+    return parsed;
 }
 
 std::shared_ptr<arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::string> &names,
