@@ -88,6 +88,17 @@ std::string Sha256Hex(const std::string &data) {
 	return HexEncode(Sha256Raw(data));
 }
 
+std::string RandomHex(size_t n_bytes) {
+	if (n_bytes == 0) {
+		return "";
+	}
+	std::string raw(n_bytes, '\0');
+	if (RAND_bytes(reinterpret_cast<unsigned char *>(raw.data()), static_cast<int>(n_bytes)) != 1) {
+		throw Error("RAND_bytes failed");
+	}
+	return HexEncode(raw);
+}
+
 bool ConstTimeEquals(const std::string &a, const std::string &b) {
 	if (a.size() != b.size()) {
 		return false;

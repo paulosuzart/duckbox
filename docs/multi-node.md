@@ -62,7 +62,7 @@ The **node lease** (heartbeat object `{prefix}nodes/{node_id}.json`) is the fenc
 - When the published expiry passes, **or** the node lease record is gone / does not match what this process published: **fence**.
 - Fence: interrupt every in-flight statement, passivate every sandbox, fail subsequent requests, log a JSON `self_fence` event, exit **3**. Fence writes nothing (no lease Release, no heartbeat delete).
 - Every routed request calls `AssertServing` so a request is refused if expiry has already passed, even before the watchdog tick.
-- A 412 on the node heartbeat is **re-read**. The process fences only if the S3 record is missing or belongs to a different `node_id`. A restart of the same `node_id` takes over via If-Match (registration is idempotent). `nodes/{id}.json` is not deleted on crash; SIGTERM drains, tombstones owned sandbox leases, then deregisters.
+- A 412 on the node heartbeat is **re-read**. The process fences if the S3 record is missing, belongs to a different `node_id`, or carries a different per-process `instance_id`. A restart of the same `node_id` takes over via If-Match (registration is idempotent) and writes a new `instance_id`; the previous process then fences instead of coexisting. `nodes/{id}.json` is not deleted on crash; SIGTERM drains, tombstones owned sandbox leases, then deregisters.
 
 A sandbox lease renew failure (412, epoch mismatch, transport) interrupts in-flight SQL for **that** sandbox, then passivates it.
 
@@ -96,12 +96,13 @@ stateDiagram-v2
 
 - **Acquire** (If-None-Match `*`): create epoch 1. If another node holds an unexpired lease, return `owned_locally=false` (proxy). If expired or tombstoned (`owner_id` empty), steal with If-Match and `epoch++` (fencing token). Draining nodes do not take new leases.
 - **Renew** (If-Match on the **locally remembered** lease): bump `expiry_ms`, keep epoch. Verifies `owner_id == self`. Failure is `LeaseLostError`; the renew thread interrupts then passivates that sandbox. Never `Renew(Peek)` — Peek is the current S3 owner and would make the etag/epoch check tautological.
-- **Release** (If-Match **tombstone**): clear `owner_id` / `flight` / `expiry_ms`, **keep epoch**. Drain uses remembered leases only, so it cannot delete another node’s live record. Epoch never resets on release; the next acquire is `epoch+1`.
-- Check ownership on every `SandboxRuntime::Get` (every query path), with a short optional `lease.cache_ms` window.
+- **Release** (If-Match **tombstone**): clear `owner_id` / `flight` / `expiry_ms` / `instance_id`, set `released_ms`, **keep epoch**. Drain uses remembered leases only, so it cannot delete another node’s live record. Epoch never resets on release; the next acquire is `epoch+1`.
+- **Tombstone GC**: tombstones older than `lease.gc` (default 24h) are deleted only after the current epoch is written to `{prefix}epochs/{id}.json`. Acquire of a missing object reads that marker so epoch stays monotonic. GC never deletes a tombstone if the marker write failed or would store a smaller epoch. `lease.gc: 0` disables GC. Tombstones without `released_ms` are stamped first and wait a full `gc` interval.
+- Check ownership on every `SandboxRuntime::Get` (every query path), with a short optional `lease.cache_ms` window. Proxy dials consult `IsKnownFlight`, which uses a short-TTL node-directory cache and lists S3 only on a cache miss (unknown URL or expired TTL).
 
 `epoch` is **not** included in lake writes. The real guarantees are: (1) CAS on the S3 lease object (If-Match / If-None-Match + monotonic epoch) so a stale owner cannot keep or silently reclaim the record; (2) the node self-fence so a process that lost its node lease stops serving. DuckLake / catalog rows do not carry the epoch.
 
-Heartbeat records live next to leases: `{prefix}nodes/{node_id}.json` (`node_id`, `flight` = internal advertise URL, `started_at_ms`, `version`, `expiry_ms`). Peers `ListKeys` that prefix and ignore expired rows.
+Heartbeat records live next to leases: `{prefix}nodes/{node_id}.json` (`node_id`, `flight` = internal advertise URL, `started_at_ms`, `version`, `expiry_ms`, `instance_id`). Peers `ListKeys` that prefix and ignore expired rows. Each process generates an `instance_id` at start and writes it on the node record and on every sandbox lease it holds. A second process with the same `node_id` takes over (If-Match) and the first fences when it sees a different `instance_id`.
 
 ## Config keys
 
@@ -119,7 +120,8 @@ Under `lease:` in the daemon YAML (all optional except the S3 endpoint block you
 | `ttl` / `ttl_ms` | `15s` | Lease and heartbeat TTL. Must exceed the longest S3 blip you want to survive without a restart. |
 | `heartbeat` / `heartbeat_ms` | `ttl/3` (min 1s) | Node-lease renew interval. |
 | `skew` / `skew_ms` | `1s` | Extra wait past `expiry_ms` before stealing another node’s lease (local-clock skew margin). |
-| `cache_ms` | `250` | Short Acquire cache. `0` disables. Must stay well below TTL. |
+| `cache_ms` | `250` | Short Acquire cache (also caps the node-directory lookup cache). `0` disables the Acquire cache; directory lookups then use a 1s TTL. Must stay well below TTL. |
+| `gc` / `gc_ms` | `24h` | Age after which a lease tombstone may be deleted. Epoch is copied to `{prefix}epochs/{id}.json` first. `0` disables. |
 | `proxy_timeout` / `proxy_timeout_ms` | `5s` | Deadline for peer Flight proxy RPCs. |
 | `max_leases` | `0` (unlimited) | Optional cap of sandboxes this node will own. |
 
@@ -173,7 +175,7 @@ If a process dies, heartbeats and leases expire after `ttl`. Another node acquir
 
 A renew failure on a sandbox (412, epoch mismatch, or transport error) interrupts then passivates **that** sandbox only, before its TTL expires. Epoch is a CAS fencing token on the S3 lease object only; it is not written into the lake.
 
-A failed **node heartbeat** PUT does **not** immediately exit. While the published expiry is still in the future, the node retries. When expiry passes (or the record is missing / a **different** `node_id`), it self-fences and exits 3. An S3 blip shorter than TTL does not fence. An S3 outage longer than TTL fences every node; the supervisor restarts them and they take over their own `node_id` once S3 returns.
+A failed **node heartbeat** PUT does **not** immediately exit. While the published expiry is still in the future, the node retries. When expiry passes (or the record is missing / a **different** `node_id` or `instance_id`), it self-fences and exits 3. An S3 blip shorter than TTL does not fence. An S3 outage longer than TTL fences every node; the supervisor restarts them and they take over their own `node_id` once S3 returns. Two processes with the same `node_id` cannot coexist: the new process takes over the record, the old process fences.
 
 ## Clock skew
 

@@ -31,6 +31,8 @@ struct Lease {
 	std::string etag;
 	std::string flight; // owner internal advertise URL, e.g. grpc://127.0.0.1:5747
 	int64_t expiry_ms = 0;
+	std::string instance_id; // per-process nonce; empty on tombstones / missing
+	int64_t released_ms = 0; // tombstone age marker; 0 if live
 	bool owned_locally = false;
 };
 
@@ -90,6 +92,8 @@ public:
 		return {};
 	}
 	virtual void ReleaseOwned() {
+	}
+	virtual void GcTombstones() {
 	}
 	virtual void set_flight(std::string flight) {
 		(void)flight;
@@ -160,8 +164,10 @@ struct S3LeaseOptions {
 	int64_t heartbeat_ms = 5000;
 	int64_t skew_ms = 0;    // steal margin vs local clock; production YAML default 1000
 	int64_t cache_ms = 0;   // 0 = no Acquire cache; production YAML default 250
+	int64_t gc_ms = 86'400'000; // tombstone GC age; 0 disables; production YAML default 24h
 	size_t max_leases = 0; // 0 = unlimited
 	std::string version;
+	std::string instance_id; // per-process nonce; empty = generated in the manager/directory ctor
 };
 
 S3LeaseOptions LeaseOptionsFromDaemon(const DaemonConfig &daemon);
@@ -174,6 +180,7 @@ struct NodeRecord {
 	int64_t expiry_ms = 0;
 	std::string etag;
 	bool draining = false;
+	std::string instance_id; // per-process nonce written on every heartbeat
 };
 
 // Heartbeat records under {prefix}nodes/{id}.json. Peers discover each other via ListKeys.
@@ -193,6 +200,9 @@ public:
 	const std::string &node_id() const {
 		return opt_.owner_id;
 	}
+	const std::string &instance_id() const {
+		return instance_id_;
+	}
 	std::shared_ptr<Clock> clock() const {
 		return clock_;
 	}
@@ -211,6 +221,8 @@ private:
 	NodeRecord Parse(const S3Object &obj) const;
 	std::vector<NodeRecord> ListUncached();
 	void PutHeartbeatLocked(); // caller holds mu_
+	void InvalidateLiveCacheLocked();
+	int64_t DirectoryCacheTtlMs() const;
 
 	std::shared_ptr<S3ControlClient> client_;
 	S3LeaseOptions opt_;
@@ -222,7 +234,10 @@ private:
 	std::string last_body_;
 	int64_t published_expiry_ms_ = 0;
 	bool draining_ = false;
-	int64_t live_cache_ms_ = 0;
+	int64_t live_cache_ms_ = 0; // last metrics ListUncached
+	std::string instance_id_;
+	std::vector<NodeRecord> live_cache_;
+	int64_t live_cache_until_ms_ = 0;
 };
 
 // S3 If-None-Match:* create, If-Match renew/steal/release. Clock is injectable for TTL tests.
@@ -240,11 +255,15 @@ public:
 	bool healthy() const override;
 	std::vector<std::string> OwnedIds() const override;
 	void ReleaseOwned() override;
+	void GcTombstones() override;
 	void set_flight(std::string flight) override;
 	Lease Held(const std::string &resource_id) override;
 
 	const std::string &owner_id() const {
 		return opt_.owner_id;
+	}
+	const std::string &instance_id() const {
+		return instance_id_;
 	}
 
 private:
@@ -259,6 +278,9 @@ private:
 	void Remember(const Lease &lease);
 	void Forget(const std::string &resource_id);
 	Lease CachedAcquire(const std::string &resource_id);
+	std::string EpochKey(const std::string &resource_id) const;
+	uint64_t LoadEpochMarker(const std::string &resource_id);
+	bool StoreEpochMarker(const std::string &resource_id, uint64_t epoch);
 
 	std::shared_ptr<S3ControlClient> client_;
 	S3LeaseOptions opt_;
@@ -267,6 +289,7 @@ private:
 	std::unordered_map<std::string, HeldLease> held_;
 	bool draining_ = false;
 	bool healthy_ = true;
+	std::string instance_id_;
 };
 
 } // namespace duckbox

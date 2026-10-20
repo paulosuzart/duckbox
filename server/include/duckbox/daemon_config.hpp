@@ -48,6 +48,7 @@ struct LeaseSettings {
 	int64_t heartbeat_ms = 5000;
 	int64_t skew_ms = 1000;          // steal waits this long past expiry_ms (clock skew)
 	int64_t cache_ms = 250;          // short Acquire cache; 0 disables
+	int64_t gc_ms = 86'400'000;      // tombstone GC age; 0 disables (default 24h)
 	int64_t proxy_timeout_ms = 5000; // Flight peer-proxy deadline
 	size_t max_leases = 0; // 0 = unlimited
 };

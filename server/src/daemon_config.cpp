@@ -283,8 +283,8 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 	if (auto *lease = root.Get("lease")) {
 		YamlRejectUnknownKeys(*lease, {"endpoint", "endpoint_env", "bucket", "prefix", "access_key_env",
 		                               "secret_key_env", "skip_probe", "node_id", "advertise", "ttl", "ttl_ms",
-		                               "heartbeat", "heartbeat_ms", "skew", "skew_ms", "cache_ms", "proxy_timeout",
-		                               "proxy_timeout_ms", "max_leases"});
+		                               "heartbeat", "heartbeat_ms", "skew", "skew_ms", "cache_ms", "gc", "gc_ms",
+		                               "proxy_timeout", "proxy_timeout_ms", "max_leases"});
 		d.lease.endpoint = lease->GetString("endpoint");
 		d.lease.endpoint_env = lease->GetString("endpoint_env");
 		d.lease.bucket = lease->GetString("bucket");
@@ -336,6 +336,18 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 		d.lease.cache_ms = lease->GetInt("cache_ms", d.lease.cache_ms);
 		if (d.lease.cache_ms < 0) {
 			throw PolicyError("lease.cache_ms must be >= 0");
+		}
+		d.lease.gc_ms = lease->GetInt("gc_ms", d.lease.gc_ms);
+		auto gc_raw = lease->GetString("gc");
+		if (!gc_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(gc_raw, &ms) || ms < 0) {
+				throw PolicyError("lease.gc: expected duration like 24h");
+			}
+			d.lease.gc_ms = ms;
+		}
+		if (d.lease.gc_ms < 0) {
+			throw PolicyError("lease.gc_ms must be >= 0");
 		}
 		d.lease.proxy_timeout_ms = lease->GetInt("proxy_timeout_ms", d.lease.proxy_timeout_ms);
 		auto pto_raw = lease->GetString("proxy_timeout");

@@ -81,6 +81,9 @@ void duckbox::test::RunCryptoTests() {
 	ExpectThrowContains([&] { AesGcmDecrypt("other-secret", sealed, aad); }, "invalid",
 	                    "AES-GCM rejects a mismatched key");
 	Expect(HexEncode(std::string("\x00\xff", 2)) == "00ff", "hex encode");
+	auto r1 = RandomHex(16);
+	auto r2 = RandomHex(16);
+	Expect(r1.size() == 32 && r2.size() == 32 && r1 != r2, "RandomHex is 16-byte hex and unique");
 	Expect(Sha256Hex("x").size() == 64, "sha256 hex length");
 	auto b64 = Base64UrlEncode(std::string("hi"));
 	auto back = Base64UrlDecode(b64);

@@ -265,6 +265,38 @@ void duckbox::test::RunClusterTests() {
 	}
 
 	{
+		S3LeaseOptions opt_dup = opt_a;
+		opt_dup.owner_id = "node-dup";
+		opt_dup.flight = "grpc://127.0.0.1:4760";
+		auto leases1 = std::make_shared<S3ConditionalLeaseManager>(s3, opt_dup, std::shared_ptr<IMetrics>{}, clock);
+		auto nodes1 = std::make_shared<S3NodeDirectory>(s3, opt_dup, std::shared_ptr<IMetrics>{}, clock);
+		auto daemon_dup = TestDaemon();
+		daemon_dup.name = "node-dup";
+		SandboxRuntime rt1(daemon_dup, leases1, defs);
+		rt1.SetNodeDirectory(nodes1);
+		rt1.SetClock(clock);
+		std::string fence1;
+		rt1.SetFenceHook([&](const std::string &r) { fence1 = r; });
+		rt1.TickLeases();
+		Expect(rt1.Serving() && !rt1.fenced(), "first process publishes the node lease");
+
+		auto leases2 = std::make_shared<S3ConditionalLeaseManager>(s3, opt_dup, std::shared_ptr<IMetrics>{}, clock);
+		auto nodes2 = std::make_shared<S3NodeDirectory>(s3, opt_dup, std::shared_ptr<IMetrics>{}, clock);
+		SandboxRuntime rt2(daemon_dup, leases2, defs);
+		rt2.SetNodeDirectory(nodes2);
+		rt2.SetClock(clock);
+		std::string fence2;
+		rt2.SetFenceHook([&](const std::string &r) { fence2 = r; });
+		rt2.TickLeases();
+		Expect(!rt2.fenced() && rt2.Serving() && fence2.empty(), "second process with the same node_id takes over");
+
+		rt1.TickLeases();
+		Expect(rt1.fenced() && fence1.find("mismatch") != std::string::npos,
+		       "first process fences when the node record instance_id changes");
+		Expect(!rt2.fenced() && rt2.Serving(), "exactly one process survives");
+	}
+
+	{
 		auto s3p = MakeMemoryS3ControlClient("proxy");
 		auto clockp = std::make_shared<FakeClock>(5'000'000);
 		auto defs_p = std::make_shared<S3SandboxRegistry>(s3p);

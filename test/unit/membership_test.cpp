@@ -5,6 +5,12 @@
 #include "duckbox/metrics.hpp"
 #include "duckbox/s3.hpp"
 
+#include <atomic>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 void duckbox::test::RunMembershipTests() {
 	using namespace duckbox;
 	auto s3 = MakeMemoryS3ControlClient("control");
@@ -84,7 +90,85 @@ void duckbox::test::RunMembershipTests() {
 		S3NodeDirectory again(s3, opt_r, {}, clock);
 		again.Heartbeat();
 		Expect(again.List().size() == 1, "restart after drain takes over and clears draining");
+		Expect(first.CheckPublished() == S3NodeDirectory::RecordCheck::Mismatch,
+		       "the process that lost the node record sees a mismatch");
 		again.Deregister();
+	}
+
+	{
+		S3LeaseOptions opt_dup = opt;
+		opt_dup.owner_id = "node-dup";
+		opt_dup.flight = "grpc://127.0.0.1:4791";
+		S3NodeDirectory first(s3, opt_dup, {}, clock);
+		first.Heartbeat();
+		Expect(!first.instance_id().empty(), "heartbeat writes a per-process instance_id");
+		S3NodeDirectory second(s3, opt_dup, {}, clock);
+		second.Heartbeat();
+		Expect(second.instance_id() != first.instance_id(), "second process has a distinct instance_id");
+		Expect(first.CheckPublished() == S3NodeDirectory::RecordCheck::Mismatch,
+		       "first process sees the taken-over record as a mismatch");
+		Expect(second.CheckPublished() == S3NodeDirectory::RecordCheck::Ok, "second process owns the record");
+		ExpectThrowContains([&] { first.Heartbeat(); }, "mismatch",
+		                    "first process fences instead of coexisting");
+		second.Heartbeat();
+		Expect(second.CheckPublished() == S3NodeDirectory::RecordCheck::Ok && second.has_published(),
+		       "exactly one process survives: the second keeps serving");
+		auto rec = s3->Get("leases/nodes/node-dup.json");
+		Expect(rec.status == 200 && rec.body.find(second.instance_id()) != std::string::npos,
+		       "node record stores the surviving process instance_id");
+		second.Deregister();
+	}
+
+	{
+		struct CountingS3 : S3ControlClient {
+			explicit CountingS3(std::shared_ptr<S3ControlClient> inner) : inner_(std::move(inner)) {
+			}
+			S3Object Get(const std::string &key) const override {
+				gets_.fetch_add(1);
+				return inner_->Get(key);
+			}
+			S3Object Put(const std::string &key, const std::string &body, const std::string &if_match,
+			             const std::string &if_none_match) const override {
+				return inner_->Put(key, body, if_match, if_none_match);
+			}
+			S3Object Delete(const std::string &key, const std::string &if_match) const override {
+				return inner_->Delete(key, if_match);
+			}
+			std::vector<std::string> ListKeys(const std::string &prefix) const override {
+				lists_.fetch_add(1);
+				return inner_->ListKeys(prefix);
+			}
+			const std::string &bucket() const override {
+				return inner_->bucket();
+			}
+			int lists() const {
+				return lists_.load();
+			}
+			std::shared_ptr<S3ControlClient> inner_;
+			mutable std::atomic<int> lists_{0};
+			mutable std::atomic<int> gets_{0};
+		};
+		auto inner = MakeMemoryS3ControlClient("dir-cache");
+		auto counted = std::make_shared<CountingS3>(inner);
+		S3LeaseOptions opt_c = opt;
+		opt_c.owner_id = "node-cache";
+		opt_c.flight = "grpc://127.0.0.1:4792";
+		opt_c.cache_ms = 1000;
+		S3NodeDirectory d(counted, opt_c, {}, clock);
+		d.Heartbeat();
+		int lists_after_hb = counted->lists();
+		Expect(d.IsKnownFlight("grpc://127.0.0.1:4792"), "own advertise URL is a known flight");
+		int lists_after_first = counted->lists();
+		Expect(lists_after_first > lists_after_hb, "cache miss lists the node directory");
+		Expect(d.IsKnownFlight("grpc://127.0.0.1:4792"), "second lookup hits the directory cache");
+		Expect(counted->lists() == lists_after_first, "cache hit does not ListKeys");
+		Expect(!d.IsKnownFlight("grpc://127.0.0.1:65535"), "unknown flight falls back to uncached");
+		Expect(counted->lists() > lists_after_first, "cache miss for an unknown flight lists again");
+		int lists_before_expire = counted->lists();
+		clock->AdvanceMs(1000);
+		Expect(d.IsKnownFlight("grpc://127.0.0.1:4792"), "expired cache refreshes uncached");
+		Expect(counted->lists() > lists_before_expire, "TTL expiry lists the node directory");
+		d.Deregister();
 	}
 
 	{

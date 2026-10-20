@@ -832,6 +832,14 @@ void SandboxRuntime::TickLeases() {
 				std::clog << nr.dump() << "\n";
 			}
 		}
+		try {
+			leases_->GcTombstones();
+		} catch (const std::exception &e) {
+			Json gc;
+			gc["event"] = "lease_gc";
+			gc["reason"] = e.what();
+			std::clog << gc.dump() << "\n";
+		}
 	} else {
 		Metrics().SetNodeHealthy(Serving());
 	}

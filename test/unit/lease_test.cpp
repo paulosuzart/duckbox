@@ -279,4 +279,50 @@ void duckbox::test::RunLeaseTests() {
 		auto miss = cm.Acquire("cache-box");
 		Expect(!miss.owned_locally && miss.owner_id == "other", "cache miss reloads S3 after cache_ms");
 	}
+
+	{
+		S3LeaseOptions inst = opt_a;
+		inst.owner_id = "node-inst";
+		S3ConditionalLeaseManager p1(s3, inst, {}, clock);
+		auto held = p1.Acquire("inst-box");
+		Expect(held.owned_locally && held.instance_id == p1.instance_id() && !held.instance_id.empty(),
+		       "acquire writes this process instance_id on the lease");
+		S3ConditionalLeaseManager p2(s3, inst, {}, clock);
+		auto take = p2.Acquire("inst-box");
+		Expect(take.owned_locally && take.epoch == held.epoch && take.instance_id == p2.instance_id(),
+		       "second process with the same node_id takes over the live lease");
+		bool lost = false;
+		try {
+			p1.Renew(p1.Held("inst-box"));
+		} catch (const LeaseLostError &) {
+			lost = true;
+		}
+		Expect(lost, "first process cannot renew after instance take-over");
+		p2.Release(take);
+	}
+
+	{
+		S3LeaseOptions gc = opt_a;
+		gc.owner_id = "node-gc";
+		gc.gc_ms = 1000;
+		S3ConditionalLeaseManager gm(s3, gc, {}, clock);
+		auto live = gm.Acquire("gc-box");
+		Expect(live.epoch == 1, "gc fixture starts at epoch 1");
+		gm.Release(live);
+		auto tomb = gm.Peek("gc-box");
+		Expect(tomb.owner_id.empty() && tomb.epoch == 1 && tomb.released_ms == clock->NowMs(),
+		       "release writes a tombstone with released_ms");
+		gm.GcTombstones();
+		Expect(s3->Get("leases/ownership/gc-box.json").status == 200, "tombstone younger than gc_ms is kept");
+		clock->AdvanceMs(1000);
+		gm.GcTombstones();
+		auto gone = s3->Get("leases/ownership/gc-box.json");
+		Expect(gone.status == 404, "aged tombstone is deleted after epoch is preserved");
+		auto marker = s3->Get("leases/epochs/gc-box.json");
+		Expect(marker.status == 200 && marker.body.find("\"epoch\":1") != std::string::npos,
+		       "GC writes a max-epoch marker before delete");
+		auto fresh = gm.Acquire("gc-box");
+		Expect(fresh.owned_locally && fresh.epoch == 2, "acquire after GC continues the epoch from the marker");
+		gm.Release(fresh);
+	}
 }
