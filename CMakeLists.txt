@@ -359,7 +359,8 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/crypto_test.cpp
   test/unit/registry_test.cpp
   test/unit/metrics_test.cpp
-  test/unit/s3_test.cpp)
+  test/unit/s3_test.cpp
+  test/unit/lease_test.cpp)
 
 duckbox_add_test(duckbox_guardrail_tests
   test/support/check.cpp

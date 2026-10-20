@@ -1,16 +1,62 @@
 #include "duckbox/lease.hpp"
 #include "duckbox/error.hpp"
+#include "duckbox/json.hpp"
 
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <set>
+#include <utility>
 
 namespace duckbox {
+namespace {
+
+constexpr int kMaxCasAttempts = 8;
+const char *kLeaseWhat = "lease record JSON";
+const std::set<std::string> kLeaseKeys = {"resource", "epoch", "owner_id", "flight", "expiry_ms", "tenant_key"};
+
+void ValidateResourceId(const std::string &resource_id) {
+	if (resource_id.empty()) {
+		throw PolicyError("lease resource id is required");
+	}
+	if (resource_id.find('/') != std::string::npos || resource_id.find('\\') != std::string::npos ||
+	    resource_id.find('\0') != std::string::npos) {
+		throw PolicyError("lease resource id must not contain path separators");
+	}
+}
+
+bool HttpOk(int status) {
+	return status == 200 || status == 204;
+}
+
+const char *S3ErrorCode(int status) {
+	if (status == 412 || status == 409) {
+		return "precondition";
+	}
+	if (status == 404) {
+		return "not_found";
+	}
+	if (status == 0) {
+		return "transport";
+	}
+	return "error";
+}
+
+std::string ResourceOf(const Lease &lease) {
+	return lease.resource.empty() ? lease.tenant_key : lease.resource;
+}
+
+} // namespace
 
 [[noreturn]] void SelfFence(const std::string &reason) {
 	// Exit 3 (not abort): counters reset, ops alert on restart + last-renewal age.
 	std::clog << "{\"event\":\"self_fence\",\"reason\":\"" << reason << "\"}\n";
 	std::_Exit(3);
+}
+
+int64_t SystemClock::NowMs() const {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+	    .count();
 }
 
 LeaseTelemetry::LeaseTelemetry(std::shared_ptr<IMetrics> metrics) : metrics_(std::move(metrics)) {
@@ -23,13 +69,15 @@ IMetrics &LeaseTelemetry::M() {
 SingleNodeLeaseManager::SingleNodeLeaseManager(std::shared_ptr<IMetrics> metrics) : LeaseTelemetry(std::move(metrics)) {
 }
 
-Lease SingleNodeLeaseManager::Acquire(const TenantKey &key) {
+Lease SingleNodeLeaseManager::Acquire(const std::string &resource_id) {
+	ValidateResourceId(resource_id);
 	Lease lease;
-	lease.tenant_key = key.raw;
+	lease.resource = resource_id;
+	lease.tenant_key = resource_id;
 	lease.epoch = 1;
 	lease.owner_id = "local";
 	lease.owned_locally = true;
-	bool is_new = owned_.insert(key.raw).second;
+	bool is_new = owned_.insert(resource_id).second;
 	M().IncOwnershipAcquired(is_new ? "new" : "handoff");
 	M().SetOwnedKeys(owned_.size());
 	return lease;
@@ -42,9 +90,22 @@ void SingleNodeLeaseManager::Renew(const Lease &) {
 }
 
 void SingleNodeLeaseManager::Release(const Lease &lease) {
-	owned_.erase(lease.tenant_key);
+	owned_.erase(ResourceOf(lease));
 	M().IncOwnershipLost("released");
 	M().SetOwnedKeys(owned_.size());
+}
+
+Lease SingleNodeLeaseManager::Peek(const std::string &resource_id) {
+	ValidateResourceId(resource_id);
+	Lease lease;
+	lease.resource = resource_id;
+	lease.tenant_key = resource_id;
+	if (owned_.count(resource_id)) {
+		lease.epoch = 1;
+		lease.owner_id = "local";
+		lease.owned_locally = true;
+	}
+	return lease;
 }
 
 LocalRouter::LocalRouter(std::shared_ptr<IMetrics> metrics) : LeaseTelemetry(std::move(metrics)) {
@@ -55,24 +116,238 @@ RouteDecision LocalRouter::Decide(const TenantKey &) {
 	return RouteDecision::Local;
 }
 
-S3ConditionalLeaseManager::S3ConditionalLeaseManager(std::shared_ptr<IMetrics> metrics)
-    : LeaseTelemetry(std::move(metrics)) {
+S3ConditionalLeaseManager::S3ConditionalLeaseManager(std::shared_ptr<S3ControlClient> client, S3LeaseOptions opt,
+                                                     std::shared_ptr<IMetrics> metrics, std::shared_ptr<Clock> clock)
+    : LeaseTelemetry(std::move(metrics)), client_(std::move(client)), opt_(std::move(opt)), clock_(std::move(clock)) {
+	if (!client_) {
+		throw PolicyError("S3ConditionalLeaseManager requires an S3ControlClient");
+	}
+	if (!clock_) {
+		clock_ = std::make_shared<SystemClock>();
+	}
+	if (opt_.owner_id.empty()) {
+		opt_.owner_id = "local";
+	}
+	if (opt_.ttl_ms <= 0) {
+		opt_.ttl_ms = 15000;
+	}
+	if (!opt_.prefix.empty() && opt_.prefix.back() != '/') {
+		opt_.prefix += '/';
+	}
 }
 
-Lease S3ConditionalLeaseManager::Acquire(const TenantKey &) {
-	M().IncS3LeaseError("acquire", "unimplemented");
-	throw Error("S3ConditionalLeaseManager is not implemented in this draft "
-	            "(TODO: If-None-Match / If-Match ETag + fencing epoch on s3://…/leases/)");
+std::string S3ConditionalLeaseManager::ObjectKey(const std::string &resource_id) const {
+	ValidateResourceId(resource_id);
+	return opt_.prefix + "ownership/" + resource_id + ".json";
 }
 
-void S3ConditionalLeaseManager::Renew(const Lease &) {
-	M().IncS3LeaseError("renew", "unimplemented");
-	throw Error("S3ConditionalLeaseManager::Renew is not implemented");
+std::string S3ConditionalLeaseManager::Encode(const Lease &lease) const {
+	Json j;
+	j["resource"] = lease.resource;
+	j["epoch"] = lease.epoch;
+	j["owner_id"] = lease.owner_id;
+	j["flight"] = lease.flight;
+	j["expiry_ms"] = lease.expiry_ms;
+	j["tenant_key"] = lease.tenant_key.empty() ? lease.resource : lease.tenant_key;
+	return j.dump();
 }
 
-void S3ConditionalLeaseManager::Release(const Lease &) {
-	M().IncS3LeaseError("release", "unimplemented");
-	throw Error("S3ConditionalLeaseManager::Release is not implemented");
+Lease S3ConditionalLeaseManager::ParseRecord(const S3Object &obj) const {
+	auto j = ParseJsonObject(obj.body, kLeaseWhat);
+	JsonRejectUnknown(j, kLeaseKeys, kLeaseWhat);
+	Lease lease;
+	lease.resource = JsonRequireString(j, "resource", kLeaseWhat);
+	lease.tenant_key = JsonHas(j, "tenant_key") ? JsonRequireString(j, "tenant_key", kLeaseWhat) : lease.resource;
+	auto epoch = JsonRequireInt(j, "epoch", kLeaseWhat);
+	if (epoch < 0) {
+		throw PolicyError("lease record JSON 'epoch' must be >= 0");
+	}
+	lease.epoch = static_cast<uint64_t>(epoch);
+	lease.owner_id = JsonRequireString(j, "owner_id", kLeaseWhat);
+	lease.flight = JsonHas(j, "flight") ? JsonRequireString(j, "flight", kLeaseWhat) : "";
+	lease.expiry_ms = JsonRequireInt(j, "expiry_ms", kLeaseWhat);
+	lease.etag = obj.etag;
+	lease.owned_locally = (lease.owner_id == opt_.owner_id && lease.expiry_ms > clock_->NowMs());
+	return lease;
+}
+
+Lease S3ConditionalLeaseManager::Load(const std::string &resource_id) {
+	auto t0 = std::chrono::steady_clock::now();
+	auto obj = client_->Get(ObjectKey(resource_id));
+	M().ObserveS3LeaseOp("get", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+	if (obj.status == 404) {
+		Lease miss;
+		miss.resource = resource_id;
+		miss.tenant_key = resource_id;
+		return miss;
+	}
+	if (!HttpOk(obj.status)) {
+		M().IncS3LeaseError("get", S3ErrorCode(obj.status));
+		throw Error(obj.error.empty() ? "s3 GET lease failed" : obj.error);
+	}
+	try {
+		return ParseRecord(obj);
+	} catch (const PolicyError &) {
+		M().IncS3LeaseError("get", "parse");
+		throw;
+	}
+}
+
+void S3ConditionalLeaseManager::Remember(const Lease &lease) {
+	auto id = ResourceOf(lease);
+	std::lock_guard<std::mutex> hold(mu_);
+	if (!lease.etag.empty()) {
+		etags_[id] = lease.etag;
+	}
+	owned_.insert(id);
+	M().SetOwnedKeys(owned_.size());
+}
+
+void S3ConditionalLeaseManager::Forget(const std::string &resource_id) {
+	std::lock_guard<std::mutex> hold(mu_);
+	etags_.erase(resource_id);
+	owned_.erase(resource_id);
+	M().SetOwnedKeys(owned_.size());
+}
+
+Lease S3ConditionalLeaseManager::Acquire(const std::string &resource_id) {
+	ValidateResourceId(resource_id);
+	for (int attempt = 0; attempt < kMaxCasAttempts; attempt++) {
+		auto current = Load(resource_id);
+		int64_t now = clock_->NowMs();
+		bool missing = current.epoch == 0 && current.etag.empty();
+		bool expired = !missing && current.expiry_ms <= now;
+
+		if (!missing && !expired && current.owner_id == opt_.owner_id) {
+			current.owned_locally = true;
+			Remember(current);
+			return current;
+		}
+		if (!missing && !expired) {
+			current.owned_locally = false;
+			Forget(resource_id);
+			return current;
+		}
+
+		Lease next;
+		next.resource = resource_id;
+		next.tenant_key = resource_id;
+		next.epoch = missing ? 1 : current.epoch + 1;
+		next.owner_id = opt_.owner_id;
+		next.flight = opt_.flight;
+		next.expiry_ms = now + opt_.ttl_ms;
+		next.owned_locally = true;
+		std::string if_match = missing ? "" : current.etag;
+		std::string if_none_match = missing ? "*" : "";
+		auto t0 = std::chrono::steady_clock::now();
+		auto put = client_->Put(ObjectKey(resource_id), Encode(next), if_match, if_none_match);
+		M().ObserveS3LeaseOp("put", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+		if (HttpOk(put.status)) {
+			next.etag = put.etag;
+			Remember(next);
+			M().IncOwnershipAcquired(missing ? "new" : "handoff");
+			return next;
+		}
+		if (put.status == 412 || put.status == 409) {
+			M().IncCasConflict();
+			continue;
+		}
+		M().IncS3LeaseError("put", S3ErrorCode(put.status));
+		throw Error(put.error.empty() ? "s3 PUT lease failed" : put.error);
+	}
+	M().IncS3LeaseError("acquire", "cas_exhausted");
+	throw Error("lease acquire CAS exhausted for " + resource_id);
+}
+
+void S3ConditionalLeaseManager::Renew(const Lease &lease) {
+	auto resource_id = ResourceOf(lease);
+	ValidateResourceId(resource_id);
+	std::string etag = lease.etag;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		if (etag.empty()) {
+			auto it = etags_.find(resource_id);
+			if (it != etags_.end()) {
+				etag = it->second;
+			}
+		}
+	}
+	if (etag.empty()) {
+		Forget(resource_id);
+		M().IncLeaseRenewal("lost");
+		M().IncOwnershipLost("stolen");
+		throw LeaseLostError("lease renew missing etag for " + resource_id);
+	}
+
+	auto current = Load(resource_id);
+	if (current.owner_id != opt_.owner_id || current.epoch == 0 ||
+	    (lease.epoch != 0 && current.epoch != lease.epoch) || current.etag != etag) {
+		Forget(resource_id);
+		M().IncLeaseRenewal("lost");
+		M().IncOwnershipLost(current.owner_id.empty() ? "expired" : "stolen");
+		M().IncS3LeaseError("renew", current.owner_id.empty() ? "not_found" : "precondition");
+		throw LeaseLostError("lease lost for " + resource_id);
+	}
+
+	Lease next = current;
+	next.owner_id = opt_.owner_id;
+	next.flight = opt_.flight.empty() ? current.flight : opt_.flight;
+	next.expiry_ms = clock_->NowMs() + opt_.ttl_ms;
+	next.owned_locally = true;
+	auto t0 = std::chrono::steady_clock::now();
+	auto put = client_->Put(ObjectKey(resource_id), Encode(next), etag, "");
+	M().ObserveS3LeaseOp("put", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+	if (HttpOk(put.status)) {
+		next.etag = put.etag;
+		Remember(next);
+		M().IncLeaseRenewal("ok");
+		M().SetLeaseRenewalTimestamp(static_cast<double>(clock_->NowMs()) / 1000.0);
+		return;
+	}
+	Forget(resource_id);
+	M().IncLeaseRenewal("lost");
+	M().IncOwnershipLost("stolen");
+	M().IncS3LeaseError("renew", S3ErrorCode(put.status));
+	throw LeaseLostError("lease renew If-Match failed for " + resource_id);
+}
+
+void S3ConditionalLeaseManager::Release(const Lease &lease) {
+	auto resource_id = ResourceOf(lease);
+	ValidateResourceId(resource_id);
+	std::string etag = lease.etag;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		if (etag.empty()) {
+			auto it = etags_.find(resource_id);
+			if (it != etags_.end()) {
+				etag = it->second;
+			}
+		}
+	}
+	if (etag.empty()) {
+		Forget(resource_id);
+		return;
+	}
+	auto t0 = std::chrono::steady_clock::now();
+	auto del = client_->Delete(ObjectKey(resource_id), etag);
+	M().ObserveS3LeaseOp("delete", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+	Forget(resource_id);
+	if (HttpOk(del.status) || del.status == 404) {
+		M().IncOwnershipLost("released");
+		return;
+	}
+	if (del.status == 412 || del.status == 409) {
+		M().IncOwnershipLost("stolen");
+		M().IncCasConflict();
+		return;
+	}
+	M().IncS3LeaseError("delete", S3ErrorCode(del.status));
+	throw Error(del.error.empty() ? "s3 DELETE lease failed" : del.error);
+}
+
+Lease S3ConditionalLeaseManager::Peek(const std::string &resource_id) {
+	ValidateResourceId(resource_id);
+	return Load(resource_id);
 }
 
 } // namespace duckbox

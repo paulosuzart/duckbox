@@ -177,9 +177,21 @@ public:
 		return out;
 	}
 
-	S3Object Delete(const std::string &key) const override {
+	S3Object Delete(const std::string &key, const std::string &if_match) const override {
 		std::lock_guard<std::mutex> hold(mu_);
-		objects_.erase(key);
+		auto it = objects_.find(key);
+		if (!if_match.empty()) {
+			auto want = UnquoteEtag(if_match);
+			if (it == objects_.end() || it->second.etag != want) {
+				S3Object out;
+				out.status = 412;
+				out.error = "s3 DELETE " + key + " status 412";
+				return out;
+			}
+		}
+		if (it != objects_.end()) {
+			objects_.erase(it);
+		}
 		S3Object out;
 		out.status = 204;
 		return out;
@@ -281,10 +293,13 @@ public:
 		return out;
 	}
 
-	S3Object Delete(const std::string &key) const override {
+	S3Object Delete(const std::string &key, const std::string &if_match) const override {
 		Aws::S3::Model::DeleteObjectRequest req;
 		req.SetBucket(bucket_.c_str());
 		req.SetKey(key.c_str());
+		if (!if_match.empty()) {
+			req.SetIfMatch(QuoteEtag(if_match).c_str());
+		}
 		auto outc = client_->DeleteObject(req);
 		if (!outc.IsSuccess()) {
 			return FromAwsError(outc.GetError(), "DELETE", key);

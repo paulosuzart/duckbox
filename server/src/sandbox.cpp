@@ -613,7 +613,7 @@ std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
 		oldest->second->Passivate("evict");
 		boxes_.erase(oldest);
 	}
-	leases_->Acquire(key);
+	leases_->Acquire(rec.id);
 	auto t0 = std::chrono::steady_clock::now();
 	auto init_sql = rec.spec.init_sql;
 	auto box = std::make_shared<TenantSandbox>(daemon_, rec.spec, key, init_sql, rec.spec_dir, rec.id, rec.version,

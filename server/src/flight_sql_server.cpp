@@ -900,8 +900,9 @@ int RunServer(const ServerOptions &opt) {
 	auto leases = std::make_shared<SingleNodeLeaseManager>(metrics);
 	auto router = std::make_shared<LocalRouter>(metrics);
 	if (!opt.daemon.lease.endpoint.empty() || !opt.daemon.lease.endpoint_env.empty()) {
-		std::clog << "daemon: lease endpoint configured; using SingleNodeLeaseManager in this draft "
-		             "(S3ConditionalLeaseManager TODO: If-None-Match / fencing epoch). "
+		std::clog << "daemon: lease endpoint configured; S3ConditionalLeaseManager is implemented "
+		             "(If-None-Match / If-Match + fencing epoch). Daemon routing still uses "
+		             "SingleNodeLeaseManager until multi-node membership is wired. "
 		             "Named sandbox registry uses the same S3 prefix credential.\n";
 	}
 	auto defs = MakeSandboxRegistry(opt.daemon);

@@ -66,6 +66,13 @@ public:
 	}
 };
 
+// Sandbox ownership lease lost (If-Match 412, stolen, or expired under us).
+class LeaseLostError : public Error {
+public:
+	explicit LeaseLostError(const std::string &msg) : Error(msg) {
+	}
+};
+
 // Handle version is not current and outside stale_version_grace (re-prepare).
 class StaleHandleError : public HandleError {
 public:

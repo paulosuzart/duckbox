@@ -30,7 +30,7 @@ public:
 	virtual S3Object Get(const std::string &key) const = 0; // 404 is status=404, not an exception
 	virtual S3Object Put(const std::string &key, const std::string &body, const std::string &if_match = "",
 	                     const std::string &if_none_match = "") const = 0;
-	virtual S3Object Delete(const std::string &key) const = 0;
+	virtual S3Object Delete(const std::string &key, const std::string &if_match = "") const = 0;
 	virtual std::vector<std::string> ListKeys(const std::string &prefix) const = 0; // ListObjectsV2, path-style
 
 	virtual const std::string &bucket() const = 0;
