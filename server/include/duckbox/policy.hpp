@@ -181,6 +181,14 @@ inline Policy LoadPolicyFile(const std::string &path) {
 std::string FingerprintSpec(const SandboxSpec &spec);
 std::string ContentHash(const SandboxSpec &spec); // alias of FingerprintSpec
 bool ValidSandboxId(const std::string &id);       // [a-z0-9][a-z0-9_-]{0,63}
+// Unquoted SQL identifier charset: [A-Za-z_][A-Za-z0-9_]*. Does not reject keywords.
+bool ValidSqlIdent(const std::string &s);
+// ValidSqlIdent and DuckDB will re-emit it unquoted (not a keyword, no special chars).
+bool SafeSqlIdent(const std::string &s);
+std::string QuoteSqlIdent(const std::string &s); // KeywordHelper::WriteOptionallyQuoted
+// SELECT listed columns FROM table for GetTables include_schema. Throws if columns
+// is empty or a name is not SafeSqlIdent.
+std::string CatalogTableSelectSql(const TablePolicy &table);
 // 0s, 30s, 5m, 1h, 500ms; bare integer is seconds. Returns false if unparseable.
 bool ParseDurationMs(const std::string &raw, int64_t *out_ms);
 // Unix seconds, unix ms, or RFC3339 (`2026-10-19T12:00:00Z`). Returns false if unparseable.

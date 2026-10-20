@@ -80,15 +80,7 @@ ddb::LogicalType ParseWithContext(const std::string &name) {
     if (!con.HasActiveTransaction()) {
         con.BeginTransaction();
     }
-    try {
-        return ddb::TransformStringToLogicalType(name, *con.context);
-    } catch (...) {
-        auto q = con.Query("SELECT NULL::" + name);
-        if (q && !q->HasError() && !q->types.empty()) {
-            return q->types[0];
-        }
-        throw;
-    }
+    return ddb::TransformStringToLogicalType(name, *con.context);
 }
 
 } // namespace
@@ -101,6 +93,9 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     auto name = TrimTypeName(logical_type);
     if (name.empty()) {
         return ddb::LogicalType(ddb::LogicalTypeId::VARCHAR);
+    }
+    if (name.find(';') != std::string::npos || name.find("--") != std::string::npos) {
+        throw Error("invalid logical type name");
     }
     auto id = ddb::TransformStringToLogicalTypeId(name);
     auto looks_decimal = [&]() {

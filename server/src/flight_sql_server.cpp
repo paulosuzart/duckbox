@@ -61,35 +61,6 @@ std::string Hdr(const ServerCallContext &ctx, std::initializer_list<const char *
 	return "";
 }
 
-std::string QuoteIdent(const std::string &id) {
-	std::string out = "\"";
-	for (char ch : id) {
-		if (ch == '"') {
-			out.push_back('"');
-		}
-		out.push_back(ch);
-	}
-	out.push_back('"');
-	return out;
-}
-
-std::string TableSelectSql(const TablePolicy &table) {
-	std::string sql = "SELECT ";
-	if (table.columns.empty()) {
-		sql += "*";
-	} else {
-		for (size_t i = 0; i < table.columns.size(); i++) {
-			if (i > 0) {
-				sql += ", ";
-			}
-			sql += QuoteIdent(table.columns[i]);
-		}
-	}
-	sql += " FROM ";
-	sql += QuoteIdent(table.name);
-	return sql;
-}
-
 arrow::Result<std::unique_ptr<arrow::flight::SchemaResult>>
 SchemaResultFromInfo(arrow::Result<std::unique_ptr<FlightInfo>> info) {
 	ARROW_ASSIGN_OR_RAISE(auto fi, info);
@@ -895,7 +866,7 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetTa
 			ARROW_RETURN_NOT_OK(name.Append(kv.second.name));
 			ARROW_RETURN_NOT_OK(typ.Append("TABLE"));
 			if (command.include_schema) {
-				auto ts = box->DescribeRewrittenArrow(TableSelectSql(kv.second));
+				auto ts = box->DescribeRewrittenArrow(CatalogTableSelectSql(kv.second));
 				ARROW_ASSIGN_OR_RAISE(auto serialized, arrow::ipc::SerializeSchema(*ts));
 				ARROW_RETURN_NOT_OK(schb.Append(serialized->data(), static_cast<int32_t>(serialized->size())));
 			}

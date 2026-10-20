@@ -366,6 +366,51 @@ bool IsAlwaysDeniedTableFunction(const std::string &name) {
 	return kExact.count(n) > 0;
 }
 
+bool ValidSqlIdent(const std::string &s) {
+	if (s.empty()) {
+		return false;
+	}
+	if (!(std::isalpha(static_cast<unsigned char>(s[0])) || s[0] == '_')) {
+		return false;
+	}
+	for (char c : s) {
+		if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool SafeSqlIdent(const std::string &s) {
+	return ValidSqlIdent(s) && !ddb::KeywordHelper::RequiresQuotes(s);
+}
+
+std::string QuoteSqlIdent(const std::string &s) {
+	return ddb::KeywordHelper::WriteOptionallyQuoted(s);
+}
+
+std::string CatalogTableSelectSql(const TablePolicy &table) {
+	if (table.columns.empty()) {
+		throw PolicyError("tables." + table.name + ".columns required");
+	}
+	if (!SafeSqlIdent(table.name)) {
+		throw PolicyError("tables." + table.name + ": not a valid identifier");
+	}
+	std::string sql = "SELECT ";
+	for (size_t i = 0; i < table.columns.size(); i++) {
+		if (!SafeSqlIdent(table.columns[i])) {
+			throw PolicyError("tables." + table.name + ".columns: not a valid identifier: " + table.columns[i]);
+		}
+		if (i > 0) {
+			sql += ", ";
+		}
+		sql += QuoteSqlIdent(table.columns[i]);
+	}
+	sql += " FROM ";
+	sql += QuoteSqlIdent(table.name);
+	return sql;
+}
+
 bool ValidSandboxId(const std::string &id) {
 	if (id.empty() || id.size() > 64) {
 		return false;

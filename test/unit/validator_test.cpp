@@ -144,6 +144,71 @@ void duckbox::test::RunValidatorTests() {
 		       "attachment without location is a field-path error");
 	}
 
+	{
+		Expect(SafeSqlIdent("deals") && SafeSqlIdent("id") && SafeSqlIdent("_deleted") && SafeSqlIdent("tenant_id"),
+		       "ordinary table and column names are safe unquoted identifiers");
+		Expect(!SafeSqlIdent("t--x") && !SafeSqlIdent("t space") && !SafeSqlIdent("t;drop") && !SafeSqlIdent("t\"q") &&
+		           !SafeSqlIdent("select") && !SafeSqlIdent("SELECT"),
+		       "comment, space, punctuation, and keyword names are not safe unquoted");
+		Expect(QuoteSqlIdent("deals") == "deals", "WriteOptionallyQuoted leaves deals unquoted");
+		Expect(QuoteSqlIdent("select").find('"') != std::string::npos, "keyword select is quoted");
+
+		TablePolicy ok;
+		ok.name = "deals";
+		ok.columns = {"id", "title"};
+		auto sql = CatalogTableSelectSql(ok);
+		Expect(sql.find("id") != std::string::npos && sql.find("FROM") != std::string::npos,
+		       "CatalogTableSelectSql lists columns");
+		TablePolicy empty_cols;
+		empty_cols.name = "deals";
+		ExpectThrowContains([&] { (void)CatalogTableSelectSql(empty_cols); }, "columns required",
+		                    "empty columns fail closed (no SELECT *)");
+		TablePolicy comment_name;
+		comment_name.name = "t--x";
+		comment_name.columns = {"id"};
+		ExpectThrowContains([&] { (void)CatalogTableSelectSql(comment_name); }, "identifier",
+		                    "t--x is rejected before SQL is built");
+
+		auto ident_bad = loaded;
+		ident_bad.tables["t--x"].name = "t--x";
+		ident_bad.tables["t--x"].columns = {"id"};
+		ident_bad.tables["t--x"].authorized_view = true;
+		Expect(has_path(validator.ValidateStatic(ident_bad), "tables.t--x", "identifier"),
+		       "ValidateStatic rejects table name t--x");
+		ident_bad = loaded;
+		ident_bad.tables["t space"].name = "t space";
+		ident_bad.tables["t space"].columns = {"id"};
+		ident_bad.tables["t space"].authorized_view = true;
+		Expect(has_path(validator.ValidateStatic(ident_bad), "tables.t space", "identifier"),
+		       "ValidateStatic rejects table name with a space");
+		ident_bad = loaded;
+		ident_bad.tables["t;drop"].name = "t;drop";
+		ident_bad.tables["t;drop"].columns = {"id"};
+		ident_bad.tables["t;drop"].authorized_view = true;
+		Expect(has_path(validator.ValidateStatic(ident_bad), "tables.t;drop", "identifier"),
+		       "ValidateStatic rejects table name t;drop");
+		ident_bad = loaded;
+		ident_bad.tables["t\"q"].name = "t\"q";
+		ident_bad.tables["t\"q"].columns = {"id"};
+		ident_bad.tables["t\"q"].authorized_view = true;
+		Expect(has_path(validator.ValidateStatic(ident_bad), "tables.t\"q", "identifier"),
+		       "ValidateStatic rejects table name with a quote");
+		ident_bad = loaded;
+		ident_bad.tables["select"].name = "select";
+		ident_bad.tables["select"].columns = {"id"};
+		ident_bad.tables["select"].authorized_view = true;
+		Expect(has_path(validator.ValidateStatic(ident_bad), "tables.select", "identifier"),
+		       "ValidateStatic rejects keyword table name select");
+		ident_bad = loaded;
+		ident_bad.tables["deals"].columns = {"id", "t space"};
+		Expect(has_path(validator.ValidateStatic(ident_bad), "tables.deals.columns", "identifier"),
+		       "ValidateStatic rejects column name with a space");
+		ident_bad = loaded;
+		ident_bad.tables["deals"].tenant_column = "t--x";
+		Expect(has_path(validator.ValidateStatic(ident_bad), "tables.deals.tenant_column", "identifier"),
+		       "ValidateStatic rejects tenant_column t--x");
+	}
+
 	Expect(RunValidateCommand(TestDaemon(), "") == 1, "validate without --spec fails");
 	Expect(RunValidateCommand(TestDaemon(), MemoryAnalystPath()) == 0, "validate memory analyst spec + lake");
 	Expect(RunValidateCommand(TestDaemon(), "/tmp/duckbox-no-such-spec.yaml") != 0, "validate missing file fails");

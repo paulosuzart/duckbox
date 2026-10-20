@@ -75,6 +75,11 @@ void duckbox::test::RunArrowTypeMapTests() {
     auto bigint = MapTypeName("BIGINT");
     Expect(bigint && !bigint->Equals(*arrow::int32()), "BIGINT must not collapse to int32");
 
+    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER; CREATE TABLE pwned(i INT)"); },
+                        "invalid", "injection-style type name is rejected");
+    ExpectThrowContains([] { (void)MapTypeName("INTEGER; CREATE TABLE pwned(i INT)"); }, "invalid",
+                        "MapTypeName rejects stacked statements in a type name");
+
     {
         std::vector<ColumnSchema> cols{
             {"count_star()", "BIGINT"}, {"h", "HUGEINT"}, {"u", "UBIGINT"}};

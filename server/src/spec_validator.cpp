@@ -119,21 +119,6 @@ void CollectColumns(const ddb::ParsedExpression &expr, std::unordered_set<std::s
 	    expr, [&](const ddb::ParsedExpression &child) { CollectColumns(child, out); });
 }
 
-bool ValidIdent(const std::string &s) {
-	if (s.empty()) {
-		return false;
-	}
-	if (!(std::isalpha(static_cast<unsigned char>(s[0])) || s[0] == '_')) {
-		return false;
-	}
-	for (char c : s) {
-		if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) {
-			return false;
-		}
-	}
-	return true;
-}
-
 } // namespace
 
 std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) const {
@@ -226,8 +211,19 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 	}
 	for (auto &kv : spec.tables) {
 		auto prefix = "tables." + kv.second.name;
+		if (!SafeSqlIdent(kv.second.name)) {
+			add(prefix, "not a valid identifier (unquoted charset, not a SQL keyword)");
+		}
 		if (kv.second.columns.empty()) {
 			add(prefix + ".columns", "required (deny-by-default: list every visible column)");
+		}
+		for (auto &col : kv.second.columns) {
+			if (!SafeSqlIdent(col)) {
+				add(prefix + ".columns", "not a valid identifier: " + col);
+			}
+		}
+		if (!SafeSqlIdent(kv.second.tenant_column)) {
+			add(prefix + ".tenant_column", "not a valid identifier: " + kv.second.tenant_column);
 		}
 		if (kv.second.filters.empty() && !kv.second.authorized_view) {
 			add(prefix + ".filters", "required (at least one mandatory filter)");
@@ -324,7 +320,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
 	for (auto &fn : spec.functions) {
 		if (IsAlwaysDeniedTableFunction(fn)) {
 			add("functions", "table function '" + fn + "' is never allowlisted");
-		} else if (!ValidIdent(fn) && fn != "count_star") {
+		} else if (!ValidSqlIdent(fn) && fn != "count_star") {
 			add("functions", "not a valid function identifier: " + fn);
 		}
 	}
