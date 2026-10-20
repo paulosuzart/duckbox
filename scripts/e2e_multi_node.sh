@@ -195,23 +195,25 @@ print("restart same node_id after SIGTERM ok", list(df["id"]))
 db.close()
 PY
 
-# Slow owner: SIGSTOP the node that just served locally (A) and require a proxy timeout from B.
-kill -STOP "$PID_A" 2>/dev/null || true
+# Slow owner: C still holds the lease after drain(B); A/B proxy to C. SIGSTOP C.
+kill -STOP "$PID_C" 2>/dev/null || true
 "$PY" - <<'PY'
 import time
 from duckbox_client import connect
 t0 = time.time()
 try:
-    db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=1)
+    db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=1)
     db.query("SELECT id FROM deals")
     raise SystemExit("proxy to SIGSTOPped owner should not succeed")
+except SystemExit:
+    raise
 except Exception as e:  # noqa: BLE001
     elapsed = time.time() - t0
     print("slow owner proxy failed as expected", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 2))
     if elapsed > 20:
         raise SystemExit(f"proxy hung too long: {elapsed}")
 PY
-kill -CONT "$PID_A" 2>/dev/null || true
+kill -CONT "$PID_C" 2>/dev/null || true
 
 # S3 outage longer than TTL (5s): nodes self-fence (exit 3), then restart recovers.
 docker compose pause rustfs
