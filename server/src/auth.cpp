@@ -30,6 +30,12 @@ std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::strin
 	auto matches_peer = [&](const std::string &tok) {
 		return !cfg.peer_secret.empty() && !tok.empty() && ConstTimeEquals(cfg.peer_secret, tok);
 	};
+	auto reject_reserved = [](const std::string &id) -> std::string {
+		if (id == kPeerIdentity) {
+			throw AuthError("identity 'peer' is reserved for peer-secret auth on the internal listener");
+		}
+		return id;
+	};
 	if (matches_peer(bearer) || matches_peer(peer_identity)) {
 		if (plane != ListenerPlane::Internal) {
 			throw AuthError("peer credential is not valid on the public listener");
@@ -52,7 +58,7 @@ std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::strin
 		from_secret = try_secret(peer_identity);
 	}
 	if (!from_secret.empty()) {
-		return from_secret;
+		return reject_reserved(from_secret);
 	}
 	if (cfg.auth_mode == AuthMode::Token) {
 		if (cfg.jwt_secret.empty()) {
@@ -61,14 +67,14 @@ std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::strin
 		if (bearer.empty()) {
 			throw AuthError("token mode requires Authorization: Bearer");
 		}
-		return VerifyJwtHs256(bearer, cfg.jwt_secret);
+		return reject_reserved(VerifyJwtHs256(bearer, cfg.jwt_secret));
 	}
 	if (!cfg.bearer_secrets.empty()) {
 		throw AuthError("invalid caller credential");
 	}
 	if (cfg.allow_insecure_dev) {
 		if (!caller_header.empty()) {
-			return caller_header;
+			return reject_reserved(caller_header);
 		}
 		if (plane == ListenerPlane::Internal) {
 			if (!peer_identity.empty() || !bearer.empty()) {
@@ -77,7 +83,7 @@ std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::strin
 			return "local";
 		}
 		if (!peer_identity.empty()) {
-			return peer_identity;
+			return reject_reserved(peer_identity);
 		}
 		return "local";
 	}

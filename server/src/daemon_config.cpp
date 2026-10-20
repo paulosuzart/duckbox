@@ -12,6 +12,7 @@
 #include <fnmatch.h>
 #include <iostream>
 #include <sstream>
+#include <sys/stat.h>
 #include <unordered_set>
 
 namespace duckbox {
@@ -76,6 +77,9 @@ void FinalizeDaemonListen(DaemonConfig &cfg) {
 
 void AuthorizeOperator(const DaemonConfig &cfg, const std::string &identity) {
 	std::string id = identity.empty() ? "local" : identity;
+	if (id == kPeerIdentity) {
+		return;
+	}
 	for (auto &op : cfg.operators) {
 		if (op == "*" || op == id) {
 			return;
@@ -205,6 +209,9 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 				if (b.identity.empty() || b.secret.empty()) {
 					throw PolicyError("auth.bearer_secrets[].identity and secret are required");
 				}
+				if (b.identity == kPeerIdentity) {
+					throw PolicyError("auth.bearer_secrets[].identity 'peer' is reserved");
+				}
 				d.bearer_secrets.push_back(std::move(b));
 			}
 		}
@@ -213,7 +220,13 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 		if (!d.peer_secret_ref.empty()) {
 			auto ref = ParseSecretRef(d.peer_secret_ref, "auth.peer_secret_ref");
 			d.peer_secret_ref = ref.Spec();
-			d.peer_secret = EnvFileSecretResolver{}.Resolve(ref, "auth.peer_secret_ref");
+			d.peer_secret = TrimCopy(EnvFileSecretResolver{}.Resolve(ref, "auth.peer_secret_ref"));
+			if (ref.scheme == SecretRef::Scheme::File) {
+				struct stat st {};
+				if (stat(ref.locator.c_str(), &st) == 0 && (st.st_mode & S_IROTH)) {
+					throw PolicyError("auth.peer_secret_ref: secret file is world-readable");
+				}
+			}
 		}
 		if (auto *callers = auth->Get("callers")) {
 			if (!callers->IsSeq()) {
@@ -230,6 +243,9 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 				rule.key_patterns = StringList(item.Get("keys"), "auth.callers[" + std::to_string(i) + "].keys");
 				if (rule.identity.empty()) {
 					throw PolicyError("auth.callers[].identity is required");
+				}
+				if (rule.identity == kPeerIdentity) {
+					throw PolicyError("auth.callers[].identity 'peer' is reserved");
 				}
 				d.callers.push_back(std::move(rule));
 			}
@@ -267,7 +283,8 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 	if (auto *lease = root.Get("lease")) {
 		YamlRejectUnknownKeys(*lease, {"endpoint", "endpoint_env", "bucket", "prefix", "access_key_env",
 		                               "secret_key_env", "skip_probe", "node_id", "advertise", "ttl", "ttl_ms",
-		                               "heartbeat", "heartbeat_ms", "max_leases"});
+		                               "heartbeat", "heartbeat_ms", "skew", "skew_ms", "cache_ms", "proxy_timeout",
+		                               "proxy_timeout_ms", "max_leases"});
 		d.lease.endpoint = lease->GetString("endpoint");
 		d.lease.endpoint_env = lease->GetString("endpoint_env");
 		d.lease.bucket = lease->GetString("bucket");
@@ -307,6 +324,28 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 			throw PolicyError("lease.max_leases must be >= 0");
 		}
 		d.lease.max_leases = static_cast<size_t>(cap);
+		d.lease.skew_ms = lease->GetInt("skew_ms", d.lease.skew_ms);
+		auto skew_raw = lease->GetString("skew");
+		if (!skew_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(skew_raw, &ms) || ms < 0) {
+				throw PolicyError("lease.skew: expected duration like 1s");
+			}
+			d.lease.skew_ms = ms;
+		}
+		d.lease.cache_ms = lease->GetInt("cache_ms", d.lease.cache_ms);
+		if (d.lease.cache_ms < 0) {
+			throw PolicyError("lease.cache_ms must be >= 0");
+		}
+		d.lease.proxy_timeout_ms = lease->GetInt("proxy_timeout_ms", d.lease.proxy_timeout_ms);
+		auto pto_raw = lease->GetString("proxy_timeout");
+		if (!pto_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(pto_raw, &ms) || ms <= 0) {
+				throw PolicyError("lease.proxy_timeout: expected duration like 5s");
+			}
+			d.lease.proxy_timeout_ms = ms;
+		}
 	}
 	if (root.Get("lake") || root.Get("tables") || root.Get("policy") || root.Get("spec")) {
 		throw PolicyError("daemon config is control-plane only (no lake, tables, or spec). "
@@ -375,6 +414,9 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 	if (cfg.internal_listen_configured && (!cfg.lease.endpoint.empty() || !cfg.lease.endpoint_env.empty()) &&
 	    cfg.peer_secret.empty()) {
 		add("auth.peer_secret_ref", "required for multi-node (env: or file:; never a plaintext value)");
+	}
+	if (!cfg.peer_secret.empty() && static_cast<int>(cfg.peer_secret.size()) < kMinPeerSecretLen) {
+		add("auth.peer_secret_ref", "must be at least 16 characters");
 	}
 	if (!cfg.metrics_listen.empty() && cfg.metrics_listen != "off" && cfg.metrics_listen != "false") {
 		try {

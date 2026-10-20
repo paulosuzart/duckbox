@@ -136,7 +136,7 @@ LIST2="$("$BIN" sandbox list --url grpc://127.0.0.1:4749 --id-prefix cluster-ana
 echo "$LIST2"
 echo "$LIST2" | grep -E -q '"owner":"node-(b|c)"'
 
-"$BIN" node drain --url grpc://127.0.0.1:5748 --timeout 1000
+"$BIN" node drain --url grpc://127.0.0.1:5748 --timeout 1000 --peer-secret env:DUCKBOX_PEER_SECRET
 "$PY" - <<'PY'
 import time
 from duckbox_client import connect
@@ -155,6 +155,101 @@ while time.time() < deadline:
         time.sleep(0.5)
 else:
     raise SystemExit(f"query after drain did not succeed: {last}")
+PY
+
+# Restart the same node_id after SIGKILL (A was killed above).
+"$BIN" serve --daemon "$ROOT/daemons/cluster-node-a.yaml" --no-metrics &
+PID_A=$!
+wait_port 4747
+wait_port 5747
+"$PY" - <<'PY'
+from duckbox_client import connect
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=8)
+df = db.query("SELECT id FROM deals ORDER BY id")
+assert len(df) >= 1, df
+print("restart same node_id after SIGKILL ok", list(df["id"]))
+db.close()
+PY
+
+# SIGTERM should drain + deregister, then the same id comes back.
+kill -TERM "$PID_A" 2>/dev/null || true
+for _ in $(seq 1 20); do
+	if ! kill -0 "$PID_A" 2>/dev/null; then
+		break
+	fi
+	sleep 0.25
+done
+kill -9 "$PID_A" 2>/dev/null || true
+wait "$PID_A" 2>/dev/null || true
+PID_A=""
+"$BIN" serve --daemon "$ROOT/daemons/cluster-node-a.yaml" --no-metrics &
+PID_A=$!
+wait_port 4747
+wait_port 5747
+"$PY" - <<'PY'
+from duckbox_client import connect
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=8)
+df = db.query("SELECT id FROM deals ORDER BY id")
+assert len(df) >= 1, df
+print("restart same node_id after SIGTERM ok", list(df["id"]))
+db.close()
+PY
+
+# Slow owner: SIGSTOP the node that just served locally (A) and require a proxy timeout from B.
+kill -STOP "$PID_A" 2>/dev/null || true
+"$PY" - <<'PY'
+import time
+from duckbox_client import connect
+t0 = time.time()
+try:
+    db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=1)
+    db.query("SELECT id FROM deals")
+    raise SystemExit("proxy to SIGSTOPped owner should not succeed")
+except Exception as e:  # noqa: BLE001
+    elapsed = time.time() - t0
+    print("slow owner proxy failed as expected", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 2))
+    if elapsed > 20:
+        raise SystemExit(f"proxy hung too long: {elapsed}")
+PY
+kill -CONT "$PID_A" 2>/dev/null || true
+
+# S3 outage longer than TTL (5s): nodes self-fence (exit 3), then restart recovers.
+docker compose pause rustfs
+sleep 8
+for p in ${PID_A:-} ${PID_B:-} ${PID_C:-}; do
+	if kill -0 "$p" 2>/dev/null; then
+		echo "waiting for self-fence of pid $p"
+		for _ in $(seq 1 20); do
+			if ! kill -0 "$p" 2>/dev/null; then
+				break
+			fi
+			sleep 0.5
+		done
+	fi
+done
+docker compose unpause rustfs
+sleep 1
+# Reap and restart whatever fenced.
+for p in ${PID_A:-} ${PID_B:-} ${PID_C:-}; do
+	wait "$p" 2>/dev/null || true
+done
+PID_A=""; PID_B=""; PID_C=""
+"$BIN" serve --daemon "$ROOT/daemons/cluster-node-a.yaml" --no-metrics &
+PID_A=$!
+"$BIN" serve --daemon "$ROOT/daemons/cluster-node-b.yaml" --no-metrics &
+PID_B=$!
+"$BIN" serve --daemon "$ROOT/daemons/cluster-node-c.yaml" --no-metrics &
+PID_C=$!
+wait_port 4747
+wait_port 4748
+wait_port 4749
+"$PY" - <<'PY'
+from duckbox_client import connect
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=10)
+df = db.query("SELECT id FROM deals ORDER BY id")
+assert len(df) >= 1, df
+print("cluster recovered after S3 outage > TTL", list(df["id"]))
+db.close()
 PY
 
 echo "multi-node e2e ok"

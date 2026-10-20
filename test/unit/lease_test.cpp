@@ -124,9 +124,10 @@ void duckbox::test::RunLeaseTests() {
 		Expect(body.status == 200 && body.body.find("\"epoch\":2") != std::string::npos, "lease object is JSON under prefix");
 		b.Release(held);
 		auto gone = a.Peek("acme-analyst");
-		Expect(!gone.owned_locally && gone.epoch == 0, "release deletes the lease object");
+		Expect(!gone.owned_locally && gone.epoch == 2 && gone.owner_id.empty(),
+		       "release tombstones the lease and keeps epoch");
 		auto fresh = a.Acquire("acme-analyst");
-		Expect(fresh.owned_locally && fresh.epoch == 1, "acquire after release starts a new epoch 1");
+		Expect(fresh.owned_locally && fresh.epoch == 3, "acquire after release carries epoch (monotonic)");
 		auto other = b.Acquire("other-box");
 		Expect(other.owned_locally, "second resource can be owned independently");
 		a.Release(fresh);
@@ -173,8 +174,8 @@ void duckbox::test::RunLeaseTests() {
 		});
 		t1.join();
 		t2.join();
-		Expect(winners.load() == 1, "concurrent If-None-Match acquire has exactly one winner");
-		Expect(epoch_sum.load() == 1, "winner created epoch 1");
+		Expect(winners.load() == 1, "concurrent acquire of a tombstone has exactly one winner");
+		Expect(epoch_sum.load() == static_cast<int>(seed.epoch) + 1, "winner continues the epoch");
 		auto owner = c.Peek("race-box").owned_locally ? c.Peek("race-box") : d.Peek("race-box");
 		if (owner.owned_locally) {
 			(owner.owner_id == "node-a" ? c : d).Release(owner);
@@ -217,5 +218,65 @@ void duckbox::test::RunLeaseTests() {
 		Expect(!blocked.owned_locally, "draining S3 node does not create new leases");
 		a.SetDraining(false);
 		a.Release(held);
+	}
+
+	{
+		auto mine = a.Acquire("remember-box");
+		Expect(a.Held("remember-box").etag == mine.etag && a.Held("remember-box").owner_id == "node-a",
+		       "Held returns the locally remembered lease");
+		clock->AdvanceMs(15'000);
+		auto stolen = b.Acquire("remember-box");
+		Expect(stolen.owned_locally && stolen.owner_id == "node-b", "peer stole after TTL");
+		a.ReleaseOwned();
+		auto still_b = b.Peek("remember-box");
+		Expect(still_b.owned_locally && still_b.owner_id == "node-b" && still_b.epoch == stolen.epoch,
+		       "drain/ReleaseOwned must not tombstone another node's live lease");
+		bool lost = false;
+		try {
+			a.Renew(a.Held("remember-box"));
+		} catch (const LeaseLostError &) {
+			lost = true;
+		}
+		Expect(lost || a.Held("remember-box").owner_id != "node-a",
+		       "Renew of a remembered lease that is no longer ours is lost");
+		b.Release(stolen);
+	}
+
+	{
+		S3LeaseOptions skew = opt_a;
+		skew.skew_ms = 2000;
+		skew.owner_id = "node-skew";
+		S3ConditionalLeaseManager sk(s3, skew, {}, clock);
+		auto live = sk.Acquire("skew-box");
+		clock->AdvanceMs(15'000);
+		S3LeaseOptions thief = opt_b;
+		thief.skew_ms = 2000;
+		thief.owner_id = "node-thief";
+		S3ConditionalLeaseManager th(s3, thief, {}, clock);
+		auto early = th.Acquire("skew-box");
+		Expect(!early.owned_locally && early.owner_id == "node-skew",
+		       "clock-skew margin delays steal at the TTL boundary");
+		clock->AdvanceMs(2000);
+		auto late = th.Acquire("skew-box");
+		Expect(late.owned_locally && late.epoch == live.epoch + 1, "steal proceeds once skew margin has elapsed");
+		th.Release(late);
+	}
+
+	{
+		S3LeaseOptions cached = opt_a;
+		cached.cache_ms = 5000;
+		cached.owner_id = "node-cache";
+		S3ConditionalLeaseManager cm(s3, cached, {}, clock);
+		auto first = cm.Acquire("cache-box");
+		auto obj = s3->Put("leases/ownership/cache-box.json",
+		                   "{\"resource\":\"cache-box\",\"epoch\":9,\"owner_id\":\"other\",\"flight\":\"x\","
+		                   "\"expiry_ms\":999999999,\"tenant_key\":\"cache-box\"}",
+		                   first.etag, "");
+		Expect(obj.status == 200, "unconditional overwrite of cached lease object");
+		auto hit = cm.Acquire("cache-box");
+		Expect(hit.owned_locally && hit.etag == first.etag, "short Acquire cache skips GET within cache_ms");
+		clock->AdvanceMs(5000);
+		auto miss = cm.Acquire("cache-box");
+		Expect(!miss.owned_locally && miss.owner_id == "other", "cache miss reloads S3 after cache_ms");
 	}
 }

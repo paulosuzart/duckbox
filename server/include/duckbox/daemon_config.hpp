@@ -16,7 +16,7 @@ namespace duckbox {
 
 enum class AuthMode { Trusted, Token };
 
-// Public Flight SQL vs internal peer/operator plane (celld-style split listeners).
+// Public Flight SQL vs internal peer/operator plane (split listeners).
 enum class ListenerPlane { Public, Internal };
 
 inline constexpr const char *kPeerIdentity = "peer";
@@ -46,6 +46,9 @@ struct LeaseSettings {
 	std::string advertise; // grpc://host:port; default grpc://listen
 	int64_t ttl_ms = 15000;
 	int64_t heartbeat_ms = 5000;
+	int64_t skew_ms = 1000;          // steal waits this long past expiry_ms (clock skew)
+	int64_t cache_ms = 250;          // short Acquire cache; 0 disables
+	int64_t proxy_timeout_ms = 5000; // Flight peer-proxy deadline
 	size_t max_leases = 0; // 0 = unlimited
 };
 
@@ -86,6 +89,7 @@ struct DaemonConfig {
 };
 
 constexpr int kMinHandleSecretLen = 16;
+constexpr int kMinPeerSecretLen = 16;
 
 // Bearer secret, then JWT HS256, else x-duckbox-caller only when allow_insecure_dev.
 // Throws AuthError; never treats an unsigned token as a spec payload.

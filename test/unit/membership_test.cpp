@@ -58,4 +58,45 @@ void duckbox::test::RunMembershipTests() {
 		Expect(d.CheckPublished() == S3NodeDirectory::RecordCheck::Mismatch, "replaced node record is a mismatch");
 		ExpectThrowContains([&] { d.Heartbeat(); }, "mismatch", "renew against a replaced record is a mismatch fence");
 	}
+
+	{
+		S3LeaseOptions opt_r = opt;
+		opt_r.owner_id = "node-restart";
+		opt_r.flight = "grpc://127.0.0.1:4790";
+		S3NodeDirectory first(s3, opt_r, {}, clock);
+		first.Heartbeat();
+		auto before = s3->Get("leases/nodes/node-restart.json");
+		Expect(before.status == 200, "first process published a node record");
+		clock->AdvanceMs(1);
+		S3NodeDirectory restart(s3, opt_r, {}, clock);
+		restart.Heartbeat();
+		auto after = s3->Get("leases/nodes/node-restart.json");
+		Expect(after.status == 200 && after.etag != before.etag,
+		       "restart with the same node_id takes over via If-Match");
+		Expect(restart.List().size() == 1 && restart.List()[0].node_id == "node-restart",
+		       "taken-over node is live");
+		restart.SetDraining(true);
+		restart.Heartbeat();
+		Expect(restart.List().empty(), "draining node is omitted from the live directory");
+		auto body = s3->Get("leases/nodes/node-restart.json");
+		Expect(body.status == 200 && body.body.find("\"draining\":true") != std::string::npos,
+		       "draining flag is persisted on the node object");
+		S3NodeDirectory again(s3, opt_r, {}, clock);
+		again.Heartbeat();
+		Expect(again.List().size() == 1, "restart after drain takes over and clears draining");
+		again.Deregister();
+	}
+
+	{
+		S3LeaseOptions opt_own = opt;
+		opt_own.owner_id = "node-412";
+		S3NodeDirectory n(s3, opt_own, {}, clock);
+		n.Heartbeat();
+		auto cur = s3->Get("leases/nodes/node-412.json");
+		auto rewritten = s3->Put("leases/nodes/node-412.json", cur.body, "", "");
+		Expect(rewritten.status == 200, "unconditional put keeps the same node_id body");
+		n.Heartbeat();
+		Expect(n.has_published(), "412 on our own record is re-read and not a fence");
+		n.Deregister();
+	}
 }

@@ -3,6 +3,7 @@
 
 #include "duckbox/crypto.hpp"
 #include "duckbox/daemon_config.hpp"
+#include "duckbox/flight_sql_server.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/secrets.hpp"
@@ -14,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sys/stat.h>
 
 void duckbox::test::RunSpecLoaderTests() {
 	using namespace duckbox;
@@ -302,7 +304,8 @@ void duckbox::test::RunSpecLoaderTests() {
 			     "  bearer_secrets:\n    - identity: analyst-svc\n      secret: super-secret-token\n"
 			     "lake_allow:\n  s3_endpoints: [\"127.0.0.1:9000\"]\n  secret_refs: [\"env:DUCKBOX_S3_KEY\"]\n"
 			     "lease:\n  endpoint: http://127.0.0.1:9\n  bucket: b\n  prefix: leases/\n  skip_probe: true\n"
-			     "  node_id: full-node\n  ttl: 15s\n  advertise: grpc://127.0.0.1:5747\n"
+			     "  node_id: full-node\n  ttl: 15s\n  skew: 1s\n  cache_ms: 250\n  proxy_timeout: 5s\n"
+			     "  advertise: grpc://127.0.0.1:5747\n"
 			     "limits:\n  idle_timeout: 30s\n  max_idle_timeout: 5m\n  max_sandboxes: 10\n";
 		}
 		auto d = LoadDaemonFile(path);
@@ -325,6 +328,10 @@ void duckbox::test::RunSpecLoaderTests() {
 		Expect(d.lake_allow.s3_endpoints.size() == 1, "daemon yaml lake_allow");
 		Expect(d.lease.skip_probe, "daemon yaml lease skip_probe");
 		Expect(d.lease.node_id == "full-node" && d.lease.ttl_ms == 15000, "daemon yaml lease node_id and ttl");
+		Expect(d.lease.skew_ms == 1000 && d.lease.cache_ms == 250 && d.lease.proxy_timeout_ms == 5000,
+		       "daemon yaml lease skew, cache_ms, proxy_timeout");
+		auto tls = ParseFlightLocation("grpc+tls://127.0.0.1:5747");
+		Expect(tls.ok(), "ParseFlightLocation grpc+tls://");
 		Expect(d.lease.advertise.find("5747") != std::string::npos, "daemon yaml lease advertise is the internal listener");
 		Expect(d.idle_evict_ms == 30000, "daemon yaml idle_timeout 30s");
 		ValidateDaemonOrThrow(d);
@@ -350,6 +357,44 @@ void duckbox::test::RunSpecLoaderTests() {
 			cluster.internal_listen_configured = true;
 			ExpectThrowContains([&] { ValidateDaemonOrThrow(cluster); }, "peer_secret_ref",
 			                    "multi-node requires a resolved peer secret");
+			cluster.peer_secret = "short-secret";
+			ExpectThrowContains([&] { ValidateDaemonOrThrow(cluster); }, "16 characters",
+			                    "peer secret shorter than 16 characters is refused");
+		}
+		{
+			auto loc = ParseFlightLocation("127.0.0.1:5747");
+			Expect(loc.ok() && loc->ToString().find("5747") != std::string::npos, "ParseFlightLocation host:port");
+			auto grpc = ParseFlightLocation("grpc://127.0.0.1:4747");
+			Expect(grpc.ok(), "ParseFlightLocation grpc://");
+			auto v6 = ParseFlightLocation("grpc://[::1]:5747");
+			Expect(v6.ok() && v6->ToString().find("5747") != std::string::npos, "ParseFlightLocation IPv6");
+			Expect(!ParseFlightLocation("").ok(), "empty Flight location is rejected");
+			Expect(!ParseFlightLocation("not a uri !!!").ok(), "garbage Flight location is rejected");
+		}
+		{
+			auto secpath = "/tmp/duckbox-peer-world.txt";
+			{
+				std::ofstream o(secpath);
+				o << "  duckbox-peer-dev  \n";
+			}
+			chmod(secpath, 0644);
+			auto worldp = "/tmp/duckbox-peer-world.yaml";
+			{
+				std::ofstream o(worldp);
+				o << "name: x\nlisten: 127.0.0.1:9\nhandle_secret: duckbox-dev-secret\n"
+				     "auth:\n  allow_insecure_dev: true\n  peer_secret_ref: file:/tmp/duckbox-peer-world.txt\n";
+			}
+			ExpectThrowContains([&] { LoadDaemonFile(worldp); }, "world-readable",
+			                    "world-readable peer secret file is refused");
+			chmod(secpath, 0600);
+			auto okp = "/tmp/duckbox-peer-trim.yaml";
+			{
+				std::ofstream o(okp);
+				o << "name: x\nlisten: 127.0.0.1:9\nhandle_secret: duckbox-dev-secret\n"
+				     "auth:\n  allow_insecure_dev: true\n  peer_secret_ref: file:/tmp/duckbox-peer-world.txt\n";
+			}
+			auto trimmed = LoadDaemonFile(okp);
+			Expect(trimmed.peer_secret == "duckbox-peer-dev", "peer secret file value is trimmed");
 		}
 	}
 	setenv("DUCKBOX_TEST_SECRET", "value-must-not-appear-in-errors", 1);

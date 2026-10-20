@@ -84,6 +84,9 @@ int main(int argc, char **argv) {
 	auto *node_drain = node->add_subcommand("drain", "Stop taking new leases, release owned sandboxes, deregister");
 	node_drain->add_option("--url", node_req.url, "Internal listener URL")->capture_default_str();
 	node_drain->add_option("--caller", node_req.caller, "Trusted caller identity")->capture_default_str();
+	node_drain->add_option("--token", node_req.token, "Bearer token (JWT or auth.bearer_secrets)");
+	node_drain->add_option("--peer-secret", node_req.peer_secret,
+	                       "Peer secret for the internal handshake (literal, env:NAME, or file:/path)");
 	node_drain->add_option("--timeout", node_req.timeout_ms, "Finish in-flight queries wait (ms)")->capture_default_str();
 
 	auto *query = app.add_subcommand("query", "Use the Python client (examples/python/quickstart.py)");

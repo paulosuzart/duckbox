@@ -183,9 +183,12 @@ int RunSandboxCli(const SandboxCliRequest &req);
 struct NodeCliRequest {
 	std::string url = "grpc://127.0.0.1:5747"; // internal listener
 	std::string caller = "local";
+	std::string token;       // Authorization: Bearer (JWT / bearer secret)
+	std::string peer_secret; // internal handshake; env: / file: / literal
 	int64_t timeout_ms = 5000;
 };
 int RunNodeDrain(const NodeCliRequest &req);
+arrow::Result<arrow::flight::Location> ParseFlightLocation(const std::string &url);
 void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
                     std::shared_ptr<SandboxRuntime> runtime);
 
@@ -193,7 +196,13 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
 // Node-to-node Flight client. Authenticates with the shared peer secret, never the caller.
 class PeerFlight {
 public:
-	explicit PeerFlight(std::string secret);
+	explicit PeerFlight(std::string secret, int64_t timeout_ms = 5000);
+	void set_timeout_ms(int64_t timeout_ms) {
+		timeout_ms_ = timeout_ms > 0 ? timeout_ms : 5000;
+	}
+	void SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes) {
+		nodes_ = std::move(nodes);
+	}
 	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> ForwardGetFlightInfo(
 	    const std::string &url, const arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
 	    const std::string &key);
@@ -207,6 +216,8 @@ private:
 	arrow::flight::FlightCallOptions CallOpt(const std::string &sandbox_id, const std::string &key) const;
 
 	std::string secret_;
+	int64_t timeout_ms_ = 5000;
+	std::shared_ptr<S3NodeDirectory> nodes_;
 	std::mutex mu_;
 	std::unordered_map<std::string, std::shared_ptr<arrow::flight::FlightClient>> clients_;
 };

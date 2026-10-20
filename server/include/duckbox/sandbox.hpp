@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -149,7 +150,7 @@ public:
 	void SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes);
 	void SetClock(std::shared_ptr<Clock> clock);
 	void SetFenceHook(std::function<void(const std::string &)> hook); // tests; production SelfFence
-	void Drain(int64_t timeout_ms = 0); // stop new leases, grace wait, release, passivate, deregister
+	void Drain(int64_t timeout_ms = 0); // stop new leases, wait inflight, release, persist draining
 	// Node-lease renew at ~1/3 TTL. Failed renew retries until published expiry;
 	// then (or on missing/mismatch record) fences: stop sandboxes, fail inflight, exit.
 	void TickLeases();
@@ -175,11 +176,35 @@ public:
 	std::string NodeName() const {
 		return daemon_.name;
 	}
+	std::shared_ptr<S3NodeDirectory> Nodes() const {
+		return nodes_;
+	}
+	int Inflight() const {
+		return inflight_.load();
+	}
+	void BeginRequest();
+	void EndRequest();
+	struct RequestGuard {
+		explicit RequestGuard(SandboxRuntime &rt) : rt_(&rt) {
+			rt_->BeginRequest();
+		}
+		~RequestGuard() {
+			if (rt_) {
+				rt_->EndRequest();
+			}
+		}
+		RequestGuard(const RequestGuard &) = delete;
+		RequestGuard &operator=(const RequestGuard &) = delete;
+
+	private:
+		SandboxRuntime *rt_;
+	};
 
 private:
 	void EvictIdleLocked();
 	void PublishResidentLocked();
 	const TenantSandbox *FindIdLocked(const std::string &id) const;
+	void InterruptId(const std::string &id);
 	void Fence(const std::string &reason); // writes nothing; then fence hook / SelfFence
 	int64_t NowMs() const;
 
@@ -192,8 +217,11 @@ private:
 	std::shared_ptr<Clock> clock_;
 	std::function<void(const std::string &)> fence_hook_;
 	std::atomic<bool> fenced_{false};
+	std::atomic<int> inflight_{0};
 	std::string fence_reason_;
 	mutable std::mutex mu_;
+	std::mutex drain_mu_;
+	std::condition_variable drain_cv_;
 	std::unordered_map<std::string, std::shared_ptr<TenantSandbox>> boxes_;
 };
 

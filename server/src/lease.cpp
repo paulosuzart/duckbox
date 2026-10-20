@@ -50,7 +50,10 @@ std::string ResourceOf(const Lease &lease) {
 
 [[noreturn]] void SelfFence(const std::string &reason) {
 	// Exit 3 (not abort): counters reset, ops alert on restart + last-renewal age.
-	std::clog << "{\"event\":\"self_fence\",\"reason\":\"" << reason << "\"}\n";
+	Json j;
+	j["event"] = "self_fence";
+	j["reason"] = reason;
+	std::clog << j.dump() << "\n";
 	std::_Exit(3);
 }
 
@@ -92,11 +95,12 @@ std::vector<std::string> SingleNodeLeaseManager::OwnedIds() const {
 void SingleNodeLeaseManager::ReleaseOwned() {
 	auto ids = OwnedIds();
 	for (auto &id : ids) {
-		Lease l;
-		l.resource = id;
-		l.tenant_key = id;
-		Release(l);
+		Release(Held(id));
 	}
+}
+
+Lease SingleNodeLeaseManager::Held(const std::string &resource_id) {
+	return Peek(resource_id);
 }
 
 Lease SingleNodeLeaseManager::Acquire(const std::string &resource_id) {
@@ -182,6 +186,8 @@ S3LeaseOptions LeaseOptionsFromDaemon(const DaemonConfig &daemon) {
 	o.prefix = daemon.lease.prefix;
 	o.ttl_ms = daemon.lease.ttl_ms;
 	o.heartbeat_ms = daemon.lease.heartbeat_ms;
+	o.skew_ms = daemon.lease.skew_ms;
+	o.cache_ms = daemon.lease.cache_ms;
 	o.max_leases = daemon.lease.max_leases;
 	o.version = DUCKBOX_DUCKDB_VERSION;
 	return o;
@@ -218,7 +224,8 @@ Lease S3ConditionalLeaseManager::ParseRecord(const S3Object &obj) const {
 	lease.flight = JsonHas(j, "flight") ? JsonRequireString(j, "flight", kLeaseWhat) : "";
 	lease.expiry_ms = JsonRequireInt(j, "expiry_ms", kLeaseWhat);
 	lease.etag = obj.etag;
-	lease.owned_locally = (lease.owner_id == opt_.owner_id && lease.expiry_ms > clock_->NowMs());
+	lease.owned_locally = (!lease.owner_id.empty() && lease.owner_id == opt_.owner_id &&
+	                       lease.expiry_ms > clock_->NowMs());
 	return lease;
 }
 
@@ -247,27 +254,69 @@ Lease S3ConditionalLeaseManager::Load(const std::string &resource_id) {
 void S3ConditionalLeaseManager::Remember(const Lease &lease) {
 	auto id = ResourceOf(lease);
 	std::lock_guard<std::mutex> hold(mu_);
-	if (!lease.etag.empty()) {
-		etags_[id] = lease.etag;
+	HeldLease h;
+	h.lease = lease;
+	h.cache_until_ms = clock_->NowMs() + (opt_.cache_ms > 0 ? opt_.cache_ms : 0);
+	held_[id] = std::move(h);
+	if (lease.owned_locally) {
+		owned_.insert(id);
+	} else {
+		owned_.erase(id);
 	}
-	owned_.insert(id);
 	M().SetOwnedKeys(owned_.size());
 }
 
 void S3ConditionalLeaseManager::Forget(const std::string &resource_id) {
 	std::lock_guard<std::mutex> hold(mu_);
-	etags_.erase(resource_id);
+	held_.erase(resource_id);
 	owned_.erase(resource_id);
 	M().SetOwnedKeys(owned_.size());
 }
 
+Lease S3ConditionalLeaseManager::Held(const std::string &resource_id) {
+	std::lock_guard<std::mutex> hold(mu_);
+	auto it = held_.find(resource_id);
+	if (it != held_.end()) {
+		return it->second.lease;
+	}
+	Lease miss;
+	miss.resource = resource_id;
+	miss.tenant_key = resource_id;
+	return miss;
+}
+
+Lease S3ConditionalLeaseManager::CachedAcquire(const std::string &resource_id) {
+	if (opt_.cache_ms <= 0) {
+		Lease miss;
+		return miss;
+	}
+	std::lock_guard<std::mutex> hold(mu_);
+	auto it = held_.find(resource_id);
+	if (it == held_.end()) {
+		Lease miss;
+		return miss;
+	}
+	if (it->second.cache_until_ms <= clock_->NowMs()) {
+		Lease miss;
+		return miss;
+	}
+	return it->second.lease;
+}
+
 Lease S3ConditionalLeaseManager::Acquire(const std::string &resource_id) {
 	ValidateResourceId(resource_id);
+	auto cached = CachedAcquire(resource_id);
+	if (!cached.resource.empty() && !cached.etag.empty() &&
+	    ((cached.owned_locally && cached.expiry_ms > clock_->NowMs()) ||
+	     (!cached.owned_locally && !cached.owner_id.empty() && cached.expiry_ms + opt_.skew_ms > clock_->NowMs()))) {
+		return cached;
+	}
 	for (int attempt = 0; attempt < kMaxCasAttempts; attempt++) {
 		auto current = Load(resource_id);
 		int64_t now = clock_->NowMs();
-		bool missing = current.epoch == 0 && current.etag.empty();
-		bool expired = !missing && current.expiry_ms <= now;
+		bool missing = current.etag.empty();
+		bool free = !missing && current.owner_id.empty();
+		bool expired = !missing && (free || current.expiry_ms + opt_.skew_ms <= now);
 
 		if (!missing && !expired && current.owner_id == opt_.owner_id) {
 			current.owned_locally = true;
@@ -276,7 +325,7 @@ Lease S3ConditionalLeaseManager::Acquire(const std::string &resource_id) {
 		}
 		if (!missing && !expired) {
 			current.owned_locally = false;
-			Forget(resource_id);
+			Remember(current);
 			return current;
 		}
 		bool draining = false;
@@ -328,40 +377,30 @@ Lease S3ConditionalLeaseManager::Acquire(const std::string &resource_id) {
 void S3ConditionalLeaseManager::Renew(const Lease &lease) {
 	auto resource_id = ResourceOf(lease);
 	ValidateResourceId(resource_id);
-	std::string etag = lease.etag;
-	{
-		std::lock_guard<std::mutex> hold(mu_);
-		if (etag.empty()) {
-			auto it = etags_.find(resource_id);
-			if (it != etags_.end()) {
-				etag = it->second;
-			}
-		}
+	Lease remembered = lease;
+	if (remembered.etag.empty() || remembered.owner_id.empty()) {
+		remembered = Held(resource_id);
 	}
-	if (etag.empty()) {
+	if (remembered.owner_id != opt_.owner_id || remembered.etag.empty()) {
 		Forget(resource_id);
 		M().IncLeaseRenewal("lost");
 		M().IncOwnershipLost("stolen");
-		throw LeaseLostError("lease renew missing etag for " + resource_id);
+		throw LeaseLostError("lease renew is not held by this node for " + resource_id);
 	}
-
-	auto current = Load(resource_id);
-	if (current.owner_id != opt_.owner_id || current.epoch == 0 ||
-	    (lease.epoch != 0 && current.epoch != lease.epoch) || current.etag != etag) {
+	if (lease.epoch != 0 && remembered.epoch != 0 && lease.epoch != remembered.epoch) {
 		Forget(resource_id);
 		M().IncLeaseRenewal("lost");
-		M().IncOwnershipLost(current.owner_id.empty() ? "expired" : "stolen");
-		M().IncS3LeaseError("renew", current.owner_id.empty() ? "not_found" : "precondition");
-		throw LeaseLostError("lease lost for " + resource_id);
+		M().IncOwnershipLost("stolen");
+		throw LeaseLostError("lease epoch mismatch for " + resource_id);
 	}
 
-	Lease next = current;
+	Lease next = remembered;
 	next.owner_id = opt_.owner_id;
-	next.flight = opt_.flight.empty() ? current.flight : opt_.flight;
+	next.flight = opt_.flight.empty() ? remembered.flight : opt_.flight;
 	next.expiry_ms = clock_->NowMs() + opt_.ttl_ms;
 	next.owned_locally = true;
 	auto t0 = std::chrono::steady_clock::now();
-	auto put = client_->Put(ObjectKey(resource_id), Encode(next), etag, "");
+	auto put = client_->Put(ObjectKey(resource_id), Encode(next), remembered.etag, "");
 	M().ObserveS3LeaseOp("put", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 	if (HttpOk(put.status)) {
 		next.etag = put.etag;
@@ -380,35 +419,38 @@ void S3ConditionalLeaseManager::Renew(const Lease &lease) {
 void S3ConditionalLeaseManager::Release(const Lease &lease) {
 	auto resource_id = ResourceOf(lease);
 	ValidateResourceId(resource_id);
-	std::string etag = lease.etag;
-	{
-		std::lock_guard<std::mutex> hold(mu_);
-		if (etag.empty()) {
-			auto it = etags_.find(resource_id);
-			if (it != etags_.end()) {
-				etag = it->second;
-			}
-		}
+	Lease remembered = lease;
+	if (remembered.etag.empty() || remembered.owner_id.empty()) {
+		remembered = Held(resource_id);
 	}
-	if (etag.empty()) {
+	if (remembered.owner_id != opt_.owner_id) {
 		Forget(resource_id);
 		return;
 	}
+	if (remembered.etag.empty()) {
+		Forget(resource_id);
+		return;
+	}
+	Lease tomb = remembered;
+	tomb.owner_id = "";
+	tomb.flight = "";
+	tomb.expiry_ms = 0;
+	tomb.owned_locally = false;
 	auto t0 = std::chrono::steady_clock::now();
-	auto del = client_->Delete(ObjectKey(resource_id), etag);
-	M().ObserveS3LeaseOp("delete", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+	auto put = client_->Put(ObjectKey(resource_id), Encode(tomb), remembered.etag, "");
+	M().ObserveS3LeaseOp("put", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 	Forget(resource_id);
-	if (HttpOk(del.status) || del.status == 404) {
+	if (HttpOk(put.status) || put.status == 404) {
 		M().IncOwnershipLost("released");
 		return;
 	}
-	if (del.status == 412 || del.status == 409) {
+	if (put.status == 412 || put.status == 409) {
 		M().IncOwnershipLost("stolen");
 		M().IncCasConflict();
 		return;
 	}
-	M().IncS3LeaseError("delete", S3ErrorCode(del.status));
-	throw Error(del.error.empty() ? "s3 DELETE lease failed" : del.error);
+	M().IncS3LeaseError("put", S3ErrorCode(put.status));
+	throw Error(put.error.empty() ? "s3 PUT lease tombstone failed" : put.error);
 }
 
 Lease S3ConditionalLeaseManager::Peek(const std::string &resource_id) {
@@ -442,10 +484,19 @@ std::vector<std::string> S3ConditionalLeaseManager::OwnedIds() const {
 }
 
 void S3ConditionalLeaseManager::ReleaseOwned() {
-	auto ids = OwnedIds();
-	for (auto &id : ids) {
+	std::vector<Lease> held;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		held.reserve(held_.size());
+		for (auto &kv : held_) {
+			if (kv.second.lease.owner_id == opt_.owner_id) {
+				held.push_back(kv.second.lease);
+			}
+		}
+	}
+	for (auto &l : held) {
 		try {
-			Release(Peek(id));
+			Release(l);
 		} catch (const std::exception &) {
 		}
 	}
@@ -458,7 +509,7 @@ void S3ConditionalLeaseManager::set_flight(std::string flight) {
 namespace {
 
 const char *kNodeWhat = "node heartbeat JSON";
-const std::set<std::string> kNodeKeys = {"node_id", "flight", "started_at_ms", "version", "expiry_ms"};
+const std::set<std::string> kNodeKeys = {"node_id", "flight", "started_at_ms", "version", "expiry_ms", "draining"};
 
 } // namespace
 
@@ -495,6 +546,7 @@ std::string S3NodeDirectory::Encode(const NodeRecord &n) const {
 	j["started_at_ms"] = n.started_at_ms;
 	j["version"] = n.version;
 	j["expiry_ms"] = n.expiry_ms;
+	j["draining"] = n.draining;
 	return j.dump();
 }
 
@@ -507,18 +559,66 @@ NodeRecord S3NodeDirectory::Parse(const S3Object &obj) const {
 	n.started_at_ms = JsonRequireInt(j, "started_at_ms", kNodeWhat);
 	n.version = JsonHas(j, "version") ? JsonRequireString(j, "version", kNodeWhat) : "";
 	n.expiry_ms = JsonRequireInt(j, "expiry_ms", kNodeWhat);
+	n.draining = JsonHas(j, "draining") ? JsonRequireBool(j, "draining", kNodeWhat) : false;
 	n.etag = obj.etag;
 	return n;
 }
 
+void S3NodeDirectory::SetDraining(bool v) {
+	std::lock_guard<std::mutex> hold(mu_);
+	draining_ = v;
+}
+
+bool S3NodeDirectory::draining() const {
+	std::lock_guard<std::mutex> hold(mu_);
+	return draining_;
+}
+
+bool S3NodeDirectory::IsKnownFlight(const std::string &flight) {
+	if (flight.empty()) {
+		return false;
+	}
+	for (auto &n : List()) {
+		if (n.flight == flight) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void S3NodeDirectory::Heartbeat() {
+	std::lock_guard<std::mutex> hold(mu_);
+	PutHeartbeatLocked();
+}
+
+void S3NodeDirectory::PutHeartbeatLocked() {
+	auto key = ObjectKey(opt_.owner_id);
+	if (etag_.empty()) {
+		auto existing = client_->Get(key);
+		if (HttpOk(existing.status)) {
+			try {
+				auto rec = Parse(existing);
+				if (rec.node_id != opt_.owner_id) {
+					throw Error("node_lease_record_mismatch_fence");
+				}
+				etag_ = rec.etag;
+			} catch (const Error &) {
+				throw;
+			} catch (const std::exception &) {
+				etag_ = existing.etag;
+			}
+		} else if (existing.status != 404 && existing.status != 0 && !HttpOk(existing.status)) {
+			throw Error(existing.error.empty() ? "node heartbeat GET failed" : existing.error);
+		}
+	}
+
 	NodeRecord n;
 	n.node_id = opt_.owner_id;
 	n.flight = opt_.flight;
 	n.started_at_ms = started_at_ms_;
 	n.version = opt_.version.empty() ? std::string(DUCKBOX_DUCKDB_VERSION) : opt_.version;
 	n.expiry_ms = clock_->NowMs() + opt_.ttl_ms;
-	auto key = ObjectKey(n.node_id);
+	n.draining = draining_;
 	auto body = Encode(n);
 	S3Object put;
 	if (etag_.empty()) {
@@ -526,18 +626,57 @@ void S3NodeDirectory::Heartbeat() {
 	} else {
 		put = client_->Put(key, body, etag_, "");
 	}
+	auto adopt_ours = [&](const S3Object &obj) -> bool {
+		if (!HttpOk(obj.status)) {
+			return false;
+		}
+		try {
+			auto rec = Parse(obj);
+			if (rec.node_id != opt_.owner_id) {
+				return false;
+			}
+			etag_ = rec.etag;
+			last_body_ = obj.body;
+			published_expiry_ms_ = rec.expiry_ms;
+			return true;
+		} catch (const std::exception &) {
+			return false;
+		}
+	};
 	if (put.status == 412 || put.status == 409) {
-		throw Error("node_lease_record_mismatch_fence");
-	}
-	if (!HttpOk(put.status)) {
+		auto again = client_->Get(key);
+		if (adopt_ours(again)) {
+			put = client_->Put(key, body, etag_, "");
+			if (HttpOk(put.status)) {
+				etag_ = put.etag;
+				last_body_ = body;
+				published_expiry_ms_ = n.expiry_ms;
+			} else if (put.status == 412 || put.status == 409) {
+				auto third = client_->Get(key);
+				if (adopt_ours(third)) {
+					return;
+				}
+				throw Error("node_lease_record_mismatch_fence");
+			} else if (!HttpOk(put.status)) {
+				throw Error(put.error.empty() ? "node heartbeat PUT failed" : put.error);
+			}
+		} else {
+			throw Error("node_lease_record_mismatch_fence");
+		}
+	} else if (!HttpOk(put.status)) {
 		throw Error(put.error.empty() ? "node heartbeat PUT failed" : put.error);
+	} else {
+		etag_ = put.etag;
+		last_body_ = body;
+		published_expiry_ms_ = n.expiry_ms;
 	}
-	etag_ = put.etag;
-	last_body_ = body;
-	published_expiry_ms_ = n.expiry_ms;
-	auto live = List();
 	if (metrics_) {
-		metrics_->SetClusterNodes(live.size());
+		int64_t now = clock_->NowMs();
+		if (live_cache_ms_ == 0 || now - live_cache_ms_ >= opt_.ttl_ms) {
+			auto live = ListUncached();
+			live_cache_ms_ = now;
+			metrics_->SetClusterNodes(live.size());
+		}
 	}
 }
 
@@ -549,26 +688,42 @@ S3NodeDirectory::RecordCheck S3NodeDirectory::CheckPublished() const {
 	if (!HttpOk(obj.status)) {
 		return RecordCheck::Transport;
 	}
-	if (last_body_.empty()) {
+	std::string last;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		last = last_body_;
+	}
+	if (last.empty()) {
 		return RecordCheck::Ok;
 	}
-	if (obj.body != last_body_) {
+	if (obj.body != last) {
+		try {
+			auto rec = Parse(obj);
+			if (rec.node_id == opt_.owner_id) {
+				return RecordCheck::Ok;
+			}
+		} catch (const std::exception &) {
+		}
 		return RecordCheck::Mismatch;
 	}
 	return RecordCheck::Ok;
 }
 
 void S3NodeDirectory::Deregister() {
-	auto key = ObjectKey(opt_.owner_id);
-	(void)client_->Delete(key, etag_);
-	etag_.clear();
-	if (metrics_) {
-		auto live = List();
-		metrics_->SetClusterNodes(live.size());
+	std::string etag;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		etag = etag_;
+		etag_.clear();
+		last_body_.clear();
+		published_expiry_ms_ = 0;
+		live_cache_ms_ = 0;
 	}
+	auto key = ObjectKey(opt_.owner_id);
+	(void)client_->Delete(key, etag);
 }
 
-std::vector<NodeRecord> S3NodeDirectory::List() {
+std::vector<NodeRecord> S3NodeDirectory::ListUncached() {
 	std::vector<NodeRecord> out;
 	int64_t now = clock_->NowMs();
 	for (auto &key : client_->ListKeys(opt_.prefix + "nodes/")) {
@@ -578,13 +733,17 @@ std::vector<NodeRecord> S3NodeDirectory::List() {
 		}
 		try {
 			auto n = Parse(obj);
-			if (n.expiry_ms > now) {
+			if (!n.draining && n.expiry_ms > now) {
 				out.push_back(std::move(n));
 			}
 		} catch (const std::exception &) {
 		}
 	}
 	return out;
+}
+
+std::vector<NodeRecord> S3NodeDirectory::List() {
+	return ListUncached();
 }
 
 } // namespace duckbox

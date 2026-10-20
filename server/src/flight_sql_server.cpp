@@ -3,6 +3,7 @@
 #include "duckbox/json.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/metrics.hpp"
+#include "duckbox/secrets.hpp"
 #include "duckbox/spec_validator.hpp"
 #include "duckbox/yaml.hpp"
 
@@ -156,6 +157,9 @@ Status FromEx(const std::exception &e) {
 	if (dynamic_cast<const LeaseLostError *>(&e)) {
 		return Status::Invalid(e.what());
 	}
+	if (dynamic_cast<const UnavailableError *>(&e)) {
+		return Status::IOError(e.what());
+	}
 	return Status::Invalid(e.what());
 }
 
@@ -219,24 +223,22 @@ arrow::Status HandshakeAuthHandler::IsValid(const ServerCallContext &, const std
 	}
 }
 
-namespace {
-
-std::pair<std::string, int> SplitGrpc(const std::string &url) {
-	std::string u = url;
-	if (u.rfind("grpc://", 0) == 0) {
-		u = u.substr(7);
+arrow::Result<arrow::flight::Location> ParseFlightLocation(const std::string &url) {
+	if (url.empty()) {
+		return arrow::Status::Invalid("empty Flight location");
 	}
-	auto colon = u.rfind(':');
-	if (colon == std::string::npos) {
-		return {u, 4747};
+	std::string spec = url;
+	if (spec.find("://") == std::string::npos) {
+		spec = "grpc://" + spec;
 	}
-	int port = 4747;
-	try {
-		port = std::stoi(u.substr(colon + 1));
-	} catch (...) {
+	auto parsed = arrow::flight::Location::Parse(spec);
+	if (parsed.ok()) {
+		return parsed;
 	}
-	return {u.substr(0, colon), port};
+	return arrow::Status::Invalid("invalid Flight location");
 }
+
+namespace {
 
 class PeerClientAuth : public arrow::flight::ClientAuthHandler {
 public:
@@ -279,11 +281,13 @@ std::unique_ptr<FlightInfo> StripLocations(const FlightInfo &info) {
 
 } // namespace
 
-PeerFlight::PeerFlight(std::string secret) : secret_(std::move(secret)) {
+PeerFlight::PeerFlight(std::string secret, int64_t timeout_ms)
+    : secret_(std::move(secret)), timeout_ms_(timeout_ms > 0 ? timeout_ms : 5000) {
 }
 
 arrow::flight::FlightCallOptions PeerFlight::CallOpt(const std::string &sandbox_id, const std::string &key) const {
 	arrow::flight::FlightCallOptions opt;
+	opt.timeout = arrow::flight::TimeoutDuration(static_cast<double>(timeout_ms_) / 1000.0);
 	opt.headers.emplace_back("authorization", "Bearer " + secret_);
 	opt.headers.emplace_back("x-duckbox-sandbox", sandbox_id);
 	if (!key.empty()) {
@@ -299,17 +303,21 @@ arrow::Result<std::shared_ptr<arrow::flight::FlightClient>> PeerFlight::Client(c
 	if (url.empty()) {
 		return Status::Invalid("peer advertise URL is empty");
 	}
+	if (nodes_ && !nodes_->IsKnownFlight(url)) {
+		return Status::Invalid("peer proxy target is not a registered node");
+	}
 	std::lock_guard<std::mutex> hold(mu_);
 	auto it = clients_.find(url);
 	if (it != clients_.end()) {
 		return it->second;
 	}
-	auto [host, port] = SplitGrpc(url);
-	ARROW_ASSIGN_OR_RAISE(auto loc, Location::ForGrpcTcp(host, port));
+	ARROW_ASSIGN_OR_RAISE(auto loc, ParseFlightLocation(url));
 	ARROW_ASSIGN_OR_RAISE(auto raw, arrow::flight::FlightClient::Connect(loc));
 	std::shared_ptr<arrow::flight::FlightClient> client(std::move(raw));
 	auto auth = std::make_unique<PeerClientAuth>(secret_);
-	ARROW_RETURN_NOT_OK(client->Authenticate({}, std::move(auth)));
+	arrow::flight::FlightCallOptions auth_opt;
+	auth_opt.timeout = arrow::flight::TimeoutDuration(static_cast<double>(timeout_ms_) / 1000.0);
+	ARROW_RETURN_NOT_OK(client->Authenticate(auth_opt, std::move(auth)));
 	clients_[url] = client;
 	return client;
 }
@@ -374,6 +382,9 @@ std::string DuckboxFlightSqlServer::CallerOf(const ServerCallContext &context) c
 	if (bearer.size() > prefix.size() && bearer.compare(0, prefix.size(), prefix) == 0) {
 		token = bearer.substr(prefix.size());
 	}
+	if (plane_ == ListenerPlane::Internal && context.peer_identity() == kPeerIdentity && token.empty()) {
+		return kPeerIdentity;
+	}
 	return AuthenticateCallerIdentity(daemon_, context.peer_identity(), token,
 	                                  Hdr(context, {"x-duckbox-caller", "X-Duckbox-Caller"}), plane_);
 }
@@ -437,6 +448,7 @@ DuckboxFlightSqlServer::CallCtx DuckboxFlightSqlServer::Auth(const ServerCallCon
 }
 
 std::shared_ptr<TenantSandbox> DuckboxFlightSqlServer::Box(const CallCtx &c) const {
+	SandboxRuntime::RequestGuard g(*runtime_);
 	return runtime_->Get(c.rec);
 }
 
@@ -456,7 +468,12 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::MaybeProxyInf
 	                       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 	if (!forwarded.ok()) {
 		Metrics().IncProxyError("get_flight_info", "error");
-		return Status::Invalid(std::string("proxy to owner failed: ") + forwarded.status().ToString());
+		Json log;
+		log["event"] = "proxy_error";
+		log["op"] = "get_flight_info";
+		log["detail"] = forwarded.status().ToString();
+		std::clog << log.dump() << "\n";
+		return Status::IOError("peer proxy failed");
 	}
 	(void)token;
 	(void)schema;
@@ -479,7 +496,12 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::MaybePr
 	Metrics().ObserveProxy("do_get", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 	if (!forwarded.ok()) {
 		Metrics().IncProxyError("do_get", "error");
-		return Status::Invalid(std::string("proxy to owner failed: ") + forwarded.status().ToString());
+		Json log;
+		log["event"] = "proxy_error";
+		log["op"] = "do_get";
+		log["detail"] = forwarded.status().ToString();
+		std::clog << log.dump() << "\n";
+		return Status::IOError("peer proxy failed");
 	}
 	return forwarded;
 }
@@ -591,6 +613,7 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetSt
 		if (!hdr_key.empty() && hdr_key != h.tenant_raw && hdr_key != rec.key) {
 			throw AuthError("tenant key does not match statement handle");
 		}
+		SandboxRuntime::RequestGuard inflight(*runtime_);
 		std::shared_ptr<TenantSandbox> box;
 		try {
 			box = runtime_->Get(rec);
@@ -720,6 +743,7 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 		RequirePeerQuery(caller);
 		AuthorizeCaller(daemon_, caller, current.key);
 		auto rec = ResolveHandleVersion(*defs_, current, h.version);
+		SandboxRuntime::RequestGuard inflight(*runtime_);
 		try {
 			auto box = runtime_->Get(rec);
 			auto schema = SchemaFromCols(box->DescribeRewritten(h.rewritten_sql));
@@ -1176,7 +1200,10 @@ int RunServer(const ServerOptions &opt_in) {
 	}
 	auto signer = std::make_shared<HmacHandleSigner>(opt.daemon.handle_secret, opt.daemon.handle_ttl_seconds);
 	auto rewriter = std::make_shared<SqlRewriter>();
-	auto peers = std::make_shared<PeerFlight>(opt.daemon.peer_secret);
+	auto peers = std::make_shared<PeerFlight>(opt.daemon.peer_secret, opt.daemon.lease.proxy_timeout_ms);
+	if (nodes) {
+		peers->SetNodeDirectory(nodes);
+	}
 	auto pub_sql =
 	    std::make_unique<DuckboxFlightSqlServer>(opt.daemon, defs, runtime, signer, rewriter, ListenerPlane::Public, peers);
 	auto pub = std::make_unique<DuckboxFlightServer>(std::move(pub_sql));
@@ -1185,11 +1212,7 @@ int RunServer(const ServerOptions &opt_in) {
 	auto internal = std::make_unique<DuckboxFlightServer>(std::move(int_sql));
 	std::atomic<bool> running{true};
 
-	auto listen = opt.daemon.listen;
-	auto colon = listen.rfind(':');
-	std::string host = colon == std::string::npos ? listen : listen.substr(0, colon);
-	int port = colon == std::string::npos ? 4747 : std::stoi(listen.substr(colon + 1));
-	auto loc_res = Location::ForGrpcTcp(host, port);
+	auto loc_res = ParseFlightLocation(opt.daemon.listen);
 	if (!loc_res.ok()) {
 		std::cerr << loc_res.status().ToString() << "\n";
 		return 1;
@@ -1206,10 +1229,7 @@ int RunServer(const ServerOptions &opt_in) {
 	if (ilisten.empty()) {
 		ilisten = DefaultInternalListen(opt.daemon.listen);
 	}
-	auto icolon = ilisten.rfind(':');
-	std::string ihost = icolon == std::string::npos ? ilisten : ilisten.substr(0, icolon);
-	int iport = icolon == std::string::npos ? 5747 : std::stoi(ilisten.substr(icolon + 1));
-	auto iloc = Location::ForGrpcTcp(ihost, iport);
+	auto iloc = ParseFlightLocation(ilisten);
 	if (!iloc.ok()) {
 		std::cerr << iloc.status().ToString() << "\n";
 		return 1;
@@ -1222,13 +1242,22 @@ int RunServer(const ServerOptions &opt_in) {
 		return 1;
 	}
 
+	auto ip = ParseListenAddress(ilisten, 5747);
 	std::string flight = opt.daemon.lease.advertise;
 	if (flight.empty()) {
-		flight = "grpc://" + ihost + ":" + std::to_string(internal->port());
+		flight = "grpc://" + ip.first + ":" + std::to_string(internal->port());
 	}
 	leases->set_flight(flight);
 	if (nodes) {
 		nodes->set_flight(flight);
+		try {
+			nodes->Heartbeat();
+		} catch (const std::exception &e) {
+			Json hb;
+			hb["event"] = "startup_heartbeat";
+			hb["error"] = e.what();
+			std::clog << hb.dump() << "\n";
+		}
 	}
 	int64_t beat_ms = lopt.heartbeat_ms > 0 ? lopt.heartbeat_ms : 5000;
 	std::thread renew([&]() {
@@ -1236,7 +1265,10 @@ int RunServer(const ServerOptions &opt_in) {
 			try {
 				runtime->TickLeases();
 			} catch (const std::exception &e) {
-				std::clog << "{\"event\":\"tick_leases\",\"error\":\"" << e.what() << "\"}\n";
+				Json te;
+				te["event"] = "tick_leases";
+				te["error"] = e.what();
+				std::clog << te.dump() << "\n";
 			}
 			int ticks = static_cast<int>(beat_ms / 100);
 			if (ticks < 1) {
@@ -1248,9 +1280,10 @@ int RunServer(const ServerOptions &opt_in) {
 		}
 	});
 	std::thread internal_th([&]() { (void)internal->Serve(); });
-	std::cout << "duckbox Flight SQL listening on grpc://" << host << ":" << pub->port() << " (DuckDB "
+	auto lp = ParseListenAddress(opt.daemon.listen, 4747);
+	std::cout << "duckbox Flight SQL listening on grpc://" << lp.first << ":" << pub->port() << " (DuckDB "
 	          << DUCKBOX_DUCKDB_VERSION << ", control plane only)" << std::endl;
-	std::cout << "duckbox internal listener on grpc://" << ihost << ":" << internal->port()
+	std::cout << "duckbox internal listener on grpc://" << ip.first << ":" << internal->port()
 	          << " (peer + operator; do not expose)" << std::endl;
 	if (!opt.daemon.debug_http.empty()) {
 		ServerOptions dbg = opt;
@@ -1261,6 +1294,23 @@ int RunServer(const ServerOptions &opt_in) {
 	(void)st;
 	st = pub->Serve();
 	running = false;
+	if (renew.joinable()) {
+		renew.join();
+	}
+	try {
+		runtime->Drain(2000);
+	} catch (const std::exception &e) {
+		Json de;
+		de["event"] = "sigterm_drain";
+		de["error"] = e.what();
+		std::clog << de.dump() << "\n";
+	}
+	if (nodes) {
+		try {
+			nodes->Deregister();
+		} catch (const std::exception &) {
+		}
+	}
 	auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
 	(void)internal->Shutdown(&deadline);
 	(void)pub->Shutdown(&deadline);
@@ -1268,9 +1318,6 @@ int RunServer(const ServerOptions &opt_in) {
 		internal_th.join();
 	}
 	StopMetricsHttp();
-	if (renew.joinable()) {
-		renew.join();
-	}
 	SetMetrics(nullptr);
 	if (!st.ok()) {
 		std::cerr << "serve failed: " << st.ToString() << "\n";
@@ -1280,20 +1327,7 @@ int RunServer(const ServerOptions &opt_in) {
 }
 
 int RunSandboxCli(const SandboxCliRequest &req) {
-	std::string host = "127.0.0.1";
-	int port = 4747;
-	auto u = req.url;
-	if (u.rfind("grpc://", 0) == 0) {
-		u = u.substr(7);
-	}
-	auto colon = u.rfind(':');
-	if (colon != std::string::npos) {
-		host = u.substr(0, colon);
-		port = std::stoi(u.substr(colon + 1));
-	} else if (!u.empty()) {
-		host = u;
-	}
-	auto loc_res = Location::ForGrpcTcp(host, port);
+	auto loc_res = ParseFlightLocation(req.url);
 	if (!loc_res.ok()) {
 		std::cerr << loc_res.status().ToString() << "\n";
 		return 1;
@@ -1408,20 +1442,7 @@ int RunSandboxCli(const SandboxCliRequest &req) {
 }
 
 int RunNodeDrain(const NodeCliRequest &req) {
-	std::string host = "127.0.0.1";
-	int port = 4747;
-	auto u = req.url;
-	if (u.rfind("grpc://", 0) == 0) {
-		u = u.substr(7);
-	}
-	auto colon = u.rfind(':');
-	if (colon != std::string::npos) {
-		host = u.substr(0, colon);
-		port = std::stoi(u.substr(colon + 1));
-	} else if (!u.empty()) {
-		host = u;
-	}
-	auto loc_res = Location::ForGrpcTcp(host, port);
+	auto loc_res = ParseFlightLocation(req.url);
 	if (!loc_res.ok()) {
 		std::cerr << loc_res.status().ToString() << "\n";
 		return 1;
@@ -1432,8 +1453,32 @@ int RunNodeDrain(const NodeCliRequest &req) {
 		return 1;
 	}
 	auto client = std::move(*client_res);
+	std::string handshake = req.peer_secret;
+	if (handshake.rfind("env:", 0) == 0 || handshake.rfind("file:", 0) == 0) {
+		try {
+			handshake = TrimCopy(EnvFileSecretResolver{}.Resolve(ParseSecretRef(handshake, "peer-secret"), "peer-secret"));
+		} catch (const std::exception &e) {
+			std::cerr << e.what() << "\n";
+			return 1;
+		}
+	}
+	if (handshake.empty() && !req.token.empty()) {
+		handshake = req.token;
+	}
+	if (!handshake.empty()) {
+		auto auth = std::make_unique<PeerClientAuth>(handshake);
+		auto ast = client->Authenticate({}, std::move(auth));
+		if (!ast.ok()) {
+			std::cerr << ast.ToString() << "\n";
+			return 1;
+		}
+	}
 	arrow::flight::FlightCallOptions opt;
-	opt.headers.emplace_back("x-duckbox-caller", req.caller.empty() ? "local" : req.caller);
+	if (!req.token.empty()) {
+		opt.headers.emplace_back("authorization", "Bearer " + req.token);
+	} else if (req.peer_secret.empty()) {
+		opt.headers.emplace_back("x-duckbox-caller", req.caller.empty() ? "local" : req.caller);
+	}
 	arrow::flight::Action action;
 	action.type = "DrainNode";
 	action.body = BufOf("timeout_ms: " + std::to_string(req.timeout_ms) + "\n");

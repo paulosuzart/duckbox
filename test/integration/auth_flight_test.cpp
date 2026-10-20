@@ -135,6 +135,20 @@ void duckbox::test::RunAuthFlightTests() {
 		ExpectThrowContains(
 		    [&] { AuthenticateCallerIdentity(locked, "wrong-secret", "wrong-secret", "", ListenerPlane::Internal); },
 		    "invalid caller", "wrong peer secret is rejected");
+		DaemonConfig jwt_peer;
+		jwt_peer.auth_mode = AuthMode::Token;
+		jwt_peer.jwt_secret = "jwt-hs256-secret";
+		jwt_peer.allow_insecure_dev = false;
+		ExpectThrowContains(
+		    [&] {
+			    AuthenticateCallerIdentity(jwt_peer, "", MkJwt(jwt_peer.jwt_secret, "peer", "HS256"), "");
+		    },
+		    "reserved", "JWT sub=peer is rejected");
+		DaemonConfig dev;
+		dev.allow_insecure_dev = true;
+		ExpectThrowContains([&] { AuthenticateCallerIdentity(dev, "", "", "peer"); }, "reserved",
+		                    "dev header identity peer is rejected");
+		AuthorizeCaller(locked, kPeerIdentity, "tenant_21:user_sergio");
 
 		DaemonConfig tok;
 		tok.auth_mode = AuthMode::Token;
@@ -538,6 +552,22 @@ void duckbox::test::RunAuthFlightTests() {
 			opopt.headers.emplace_back("x-duckbox-caller", "ops");
 			auto drained = ActionBody(*iclient, opopt, "DrainNode", "timeout_ms: 1\n");
 			Expect(drained.find("\"draining\":true") != std::string::npos, "DrainNode allows a listed operator");
+			auto status = ActionBody(*iclient, opopt, "NodeStatus", "");
+			Expect(status.find("\"draining\":true") != std::string::npos, "NodeStatus shows draining");
+		}
+		{
+			NodeCliRequest nr;
+			nr.url = "grpc://127.0.0.1:" + std::to_string(iport);
+			nr.peer_secret = "peer-secret-value";
+			nr.timeout_ms = 1;
+			Expect(RunNodeDrain(nr) == 0, "drain CLI authenticates with --peer-secret");
+			nr.peer_secret.clear();
+			nr.token = "unused";
+			nr.caller = "ops";
+			Expect(RunNodeDrain(nr) != 0, "drain CLI --token without a valid credential fails handshake");
+			NodeCliRequest bad;
+			bad.url = "not a uri !!!";
+			Expect(RunNodeDrain(bad) != 0, "drain CLI rejects a bad URL");
 		}
 		{
 			arrow::flight::FlightCallOptions none;

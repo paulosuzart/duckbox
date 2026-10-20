@@ -423,10 +423,21 @@ std::string ProbeControlPlaneS3(const LeaseSettings &lease) {
 		}
 		key += ".duckbox-cw-probe";
 		auto put = client->Put(key, "duckbox-lease-probe", "", "*");
-		if (put.status == 200 || put.status == 204 || put.status == 412) {
+		if (put.status != 200 && put.status != 204 && put.status != 412) {
+			return put.error.empty() ? "conditional PUT (If-None-Match) failed" : put.error;
+		}
+		auto got = client->Get(key);
+		if (got.status != 200) {
+			if (put.status == 200 || put.status == 204) {
+				return got.error.empty() ? "probe GET after PUT failed" : got.error;
+			}
 			return "";
 		}
-		return put.error.empty() ? "conditional PUT (If-None-Match) failed" : put.error;
+		auto del = client->Delete(key, got.etag);
+		if (del.status != 200 && del.status != 204 && del.status != 404 && del.status != 412) {
+			return del.error.empty() ? "conditional DELETE (If-Match) failed" : del.error;
+		}
+		return "";
 	} catch (const std::exception &e) {
 		return e.what();
 	}

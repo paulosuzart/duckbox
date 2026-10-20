@@ -16,6 +16,7 @@
 #include <arrow/table.h>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <thread>
 
@@ -81,8 +82,11 @@ void duckbox::test::RunClusterTests() {
 	rt_b.Drain();
 	Expect(leases_b->draining(), "drain marks the node");
 	Expect(!leases_b->Peek("cluster-box").owned_locally, "drain releases owned leases");
+	auto tomb = leases_b->Peek("cluster-box");
+	Expect(tomb.owner_id.empty() && tomb.epoch >= 1, "drain tombstones the lease and keeps epoch");
 	auto box_again = rt_a.Get(rec);
 	Expect(box_again && leases_a->Peek("cluster-box").owned_locally, "peer acquires after drain with no rebalance");
+	Expect(leases_a->Peek("cluster-box").epoch == tomb.epoch + 1, "epoch is monotonic across drain handoff");
 
 	{
 		auto rec2 = rec;
@@ -183,7 +187,81 @@ void duckbox::test::RunClusterTests() {
 			request_failed = true;
 		}
 		Expect(request_failed, "request path sees the fence");
+
+		auto inner2 = MakeMemoryS3ControlClient("hb2");
+		auto faulty2 = std::make_shared<FaultyS3ControlClient>(inner2);
+		auto clock2 = std::make_shared<FakeClock>(6'000'000);
+		S3LeaseOptions opt2 = opt_hb;
+		opt2.owner_id = "node-outage";
+		auto leases2 = std::make_shared<S3ConditionalLeaseManager>(faulty2, opt2, metrics_hb, clock2);
+		auto nodes2 = std::make_shared<S3NodeDirectory>(faulty2, opt2, metrics_hb, clock2);
+		auto daemon2 = TestDaemon();
+		daemon2.name = "node-outage";
+		auto defs2 = std::make_shared<S3SandboxRegistry>(faulty2);
+		SandboxRuntime rt2(daemon2, leases2, defs2);
+		rt2.SetNodeDirectory(nodes2);
+		rt2.SetClock(clock2);
+		std::string fence2;
+		rt2.SetFenceHook([&](const std::string &r) { fence2 = r; });
+		rt2.TickLeases();
+		Expect(rt2.Serving(), "outage fixture publishes a node lease");
+		faulty2->SetDown(true);
+		clock2->AdvanceMs(15'000);
+		rt2.TickLeases();
+		Expect(rt2.fenced() && fence2 == "node_lease_watchdog_fence", "S3 outage longer than TTL self-fences");
+		faulty2->SetDown(false);
+		auto nodes2b = std::make_shared<S3NodeDirectory>(faulty2, opt2, metrics_hb, clock2);
+		auto leases2b = std::make_shared<S3ConditionalLeaseManager>(faulty2, opt2, metrics_hb, clock2);
+		SandboxRuntime rt2b(daemon2, leases2b, defs2);
+		rt2b.SetNodeDirectory(nodes2b);
+		rt2b.SetClock(clock2);
+		std::string fence2b;
+		rt2b.SetFenceHook([&](const std::string &r) { fence2b = r; });
+		rt2b.TickLeases();
+		Expect(!rt2b.fenced() && rt2b.Serving() && fence2b.empty(),
+		       "restart after S3 returns takes over the same node_id");
 		SetMetrics(nullptr);
+	}
+
+	{
+		auto daemon_d = TestDaemon();
+		auto leases_d = std::make_shared<S3ConditionalLeaseManager>(s3, opt_a, std::shared_ptr<IMetrics>{}, clock);
+		SandboxRuntime rt_d(daemon_d, leases_d, defs);
+		rt_d.SetClock(clock);
+		rt_d.SetFenceHook([](const std::string &) {});
+		rt_d.BeginRequest();
+		Expect(rt_d.Inflight() == 1, "in-flight counter increments");
+		std::thread waiter([&] { rt_d.Drain(200); });
+		std::this_thread::sleep_for(std::chrono::milliseconds(30));
+		Expect(leases_d->draining(), "drain waits on in-flight requests");
+		rt_d.EndRequest();
+		waiter.join();
+		Expect(rt_d.Inflight() == 0, "in-flight counter returns to zero");
+	}
+
+	{
+		auto rec_u = rec;
+		rec_u.id = "ownerless-box";
+		rec_u.spec.id = rec_u.id;
+		rec_u = defs->Create(rec_u);
+		auto leases_u = std::make_shared<S3ConditionalLeaseManager>(s3, opt_a, std::shared_ptr<IMetrics>{}, clock);
+		SandboxRuntime rt_u(daemon_a, leases_u, defs);
+		rt_u.SetClock(clock);
+		rt_u.SetFenceHook([](const std::string &) {});
+		leases_u->SetDraining(true);
+		bool unavailable = false;
+		try {
+			(void)rt_u.Get(rec_u);
+		} catch (const UnavailableError &) {
+			unavailable = true;
+		} catch (const RedirectError &re) {
+			Expect(false, std::string("ownerless Get redirected with flight=") + re.flight());
+		} catch (const Error &e) {
+			unavailable = std::string(e.what()).find("retry") != std::string::npos ||
+			              std::string(e.what()).find("draining") != std::string::npos ||
+			              std::string(e.what()).find("no owner") != std::string::npos;
+		}
+		Expect(unavailable, "ownerless Get during drain is retryable, not an empty advertise URL");
 	}
 
 	{

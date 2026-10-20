@@ -19,7 +19,10 @@
 
 namespace duckbox {
 
-// Writer fence. epoch is included in lake writes; a stolen lease bumps epoch so stale writers fail.
+// Writer fence. epoch lives on the S3 lease object only — it is not written into
+// the lake. Steal / re-create after a tombstone bumps epoch; renew and steal
+// verify the token so a stale owner cannot keep the record. Lake safety is the
+// node self-fence (exit 3) plus a supervisor restart, not an epoch column in DuckLake.
 struct Lease {
 	std::string resource;   // sandbox id (SingleNode may store a tenant key)
 	std::string tenant_key; // same as resource; kept for existing call sites
@@ -91,6 +94,15 @@ public:
 	virtual void set_flight(std::string flight) {
 		(void)flight;
 	}
+	// Locally remembered lease for this id (etag/epoch/owner from our last
+	// successful acquire/renew). Missing => epoch 0, empty owner. Drain and
+	// TickLeases must use this, never Peek (Peek is the CURRENT S3 owner).
+	virtual Lease Held(const std::string &resource_id) {
+		Lease miss;
+		miss.resource = resource_id;
+		miss.tenant_key = resource_id;
+		return miss;
+	}
 };
 
 using LeaseManager = ILeaseManager;
@@ -127,6 +139,7 @@ public:
 	bool healthy() const override;
 	std::vector<std::string> OwnedIds() const override;
 	void ReleaseOwned() override;
+	Lease Held(const std::string &resource_id) override;
 
 private:
 	bool draining_ = false;
@@ -145,6 +158,8 @@ struct S3LeaseOptions {
 	std::string prefix = "leases/";
 	int64_t ttl_ms = 15000;
 	int64_t heartbeat_ms = 5000;
+	int64_t skew_ms = 0;    // steal margin vs local clock; production YAML default 1000
+	int64_t cache_ms = 0;   // 0 = no Acquire cache; production YAML default 250
 	size_t max_leases = 0; // 0 = unlimited
 	std::string version;
 };
@@ -158,6 +173,7 @@ struct NodeRecord {
 	std::string version;
 	int64_t expiry_ms = 0;
 	std::string etag;
+	bool draining = false;
 };
 
 // Heartbeat records under {prefix}nodes/{id}.json. Peers discover each other via ListKeys.
@@ -167,7 +183,10 @@ public:
 	                std::shared_ptr<Clock> clock = {});
 	void Heartbeat();
 	void Deregister();
-	std::vector<NodeRecord> List(); // live (unexpired) nodes
+	std::vector<NodeRecord> List(); // live (unexpired, not draining) nodes
+	void SetDraining(bool v);
+	bool draining() const;
+	bool IsKnownFlight(const std::string &flight); // advertise URL in the live directory
 	void set_flight(std::string flight) {
 		opt_.flight = std::move(flight);
 	}
@@ -190,15 +209,20 @@ private:
 	std::string ObjectKey(const std::string &node_id) const;
 	std::string Encode(const NodeRecord &n) const;
 	NodeRecord Parse(const S3Object &obj) const;
+	std::vector<NodeRecord> ListUncached();
+	void PutHeartbeatLocked(); // caller holds mu_
 
 	std::shared_ptr<S3ControlClient> client_;
 	S3LeaseOptions opt_;
 	std::shared_ptr<IMetrics> metrics_;
 	std::shared_ptr<Clock> clock_;
+	mutable std::mutex mu_;
 	int64_t started_at_ms_ = 0;
 	std::string etag_;
 	std::string last_body_;
 	int64_t published_expiry_ms_ = 0;
+	bool draining_ = false;
+	int64_t live_cache_ms_ = 0;
 };
 
 // S3 If-None-Match:* create, If-Match renew/steal/release. Clock is injectable for TTL tests.
@@ -217,24 +241,30 @@ public:
 	std::vector<std::string> OwnedIds() const override;
 	void ReleaseOwned() override;
 	void set_flight(std::string flight) override;
+	Lease Held(const std::string &resource_id) override;
 
 	const std::string &owner_id() const {
 		return opt_.owner_id;
 	}
 
 private:
+	struct HeldLease {
+		Lease lease;
+		int64_t cache_until_ms = 0;
+	};
 	std::string ObjectKey(const std::string &resource_id) const;
 	Lease ParseRecord(const S3Object &obj) const;
 	std::string Encode(const Lease &lease) const;
 	Lease Load(const std::string &resource_id);
 	void Remember(const Lease &lease);
 	void Forget(const std::string &resource_id);
+	Lease CachedAcquire(const std::string &resource_id);
 
 	std::shared_ptr<S3ControlClient> client_;
 	S3LeaseOptions opt_;
 	std::shared_ptr<Clock> clock_;
 	mutable std::mutex mu_;
-	std::unordered_map<std::string, std::string> etags_;
+	std::unordered_map<std::string, HeldLease> held_;
 	bool draining_ = false;
 	bool healthy_ = true;
 };

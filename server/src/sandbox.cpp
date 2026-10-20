@@ -579,14 +579,40 @@ void SandboxRuntime::PassivateId(const std::string &id, const char *reason, int 
 	PublishResidentLocked();
 }
 
+void SandboxRuntime::BeginRequest() {
+	inflight_.fetch_add(1);
+}
+
+void SandboxRuntime::EndRequest() {
+	if (inflight_.fetch_sub(1) == 1) {
+		std::lock_guard<std::mutex> hold(drain_mu_);
+		drain_cv_.notify_all();
+	}
+}
+
+void SandboxRuntime::InterruptId(const std::string &id) {
+	std::lock_guard<std::mutex> hold(mu_);
+	auto prefix = id + "@";
+	for (auto &kv : boxes_) {
+		if (kv.first == id || kv.first.rfind(prefix, 0) == 0) {
+			kv.second->Interrupt();
+		}
+	}
+}
+
 std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
 	AssertServing();
 	auto key = ParseTenantKey(rec.key, rec.spec.key);
 	auto lease = leases_->Acquire(rec.id);
 	if (!lease.owned_locally) {
+		if (lease.owner_id.empty() || lease.flight.empty()) {
+			throw UnavailableError("sandbox has no owner; retry");
+		}
+		if (nodes_ && !nodes_->IsKnownFlight(lease.flight)) {
+			throw UnavailableError("peer advertise URL is not a registered node");
+		}
 		Metrics().IncRoute("redirect");
-		throw RedirectError(lease.owner_id.empty() ? "none" : lease.owner_id,
-		                    lease.flight.empty() ? "" : lease.flight);
+		throw RedirectError(lease.owner_id, lease.flight);
 	}
 	if (router_) {
 		router_->Decide(key);
@@ -735,7 +761,10 @@ void SandboxRuntime::Fence(const std::string &reason) {
 	for (auto &id : ids) {
 		PassivateId(id, "self_fence");
 	}
-	std::clog << "SELF-FENCE: " << reason << "\n";
+	Json fence_log;
+	fence_log["event"] = "self_fence";
+	fence_log["reason"] = reason;
+	std::clog << fence_log.dump() << "\n";
 	if (fence_hook_) {
 		fence_hook_(reason);
 		return;
@@ -770,18 +799,25 @@ void SandboxRuntime::TickLeases() {
 				Fence("node_lease_watchdog_fence");
 				return;
 			}
-			std::clog << "{\"event\":\"node_lease_retry\",\"reason\":\"" << why << "\"}\n";
+			Json retry;
+			retry["event"] = "node_lease_retry";
+			retry["reason"] = why;
+			std::clog << retry.dump() << "\n";
 		}
 	}
 	if (leases_) {
 		Metrics().SetNodeHealthy(Serving());
 		for (auto &id : leases_->OwnedIds()) {
 			try {
-				leases_->Renew(leases_->Peek(id));
+				leases_->Renew(leases_->Held(id));
 			} catch (const std::exception &e) {
+				InterruptId(id);
 				PassivateId(id, "lease_lost");
-				std::clog << "{\"event\":\"lease_lost\",\"resource\":\"" << id << "\",\"reason\":\"" << e.what()
-				          << "\"}\n";
+				Json lost;
+				lost["event"] = "lease_lost";
+				lost["resource"] = id;
+				lost["reason"] = e.what();
+				std::clog << lost.dump() << "\n";
 			}
 		}
 		if (!nodes_) {
@@ -790,7 +826,10 @@ void SandboxRuntime::TickLeases() {
 				node.tenant_key = "__node__";
 				leases_->Renew(node);
 			} catch (const std::exception &e) {
-				std::clog << "{\"event\":\"node_renew\",\"reason\":\"" << e.what() << "\"}\n";
+				Json nr;
+				nr["event"] = "node_renew";
+				nr["reason"] = e.what();
+				std::clog << nr.dump() << "\n";
 			}
 		}
 	} else {
@@ -802,11 +841,20 @@ void SandboxRuntime::Drain(int64_t timeout_ms) {
 	if (leases_) {
 		leases_->SetDraining(true);
 	}
+	if (nodes_) {
+		nodes_->SetDraining(true);
+		try {
+			nodes_->Heartbeat();
+		} catch (const std::exception &) {
+		}
+	}
 	if (timeout_ms > 0) {
 		if (timeout_ms > 60000) {
 			timeout_ms = 60000;
 		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+		std::unique_lock<std::mutex> hold(drain_mu_);
+		drain_cv_.wait_for(hold, std::chrono::milliseconds(timeout_ms),
+		                   [this] { return inflight_.load() <= 0 || fenced_.load(); });
 	}
 	if (leases_) {
 		leases_->ReleaseOwned();

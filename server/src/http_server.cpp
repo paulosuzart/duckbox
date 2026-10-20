@@ -65,6 +65,7 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
 			auto key = AuthenticateSandbox(rec.spec, rec.key, auth);
 			(void)key;
 			auto sql = JsonGetString(req.body, "sql");
+			SandboxRuntime::RequestGuard inflight(*runtime);
 			auto box = runtime->Get(rec);
 			auto out = box->Execute(sql);
 			res.status = 200;

@@ -49,6 +49,10 @@ The public Flight SQL listener must **not** serve `DrainNode`, `NodeStatus`, or 
 
 Peer calls authenticate with a **shared peer secret** from `auth.peer_secret_ref` (`env:` or `file:` only). The value is resolved into memory and is never stored as plaintext in YAML (`auth.peer_secret` is rejected). The caller’s bearer is not forwarded.
 
+The identity `"peer"` is **reserved**. It is granted only when the request presents the peer secret on the **internal** listener. A JWT `sub=peer`, an `auth.bearer_secrets` identity of `peer`, or `x-duckbox-caller: peer` is rejected. The peer secret must be at least 16 characters (leading/trailing whitespace trimmed); a `file:` secret that is world-readable is refused.
+
+**TLS between peers:** set `lease.advertise` to a `grpc+tls://host:port` URL (parsed with Arrow `Location::Parse`). Put the internal listener on a private network or overlay, and terminate TLS there (or use mTLS at the mesh / load balancer). The peer secret is a bearer on that channel — it is not a substitute for transport encryption. duckbox does not currently load custom peer TLS certs from YAML; use `grpc+tls://` plus the platform’s default trust store, or wrap the internal port in a sidecar/mesh.
+
 ## Self-fencing
 
 The **node lease** (heartbeat object `{prefix}nodes/{node_id}.json`) is the fence, not each sandbox lease.
@@ -56,10 +60,11 @@ The **node lease** (heartbeat object `{prefix}nodes/{node_id}.json`) is the fenc
 - Renew at about **1/3 of TTL** (`lease.heartbeat`, default `ttl/3`).
 - A failed renewal is retried while the **published expiry** has not passed (a short S3 blip must not fence).
 - When the published expiry passes, **or** the node lease record is gone / does not match what this process published: **fence**.
-- Fence: interrupt every in-flight statement, passivate every sandbox, fail subsequent requests, log `SELF-FENCE:`, exit **3**. Fence writes nothing (no lease Release, no heartbeat delete).
+- Fence: interrupt every in-flight statement, passivate every sandbox, fail subsequent requests, log a JSON `self_fence` event, exit **3**. Fence writes nothing (no lease Release, no heartbeat delete).
 - Every routed request calls `AssertServing` so a request is refused if expiry has already passed, even before the watchdog tick.
+- A 412 on the node heartbeat is **re-read**. The process fences only if the S3 record is missing or belongs to a different `node_id`. A restart of the same `node_id` takes over via If-Match (registration is idempotent). `nodes/{id}.json` is not deleted on crash; SIGTERM drains, tombstones owned sandbox leases, then deregisters.
 
-A sandbox lease renew failure (412, epoch mismatch, transport) still passivates **that** sandbox only.
+A sandbox lease renew failure (412, epoch mismatch, transport) interrupts in-flight SQL for **that** sandbox, then passivates it.
 
 ### The supervisor
 
@@ -69,7 +74,9 @@ Do **not** stay alive unhealthy. Run the daemon under a supervisor that restarts
 - Docker (`restart: unless-stopped` / `always`)
 - Kubernetes (pod restart)
 
-Use **unlimited restarts** and a delay of **at least one lease TTL** between attempts so a fenced node cannot race a peer that is stealing expired sandbox leases. `SelfFence` is exit 3 so the supervisor and alerts see a crash-restart, not a hanging process.
+Use **unlimited restarts**. After SIGKILL or an S3 outage longer than TTL, every node self-fences (exit 3). Once S3 is healthy, the supervisor must start the same `node_id` again; startup **takes over** the existing node record (If-Match) instead of crashing on If-None-Match `*`.
+
+Size `lease.ttl` **strictly larger than the longest S3 blip you will tolerate without a restart**, and size the supervisor restart delay **at least one TTL** so a fenced node cannot race a peer that is stealing expired sandbox leases. Example: if object storage can pause for 30s, set TTL to 45s+ (heartbeat ~TTL/3). An outage shorter than TTL is retried; an outage longer than TTL is a fence + restart. `SelfFence` is exit 3 so the supervisor and alerts see a crash-restart, not a hanging process.
 
 ## Lease lifecycle
 
@@ -78,7 +85,7 @@ stateDiagram-v2
     [*] --> Free: no object
     Free --> Owned: If-None-Match:* epoch=1
     Owned --> Owned: If-Match renew (same epoch, new expiry)
-    Owned --> Free: If-Match delete (drain / release)
+    Owned --> Free: If-Match tombstone (drain / release; epoch kept)
     Owned --> Stolen: expiry passed, peer If-Match epoch++
     Stolen --> Owned: new owner renews
     Owned --> Lost: renew 412 / epoch mismatch
@@ -87,10 +94,12 @@ stateDiagram-v2
     Fenced --> [*]: interrupt all, passivate all, exit 3
 ```
 
-- **Acquire** (If-None-Match `*`): create epoch 1. If another node holds an unexpired lease, return `owned_locally=false` (proxy). If expired, steal with If-Match and `epoch++` (fencing token). Draining nodes do not take new leases.
-- **Renew** (If-Match): bump `expiry_ms`. Failure is `LeaseLostError`; the renew thread passivates that sandbox. A stale owner cannot keep serving.
-- **Release** (If-Match delete): drain and explicit release.
-- Check ownership on every `SandboxRuntime::Get` (every query path).
+- **Acquire** (If-None-Match `*`): create epoch 1. If another node holds an unexpired lease, return `owned_locally=false` (proxy). If expired or tombstoned (`owner_id` empty), steal with If-Match and `epoch++` (fencing token). Draining nodes do not take new leases.
+- **Renew** (If-Match on the **locally remembered** lease): bump `expiry_ms`, keep epoch. Verifies `owner_id == self`. Failure is `LeaseLostError`; the renew thread interrupts then passivates that sandbox. Never `Renew(Peek)` — Peek is the current S3 owner and would make the etag/epoch check tautological.
+- **Release** (If-Match **tombstone**): clear `owner_id` / `flight` / `expiry_ms`, **keep epoch**. Drain uses remembered leases only, so it cannot delete another node’s live record. Epoch never resets on release; the next acquire is `epoch+1`.
+- Check ownership on every `SandboxRuntime::Get` (every query path), with a short optional `lease.cache_ms` window.
+
+`epoch` is **not** included in lake writes. The real guarantees are: (1) CAS on the S3 lease object (If-Match / If-None-Match + monotonic epoch) so a stale owner cannot keep or silently reclaim the record; (2) the node self-fence so a process that lost its node lease stops serving. DuckLake / catalog rows do not carry the epoch.
 
 Heartbeat records live next to leases: `{prefix}nodes/{node_id}.json` (`node_id`, `flight` = internal advertise URL, `started_at_ms`, `version`, `expiry_ms`). Peers `ListKeys` that prefix and ignore expired rows.
 
@@ -107,8 +116,11 @@ Under `lease:` in the daemon YAML (all optional except the S3 endpoint block you
 | `skip_probe` | `false` | Skip If-None-Match startup probe. |
 | `node_id` | daemon `name` | Must be unique in the cluster. |
 | `advertise` | `grpc://` + `internal_listen` | **Internal** URL peers dial. Use a reachable private host, not `0.0.0.0`. |
-| `ttl` / `ttl_ms` | `15s` | Lease and heartbeat TTL. |
+| `ttl` / `ttl_ms` | `15s` | Lease and heartbeat TTL. Must exceed the longest S3 blip you want to survive without a restart. |
 | `heartbeat` / `heartbeat_ms` | `ttl/3` (min 1s) | Node-lease renew interval. |
+| `skew` / `skew_ms` | `1s` | Extra wait past `expiry_ms` before stealing another node’s lease (local-clock skew margin). |
+| `cache_ms` | `250` | Short Acquire cache. `0` disables. Must stay well below TTL. |
+| `proxy_timeout` / `proxy_timeout_ms` | `5s` | Deadline for peer Flight proxy RPCs. |
 | `max_leases` | `0` (unlimited) | Optional cap of sandboxes this node will own. |
 
 Top-level / `auth:`:
@@ -134,34 +146,38 @@ Example cluster files: `daemons/cluster-node-a.yaml`, `cluster-node-b.yaml`, `cl
 
 ```bash
 duckbox node drain --url grpc://127.0.0.1:5748 --timeout 5000
+duckbox node drain --url grpc://127.0.0.1:5748 --token "$JWT"
+duckbox node drain --url grpc://127.0.0.1:5748 --peer-secret env:DUCKBOX_PEER_SECRET
 ```
 
-`--url` is the **internal** listener. `DrainNode` on the public listener is rejected.
+`--url` is the **internal** listener. `DrainNode` on the public listener is rejected. `--token` sends `Authorization: Bearer` (JWT / bearer secret). `--peer-secret` handshakes with the peer secret (`env:` / `file:` / literal).
 
 `DrainNode` is a **node-admin** action. The AI agent is an authenticated caller and must not drain a node. Authorization is `auth.operators` in the daemon YAML (deny by default: an empty list denies everyone, including under `allow_insecure_dev`). Cluster examples list `local` so `duckbox node drain --caller local` works. `auth.callers` (sandbox CRUD) is a separate list — an analyst identity can create sandboxes and still be denied DrainNode.
 
 `DrainNode` (internal Flight DoAction):
 
 1. `AuthorizeOperator` — reject non-operators.
-2. Stop taking **new** leases.
-3. Wait up to `timeout_ms` (cap 60s) so in-flight queries can finish.
-4. Release owned leases (If-Match delete) so peers can acquire.
+2. Stop taking **new** leases and persist `draining: true` on the node record (so a later heartbeat cannot re-register as live).
+3. Wait up to `timeout_ms` (cap 60s) for the in-flight request counter to reach zero.
+4. Tombstone owned leases (If-Match, remembered etag, `owner_id == self`) so peers can acquire.
 5. Passivate local DuckDB instances.
-6. Delete the heartbeat object.
+6. SIGTERM also deregisters the heartbeat object after drain.
 
-Then stop the process (`SIGINT`). Clients that still hit this node after release are proxied to the new owner (or fail if none is up yet).
+Then stop the process (`SIGINT` / `SIGTERM`). Clients that still hit this node after release are proxied to the new owner (or get a retryable error if none is up yet). An ownerless sandbox during drain does **not** return an empty advertise URL.
+
+The proxy validates `lease.flight` against the live node directory before dialing, and returns a generic `peer proxy failed` to clients (peer address is logged server-side only).
 
 ## Crash / partition
 
 If a process dies, heartbeats and leases expire after `ttl`. Another node acquires the sandbox, loads the definition from the S3 registry, and warms DuckDB (initSQL reruns). Clients keep talking to whatever public node they already use; that node proxies to the new owner after expiry.
 
-A renew failure on a sandbox (412, epoch mismatch, or transport error) passivates **that** sandbox only, before its TTL expires. Epoch fencing stays the write-side correctness guarantee: a stolen lease bumps `epoch`, so a stale writer cannot keep the lake.
+A renew failure on a sandbox (412, epoch mismatch, or transport error) interrupts then passivates **that** sandbox only, before its TTL expires. Epoch is a CAS fencing token on the S3 lease object only; it is not written into the lake.
 
-A failed **node heartbeat** PUT does **not** immediately exit. While the published expiry is still in the future, the node retries. When expiry passes (or the record is missing/mismatched), it self-fences and exits 3. An S3 blip shorter than TTL does not fence.
+A failed **node heartbeat** PUT does **not** immediately exit. While the published expiry is still in the future, the node retries. When expiry passes (or the record is missing / a **different** `node_id`), it self-fences and exits 3. An S3 blip shorter than TTL does not fence. An S3 outage longer than TTL fences every node; the supervisor restarts them and they take over their own `node_id` once S3 returns.
 
 ## Clock skew
 
-Steal compares `expiry_ms` in the object to the node's local clock (injectable in tests). If node B's clock is **ahead** of A by more than the remaining TTL, B may steal early. If B is **behind**, failover is delayed. Keep NTP (or equivalent) within a small fraction of `lease.ttl` (a few seconds if TTL is 15s). duckbox does not wait on a centralized clock.
+Steal compares `expiry_ms` in the object to the node's local clock (injectable in tests), plus `lease.skew` (default 1s). A node is treated as expired only when `expiry_ms + skew_ms <= now`, which delays an early steal if our clock is ahead. If B is **behind**, failover is delayed by TTL plus skew. Keep NTP (or equivalent) within a small fraction of `lease.ttl`. duckbox does not wait on a centralized clock.
 
 ## Limits
 
@@ -224,6 +240,7 @@ PY
 
 # graceful remove (internal listener):
 ./build/duckbox node drain --url grpc://127.0.0.1:5748
+# or: --token "$JWT" / --peer-secret env:DUCKBOX_PEER_SECRET
 ```
 
 CI runs the same flow as `scripts/e2e_multi_node.sh` (create bucket, three daemons, query via a non-owner, kill owner, query, drain on the internal listener, query).

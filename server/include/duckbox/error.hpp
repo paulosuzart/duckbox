@@ -73,6 +73,13 @@ public:
 	}
 };
 
+// Owner is missing or the peer is not ready. Clients should retry.
+class UnavailableError : public Error {
+public:
+	explicit UnavailableError(const std::string &msg) : Error(msg) {
+	}
+};
+
 // This node is not the owner. Internal proxy trigger only — never returned to
 // clients. `what()` is `duckbox redirect owner=ID location=URL` (the owner's
 // internal advertise address). Endpoint locations sent to clients stay empty.
