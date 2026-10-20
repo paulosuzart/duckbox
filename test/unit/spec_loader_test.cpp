@@ -340,10 +340,14 @@ void duckbox::test::RunSpecLoaderTests() {
 			adv.lease.advertise = "grpc://10.0.0.8:5747";
 			ExpectThrowContains([&] { ValidateDaemonOrThrow(adv); }, "internal_listen",
 			                    "explicit advertise requires internal_listen");
-			DaemonConfig cluster = TestDaemon();
-			cluster.lease.endpoint = "http://127.0.0.1:9";
-			cluster.lease.bucket = "b";
-			cluster.lease.skip_probe = true;
+			DaemonConfig single = TestDaemon();
+			single.lease.endpoint = "http://127.0.0.1:9";
+			single.lease.bucket = "b";
+			single.lease.skip_probe = true;
+			ValidateDaemonOrThrow(single);
+			DaemonConfig cluster = single;
+			cluster.internal_listen = "127.0.0.1:5747";
+			cluster.internal_listen_configured = true;
 			ExpectThrowContains([&] { ValidateDaemonOrThrow(cluster); }, "peer_secret_ref",
 			                    "multi-node requires a resolved peer secret");
 		}

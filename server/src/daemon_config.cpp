@@ -372,7 +372,8 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 	} catch (const std::exception &e) {
 		add("internal_listen", e.what());
 	}
-	if ((!cfg.lease.endpoint.empty() || !cfg.lease.endpoint_env.empty()) && cfg.peer_secret.empty()) {
+	if (cfg.internal_listen_configured && (!cfg.lease.endpoint.empty() || !cfg.lease.endpoint_env.empty()) &&
+	    cfg.peer_secret.empty()) {
 		add("auth.peer_secret_ref", "required for multi-node (env: or file:; never a plaintext value)");
 	}
 	if (!cfg.metrics_listen.empty() && cfg.metrics_listen != "off" && cfg.metrics_listen != "false") {

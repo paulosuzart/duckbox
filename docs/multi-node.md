@@ -117,7 +117,7 @@ Top-level / `auth:`:
 | --- | --- | --- |
 | `internal_listen` | loopback, public port+1000 | Internal peer/operator bind. Required when `listen` is not loopback or `lease.advertise` is set. |
 | `auth.operators` | empty (deny all) | Identities allowed to `DrainNode` / `NodeStatus`. |
-| `auth.peer_secret_ref` | required if lease endpoint set | `env:` or `file:` only. Never a plaintext value. |
+| `auth.peer_secret_ref` | required when `internal_listen` is set with a lease endpoint | `env:` or `file:` only. Never a plaintext value. Single-node S3 registry (no `internal_listen`) does not need it. |
 
 All nodes **must share** `handle_secret` (HMAC handles), the lease prefix, and the peer secret. They should not share lake credentials on the daemon.
 

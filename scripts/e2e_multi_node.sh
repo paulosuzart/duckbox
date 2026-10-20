@@ -60,10 +60,16 @@ PID_B=$!
 "$BIN" serve --daemon "$ROOT/daemons/cluster-node-c.yaml" --no-metrics &
 PID_C=$!
 cleanup() {
+	local p
 	for p in ${PID_A:-} ${PID_B:-} ${PID_C:-}; do
 		kill "$p" 2>/dev/null || true
 	done
-	wait 2>/dev/null || true
+	sleep 1
+	for p in ${PID_A:-} ${PID_B:-} ${PID_C:-}; do
+		if kill -0 "$p" 2>/dev/null; then
+			kill -9 "$p" 2>/dev/null || true
+		fi
+	done
 }
 trap cleanup EXIT
 
@@ -78,8 +84,18 @@ wait_port 5749
 	--spec "$ROOT/policies/memory/analyst.yaml" \
 	--id cluster-analyst --key tenant_21:user_sergio
 
+"$PY" - <<'PY'
+from duckbox_client import connect
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=5)
+df = db.query("SELECT id, title FROM deals ORDER BY id")
+assert len(df) >= 1, df
+print("warmup query via node-a ok", list(df["id"]))
+db.close()
+PY
+
 LIST="$("$BIN" sandbox list --url grpc://127.0.0.1:4748 --id-prefix cluster-analyst)"
 echo "$LIST"
+echo "$LIST" | grep -q '"id":"cluster-analyst"'
 echo "$LIST" | grep -q '"owner":"node-a"'
 
 "$PY" - <<'PY'
@@ -87,7 +103,7 @@ from duckbox_client import connect
 db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=5)
 df = db.query("SELECT id, title FROM deals ORDER BY id")
 assert len(df) >= 1, df
-print("query via node-b ok", list(df["id"]))
+print("query via non-owner node-b ok", list(df["id"]))
 db.close()
 PY
 
