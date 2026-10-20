@@ -1,0 +1,35 @@
+# Cluster member B. Same lease prefix as A/C; unique name, listen, metrics, advertise.
+name: node-b
+listen: 127.0.0.1:4748
+auth:
+  mode: trusted
+  allow_insecure_dev: true
+lake_allow:
+  s3_endpoints:
+    - "127.0.0.1:9000"
+  secret_refs:
+    - env:DUCKBOX_S3_KEY
+    - env:DUCKBOX_S3_SECRET
+    - env:DUCKBOX_LAKE_CATALOG
+limits:
+  handle_ttl_seconds: 300
+  idle_evict_ms: 300000
+  idle_timeout: 5m
+  max_idle_timeout: 1h
+  max_sandboxes: 600
+  init_sql_timeout_ms: 8000
+handle_secret_env: DUCKBOX_HANDLE_SECRET
+metrics:
+  listen: 127.0.0.1:9478
+  policy_classes:
+    - analyst
+lease:
+  endpoint: "http://127.0.0.1:9000"
+  bucket: duckbox-control
+  prefix: leases/
+  access_key_env: DUCKBOX_S3_KEY
+  secret_key_env: DUCKBOX_S3_SECRET
+  node_id: node-b
+  advertise: grpc://127.0.0.1:4748
+  ttl: 5s
+  heartbeat: 1s

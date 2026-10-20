@@ -198,7 +198,7 @@ v1 wire protocol. JDBC and ADBC work. Headers:
 - `x-duckbox-caller` — trusted caller identity; used only when `auth.allow_insecure_dev` is set and no bearer/JWT is configured
 - `Authorization: Bearer` — static `auth.bearer_secrets` or HS256 JWT (`auth.jwt_secret`). `alg` must be `"HS256"` exactly (not a substring); `exp` is required (`nbf` optional, 60s leeway). Unsigned tokens are rejected
 
-CRUD actions: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes`, `ExpireSandbox`. Create/Update body is spec YAML; ListSandboxes YAML body filters `id_prefix`, `key_prefix`, `policy_class`, `state` (`warm`|`passive`|`defined`) plus `limit`/`offset`. Each list item is a summary (`id`, `key`, `version`, `policy_class`, `state`, `owner`, `created_at`, `updated_at`, `last_used_at`, `expires_at`) — not the full spec. `ExpireSandbox` passivates the instance and invalidates prepared handles; the definition stays.
+CRUD actions: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes`, `ExpireSandbox`, `DrainNode`. Create/Update body is spec YAML; ListSandboxes YAML body filters `id_prefix`, `key_prefix`, `policy_class`, `state` (`warm`|`passive`|`defined`) plus `limit`/`offset`. Each list item is a summary (`id`, `key`, `version`, `policy_class`, `state`, `owner`, `created_at`, `updated_at`, `last_used_at`, `expires_at`) — not the full spec. `owner` is the live lease holder. `ExpireSandbox` passivates the instance and invalidates prepared handles; the definition stays. `DrainNode` is `duckbox node drain`.
 
 Optional spec `lifecycle.idle_timeout` passivates an idle instance (daemon `limits.idle_timeout` / `idle_evict_ms` is the default; `limits.max_idle_timeout` caps it). `lifecycle.ttl` / `lifecycle.expires_at` tombstone the definition.
 
@@ -206,7 +206,7 @@ Optional spec `lifecycle.idle_timeout` passivates an idle instance (daemon `limi
 
 Python is Arrow Flight SQL via ADBC. Use `examples/python/quickstart.ipynb` (or `quickstart.py`) after the daemon is up. `create_sandbox()` / `connect(sandbox=...)` send the id header for you.
 
-The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl for tests). `S3ConditionalLeaseManager` is the v1 lease interface; this draft uses `SingleNodeLeaseManager` and probes the lease endpoint when configured.
+The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl for tests). With a `lease` endpoint, `S3ConditionalLeaseManager` owns sandboxes via If-None-Match / If-Match and a fencing epoch; memory daemons keep `SingleNodeLeaseManager`. Multi-node add/drain/crash: [docs/multi-node.md](docs/multi-node.md). CRUD also includes `DrainNode` (`duckbox node drain`).
 
 ## Layout
 
