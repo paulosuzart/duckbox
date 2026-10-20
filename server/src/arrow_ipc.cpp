@@ -4,8 +4,11 @@
 #include <arrow/buffer.h>
 #include <arrow/c/bridge.h>
 #include <arrow/io/memory.h>
+#include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
 #include <arrow/record_batch.h>
+
+#include <cstring>
 
 namespace duckbox {
 
@@ -81,6 +84,26 @@ std::vector<uint8_t> QueryToArrowIpc(ddb::Connection &con, const std::string &se
 std::vector<uint8_t> QueryToArrowIpc(ddb::Connection &con, const std::string &select_sql) {
 	std::vector<ddb::Value> none;
 	return QueryToArrowIpc(con, select_sql, none);
+}
+
+std::shared_ptr<arrow::Schema> SchemaFromArrowIpc(const std::vector<uint8_t> &ipc) {
+	if (ipc.empty()) {
+		throw Error("arrow ipc schema is empty");
+	}
+	auto maybe = arrow::AllocateBuffer(static_cast<int64_t>(ipc.size()));
+	if (!maybe.ok()) {
+		throw Error("arrow ipc schema buffer failed");
+	}
+	std::shared_ptr<arrow::Buffer> buf(std::move(*maybe));
+	if (!ipc.empty()) {
+		std::memcpy(buf->mutable_data(), ipc.data(), ipc.size());
+	}
+	auto reader = std::make_shared<arrow::io::BufferReader>(buf);
+	auto br = arrow::ipc::RecordBatchStreamReader::Open(reader);
+	if (!br.ok()) {
+		throw Error("arrow ipc schema read failed: " + br.status().ToString());
+	}
+	return (*br)->schema();
 }
 
 } // namespace duckbox

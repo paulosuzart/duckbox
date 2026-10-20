@@ -236,6 +236,7 @@ set(DUCKBOX_SOURCES
   server/src/s3.cpp
   server/src/sandbox_registry.cpp
   server/src/arrow_ipc.cpp
+  server/src/arrow_types.cpp
   server/src/auth.cpp
   server/src/handle.cpp
   server/src/flight_sql_server.cpp
@@ -380,10 +381,20 @@ add_dependencies(duckbox_integration_tests duckbox)
 target_compile_definitions(duckbox_integration_tests PRIVATE
   DUCKBOX_BIN_PATH="$<TARGET_FILE:duckbox>")
 
+duckbox_add_test(duckbox_schema_tests
+  test/support/check.cpp
+  test/schema/main.cpp
+  test/schema/type_map_test.cpp
+  test/schema/flight_schema_test.cpp)
+target_include_directories(duckbox_schema_tests BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/test/schema)
+
 enable_testing()
 add_test(NAME unit COMMAND duckbox_unit_tests)
 add_test(NAME guardrails COMMAND duckbox_guardrail_tests)
 add_test(NAME integration COMMAND duckbox_integration_tests)
+add_test(NAME schema COMMAND duckbox_schema_tests)
 set_tests_properties(unit PROPERTIES LABELS "unit")
 set_tests_properties(guardrails PROPERTIES LABELS "guardrails")
 set_tests_properties(integration PROPERTIES LABELS "integration")
+# Also labeled unit so macOS `ctest -L unit|guardrails` runs it.
+set_tests_properties(schema PROPERTIES LABELS "schema;unit")

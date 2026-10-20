@@ -42,6 +42,9 @@ public:
 	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> GetFlightInfoStatement(
 	    const arrow::flight::ServerCallContext &context, const arrow::flight::sql::StatementQuery &command,
 	    const arrow::flight::FlightDescriptor &descriptor) override;
+	arrow::Result<std::unique_ptr<arrow::flight::SchemaResult>> GetSchemaStatement(
+	    const arrow::flight::ServerCallContext &context, const arrow::flight::sql::StatementQuery &command,
+	    const arrow::flight::FlightDescriptor &descriptor) override;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> DoGetStatement(
 	    const arrow::flight::ServerCallContext &context,
 	    const arrow::flight::sql::StatementQueryTicket &command) override;
@@ -56,6 +59,9 @@ public:
 	                                          arrow::flight::FlightMessageReader *reader,
 	                                          arrow::flight::FlightMetadataWriter *writer) override;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> GetFlightInfoPreparedStatement(
+	    const arrow::flight::ServerCallContext &context, const arrow::flight::sql::PreparedStatementQuery &command,
+	    const arrow::flight::FlightDescriptor &descriptor) override;
+	arrow::Result<std::unique_ptr<arrow::flight::SchemaResult>> GetSchemaPreparedStatement(
 	    const arrow::flight::ServerCallContext &context, const arrow::flight::sql::PreparedStatementQuery &command,
 	    const arrow::flight::FlightDescriptor &descriptor) override;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> DoGetPreparedStatement(

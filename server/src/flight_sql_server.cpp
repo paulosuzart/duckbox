@@ -1,4 +1,5 @@
 #include "duckbox/flight_sql_server.hpp"
+#include "duckbox/arrow_types.hpp"
 #include "duckbox/auth.hpp"
 #include "duckbox/json.hpp"
 #include "duckbox/lake.hpp"
@@ -61,32 +62,12 @@ std::string Hdr(const ServerCallContext &ctx, std::initializer_list<const char *
 	return "";
 }
 
-std::shared_ptr<arrow::DataType> MapType(const std::string &t) {
-	auto u = t;
-	for (char &c : u) {
-		c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-	}
-	if (u.find("INT") != std::string::npos) {
-		return arrow::int32();
-	}
-	if (u.find("DOUBLE") != std::string::npos || u.find("FLOAT") != std::string::npos || u.find("DECIMAL") != std::string::npos) {
-		return arrow::float64();
-	}
-	if (u.find("BOOL") != std::string::npos) {
-		return arrow::boolean();
-	}
-	return arrow::utf8();
-}
-
-std::shared_ptr<arrow::Schema> SchemaFromCols(const std::vector<ColumnSchema> &cols) {
-	std::vector<std::shared_ptr<arrow::Field>> fields;
-	for (auto &c : cols) {
-		fields.push_back(arrow::field(c.name, MapType(c.logical_type)));
-	}
-	if (fields.empty()) {
-		fields.push_back(arrow::field("_empty", arrow::null()));
-	}
-	return arrow::schema(fields);
+arrow::Result<std::unique_ptr<arrow::flight::SchemaResult>>
+SchemaResultFromInfo(arrow::Result<std::unique_ptr<FlightInfo>> info) {
+	ARROW_ASSIGN_OR_RAISE(auto fi, info);
+	arrow::ipc::DictionaryMemo memo;
+	ARROW_ASSIGN_OR_RAISE(auto schema, fi->GetSchema(&memo));
+	return arrow::flight::SchemaResult::Make(*schema);
 }
 
 std::shared_ptr<arrow::DataType> UnknownParamType() {
@@ -577,14 +558,20 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 		auto token = signer_->Sign(h);
 		try {
 			auto box = Box(c);
-			auto schema = SchemaFromCols(box->DescribeRewritten(rw.sql));
+			auto schema = box->DescribeRewrittenArrow(rw.sql);
 			return Info(descriptor, token, schema);
 		} catch (const RedirectError &re) {
-			return MaybeProxyInfo(re, descriptor, c.rec.id, c.rec.key, token, SchemaFromCols({}));
+			return MaybeProxyInfo(re, descriptor, c.rec.id, c.rec.key, token,
+			                      arrow::schema({arrow::field("_empty", arrow::null())}));
 		}
 	} catch (const std::exception &e) {
 		return FromEx(e);
 	}
+}
+
+arrow::Result<std::unique_ptr<arrow::flight::SchemaResult>> DuckboxFlightSqlServer::GetSchemaStatement(
+    const ServerCallContext &context, const sql::StatementQuery &command, const FlightDescriptor &descriptor) {
+	return SchemaResultFromInfo(GetFlightInfoStatement(context, command, descriptor));
 }
 
 arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetStatement(
@@ -676,9 +663,9 @@ arrow::Result<sql::ActionCreatePreparedStatementResult> DuckboxFlightSqlServer::
 		res.prepared_statement_handle = token;
 		try {
 			auto box = Box(c);
-			res.dataset_schema = SchemaFromCols(box->DescribeRewritten(rw.sql));
+			res.dataset_schema = box->DescribeRewrittenArrow(rw.sql);
 		} catch (const RedirectError &) {
-			res.dataset_schema = SchemaFromCols({});
+			res.dataset_schema = arrow::schema({arrow::field("_empty", arrow::null())});
 		}
 		arrow::FieldVector pfields;
 		for (int i = 0; i < rw.user_param_count; i++) {
@@ -749,14 +736,20 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 		SandboxRuntime::RequestGuard inflight(*runtime_);
 		try {
 			auto box = runtime_->Get(rec);
-			auto schema = SchemaFromCols(box->DescribeRewritten(h.rewritten_sql));
+			auto schema = box->DescribeRewrittenArrow(h.rewritten_sql);
 			return Info(descriptor, token, schema);
 		} catch (const RedirectError &re) {
-			return MaybeProxyInfo(re, descriptor, rec.id, rec.key, token, SchemaFromCols({}));
+			return MaybeProxyInfo(re, descriptor, rec.id, rec.key, token,
+			                      arrow::schema({arrow::field("_empty", arrow::null())}));
 		}
 	} catch (const std::exception &e) {
 		return FromEx(e);
 	}
+}
+
+arrow::Result<std::unique_ptr<arrow::flight::SchemaResult>> DuckboxFlightSqlServer::GetSchemaPreparedStatement(
+    const ServerCallContext &context, const sql::PreparedStatementQuery &command, const FlightDescriptor &descriptor) {
+	return SchemaResultFromInfo(GetFlightInfoPreparedStatement(context, command, descriptor));
 }
 
 arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetPreparedStatement(
@@ -871,7 +864,7 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetTa
 							lt = m.lake_type;
 						}
 					}
-					fields.push_back(arrow::field(col, MapType(lt)));
+					fields.push_back(arrow::field(col, MapTypeName(lt)));
 				}
 				auto ts = arrow::schema(fields);
 				ARROW_ASSIGN_OR_RAISE(auto serialized, arrow::ipc::SerializeSchema(*ts));
