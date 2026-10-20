@@ -29,6 +29,9 @@ void duckbox::test::RunLeaseTests() {
 		Expect(!local.Peek("acme-analyst").owned_locally, "single-node release drops ownership");
 		ExpectThrowContains([&] { local.Acquire(""); }, "resource id", "empty resource id is rejected");
 		ExpectThrowContains([&] { local.Acquire("a/b"); }, "path", "path separator in resource id is rejected");
+		SingleNodeLeaseManager gated;
+		gated.SetDraining(true);
+		ExpectThrowContains([&] { gated.Acquire("new-box"); }, "draining", "draining single-node refuses new leases");
 	}
 
 	auto s3 = MakeMemoryS3ControlClient("control");
@@ -203,5 +206,16 @@ void duckbox::test::RunLeaseTests() {
 	{
 		SystemClock sys;
 		Expect(sys.NowMs() > 0, "system clock returns wall milliseconds");
+	}
+
+	{
+		auto held = a.Acquire("drain-box");
+		a.SetDraining(true);
+		auto still = a.Acquire("drain-box");
+		Expect(still.owned_locally, "draining S3 node still serves already-owned unexpired leases");
+		auto blocked = a.Acquire("drain-new");
+		Expect(!blocked.owned_locally, "draining S3 node does not create new leases");
+		a.SetDraining(false);
+		a.Release(held);
 	}
 }

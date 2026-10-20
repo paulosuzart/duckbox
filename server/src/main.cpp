@@ -17,13 +17,16 @@ int main(int argc, char **argv) {
 
 	std::string serve_daemon;
 	std::string serve_listen;
+	std::string serve_internal_listen;
 	std::string serve_debug_http;
 	std::string serve_metrics;
 	std::string serve_handle_secret;
 	bool serve_no_metrics = false;
 	auto *serve = app.add_subcommand("serve", "Run the control-plane Flight SQL daemon");
 	serve->add_option("--daemon", serve_daemon, "Daemon YAML");
-	serve->add_option("--listen", serve_listen, "Flight SQL listen address HOST:PORT");
+	serve->add_option("--listen", serve_listen, "Public Flight SQL listen address HOST:PORT");
+	serve->add_option("--internal-listen", serve_internal_listen,
+	                  "Internal peer/operator listen (default loopback, public port+1000)");
 	serve->add_option("--debug-http", serve_debug_http, "Debug HTTP listen address HOST:PORT");
 	serve->add_option("--metrics", serve_metrics, "Prometheus /metrics listen address HOST:PORT");
 	serve->add_flag("--no-metrics", serve_no_metrics, "Disable the metrics listener");
@@ -79,7 +82,7 @@ int main(int argc, char **argv) {
 	auto *node = app.add_subcommand("node", "Cluster node admin (drain / membership)");
 	node->require_subcommand(1);
 	auto *node_drain = node->add_subcommand("drain", "Stop taking new leases, release owned sandboxes, deregister");
-	node_drain->add_option("--url", node_req.url, "Flight SQL URL")->capture_default_str();
+	node_drain->add_option("--url", node_req.url, "Internal listener URL")->capture_default_str();
 	node_drain->add_option("--caller", node_req.caller, "Trusted caller identity")->capture_default_str();
 	node_drain->add_option("--timeout", node_req.timeout_ms, "Finish in-flight queries wait (ms)")->capture_default_str();
 
@@ -100,6 +103,10 @@ int main(int argc, char **argv) {
 			    serve_daemon.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(serve_daemon);
 			if (!serve_listen.empty()) {
 				opt.daemon.listen = serve_listen;
+			}
+			if (!serve_internal_listen.empty()) {
+				opt.daemon.internal_listen = serve_internal_listen;
+				opt.daemon.internal_listen_configured = true;
 			}
 			if (!serve_debug_http.empty()) {
 				opt.daemon.debug_http = serve_debug_http;

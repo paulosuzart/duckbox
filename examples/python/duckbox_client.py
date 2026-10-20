@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import os
-import re
 import time
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
@@ -21,7 +20,6 @@ PathLike = Union[str, Path]
 DEFAULT_URL = "grpc://127.0.0.1:4747"
 DEFAULT_SANDBOX = "acme-analyst"
 DEFAULT_KEY = "tenant_21:user_sergio"
-_REDIRECT = re.compile(r"duckbox redirect owner=\S+ location=(\S+)")
 
 
 def repo_root() -> Path:
@@ -62,21 +60,10 @@ class Duckbox:
     def query(self, sql: str, params: Optional[Sequence[Any]] = None) -> pd.DataFrame:
         """Run one SELECT against this named sandbox. Optional `?` params are bound, not interpolated.
 
-        GetFlightInfo puts the owner Location on the Flight endpoint; ADBC follows it.
-        If a node still returns `duckbox redirect owner=… location=…`, reconnect once.
+        Talk only to `url` (the load-balancer / public listener). Non-owner nodes proxy
+        to the owner over the internal peer channel; clients never see peer addresses.
         """
-        try:
-            return self._execute(sql, params)
-        except Exception as exc:  # noqa: BLE001
-            loc = _redirect_location(exc)
-            if not loc or loc == self.url:
-                raise
-            self.close()
-            nxt = connect(sandbox=self.sandbox, key=self.key, url=loc, retries=1)
-            self._conn = nxt._conn
-            self.url = loc
-            nxt._conn = None  # this wrapper now owns the connection
-            return self._execute(sql, params)
+        return self._execute(sql, params)
 
     def _execute(self, sql: str, params: Optional[Sequence[Any]] = None) -> pd.DataFrame:
         with self._conn.cursor() as cur:
@@ -176,11 +163,6 @@ def connect(
             raise
     hint = "./build/duckbox serve --daemon ./daemons/ducklake.yaml"
     raise ConnectionError(f"duckbox is not listening on {url}. Start it with: {hint}") from last
-
-
-def _redirect_location(exc: BaseException) -> str:
-    m = _REDIRECT.search(format_error(exc))
-    return m.group(1) if m else ""
 
 
 def query(

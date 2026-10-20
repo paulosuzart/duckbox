@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <iostream>
 #include <sstream>
 #include <thread>
 
@@ -38,12 +39,20 @@ TenantSandbox::~TenantSandbox() {
 
 void TenantSandbox::Passivate(const char *reason) {
 	std::lock_guard<std::mutex> hold(mu_);
+	std::lock_guard<std::mutex> interrupt(interrupt_mu_);
 	bool was_warm = static_cast<bool>(db_);
 	con_.reset();
 	db_.reset();
 	plan_info_.reset();
 	if (was_warm) {
 		Metrics().IncPassivation(reason ? reason : "shutdown");
+	}
+}
+
+void TenantSandbox::Interrupt() {
+	std::lock_guard<std::mutex> interrupt(interrupt_mu_);
+	if (con_) {
+		con_->Interrupt();
 	}
 }
 
@@ -571,6 +580,7 @@ void SandboxRuntime::PassivateId(const std::string &id, const char *reason, int 
 }
 
 std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
+	AssertServing();
 	auto key = ParseTenantKey(rec.key, rec.spec.key);
 	auto lease = leases_->Acquire(rec.id);
 	if (!lease.owned_locally) {
@@ -661,6 +671,131 @@ void SandboxRuntime::EvictIdleLocked() {
 
 void SandboxRuntime::SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes) {
 	nodes_ = std::move(nodes);
+	if (nodes_ && !clock_) {
+		clock_ = nodes_->clock();
+	}
+}
+
+void SandboxRuntime::SetClock(std::shared_ptr<Clock> clock) {
+	clock_ = std::move(clock);
+}
+
+void SandboxRuntime::SetFenceHook(std::function<void(const std::string &)> hook) {
+	fence_hook_ = std::move(hook);
+}
+
+int64_t SandboxRuntime::NowMs() const {
+	return clock_ ? clock_->NowMs() : SystemClock().NowMs();
+}
+
+bool SandboxRuntime::Serving() const {
+	if (fenced_.load()) {
+		return false;
+	}
+	if (nodes_ && nodes_->has_published() && NowMs() >= nodes_->published_expiry_ms()) {
+		return false;
+	}
+	return true;
+}
+
+void SandboxRuntime::AssertServing() {
+	if (fenced_.load()) {
+		throw Error(fence_reason_.empty() ? "node is fenced" : fence_reason_);
+	}
+	if (nodes_ && nodes_->has_published() && NowMs() >= nodes_->published_expiry_ms()) {
+		Fence("node_lease_watchdog_fence");
+		throw Error("node_lease_watchdog_fence");
+	}
+}
+
+void SandboxRuntime::Fence(const std::string &reason) {
+	if (fenced_.exchange(true)) {
+		return;
+	}
+	fence_reason_ = reason;
+	Metrics().SetNodeHealthy(false);
+	std::vector<std::shared_ptr<TenantSandbox>> live;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		for (auto &kv : boxes_) {
+			live.push_back(kv.second);
+		}
+	}
+	for (auto &box : live) {
+		box->Interrupt();
+	}
+	std::vector<std::string> ids;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		for (auto &kv : boxes_) {
+			auto at = kv.first.find('@');
+			ids.push_back(at == std::string::npos ? kv.first : kv.first.substr(0, at));
+		}
+	}
+	for (auto &id : ids) {
+		PassivateId(id, "self_fence");
+	}
+	std::clog << "SELF-FENCE: " << reason << "\n";
+	if (fence_hook_) {
+		fence_hook_(reason);
+		return;
+	}
+	SelfFence(reason);
+}
+
+void SandboxRuntime::TickLeases() {
+	if (fenced_.load()) {
+		return;
+	}
+	if (nodes_ && nodes_->has_published() && NowMs() >= nodes_->published_expiry_ms()) {
+		Fence("node_lease_watchdog_fence");
+		return;
+	}
+	if (nodes_) {
+		try {
+			nodes_->Heartbeat();
+			Metrics().SetNodeHealthy(true);
+		} catch (const std::exception &e) {
+			std::string why = e.what();
+			auto chk = nodes_->CheckPublished();
+			if (why.find("mismatch") != std::string::npos || chk == S3NodeDirectory::RecordCheck::Mismatch) {
+				Fence("node_lease_record_mismatch_fence");
+				return;
+			}
+			if (chk == S3NodeDirectory::RecordCheck::Missing) {
+				Fence("node_lease_record_missing_fence");
+				return;
+			}
+			if (nodes_->has_published() && NowMs() >= nodes_->published_expiry_ms()) {
+				Fence("node_lease_watchdog_fence");
+				return;
+			}
+			std::clog << "{\"event\":\"node_lease_retry\",\"reason\":\"" << why << "\"}\n";
+		}
+	}
+	if (leases_) {
+		Metrics().SetNodeHealthy(Serving());
+		for (auto &id : leases_->OwnedIds()) {
+			try {
+				leases_->Renew(leases_->Peek(id));
+			} catch (const std::exception &e) {
+				PassivateId(id, "lease_lost");
+				std::clog << "{\"event\":\"lease_lost\",\"resource\":\"" << id << "\",\"reason\":\"" << e.what()
+				          << "\"}\n";
+			}
+		}
+		if (!nodes_) {
+			try {
+				Lease node;
+				node.tenant_key = "__node__";
+				leases_->Renew(node);
+			} catch (const std::exception &e) {
+				std::clog << "{\"event\":\"node_renew\",\"reason\":\"" << e.what() << "\"}\n";
+			}
+		}
+	} else {
+		Metrics().SetNodeHealthy(Serving());
+	}
 }
 
 void SandboxRuntime::Drain(int64_t timeout_ms) {

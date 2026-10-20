@@ -354,6 +354,66 @@ std::shared_ptr<S3ControlClient> MakeMemoryS3ControlClient(std::string bucket) {
 	return std::make_shared<MemoryS3ControlClient>(std::move(bucket));
 }
 
+FaultyS3ControlClient::FaultyS3ControlClient(std::shared_ptr<S3ControlClient> inner) : inner_(std::move(inner)) {
+	if (!inner_) {
+		throw PolicyError("FaultyS3ControlClient requires an inner S3ControlClient");
+	}
+}
+
+void FaultyS3ControlClient::SetDown(bool down) {
+	std::lock_guard<std::mutex> hold(mu_);
+	down_ = down;
+}
+
+bool FaultyS3ControlClient::down() const {
+	return Down();
+}
+
+bool FaultyS3ControlClient::Down() const {
+	std::lock_guard<std::mutex> hold(mu_);
+	return down_;
+}
+
+S3Object FaultyS3ControlClient::Fail() const {
+	S3Object out;
+	out.status = 0;
+	out.error = "s3 transport down";
+	return out;
+}
+
+S3Object FaultyS3ControlClient::Get(const std::string &key) const {
+	if (Down()) {
+		return Fail();
+	}
+	return inner_->Get(key);
+}
+
+S3Object FaultyS3ControlClient::Put(const std::string &key, const std::string &body, const std::string &if_match,
+                                    const std::string &if_none_match) const {
+	if (Down()) {
+		return Fail();
+	}
+	return inner_->Put(key, body, if_match, if_none_match);
+}
+
+S3Object FaultyS3ControlClient::Delete(const std::string &key, const std::string &if_match) const {
+	if (Down()) {
+		return Fail();
+	}
+	return inner_->Delete(key, if_match);
+}
+
+std::vector<std::string> FaultyS3ControlClient::ListKeys(const std::string &prefix) const {
+	if (Down()) {
+		return {};
+	}
+	return inner_->ListKeys(prefix);
+}
+
+const std::string &FaultyS3ControlClient::bucket() const {
+	return inner_->bucket();
+}
+
 std::string ProbeControlPlaneS3(const LeaseSettings &lease) {
 	try {
 		auto client = MakeS3ControlClient(lease);

@@ -39,4 +39,23 @@ void duckbox::test::RunMembershipTests() {
 	a.Deregister();
 	Expect(a.List().empty(), "deregister deletes the heartbeat object");
 	ExpectThrowContains([&] { S3NodeDirectory(nullptr, opt); }, "S3ControlClient", "directory requires a client");
+
+	{
+		auto inner = MakeMemoryS3ControlClient("hb");
+		auto faulty = std::make_shared<FaultyS3ControlClient>(inner);
+		S3NodeDirectory d(faulty, opt, {}, clock);
+		d.Heartbeat();
+		Expect(d.has_published() && d.published_expiry_ms() > clock->NowMs(), "heartbeat publishes an expiry");
+		faulty->SetDown(true);
+		ExpectThrowContains([&] { d.Heartbeat(); }, "transport", "heartbeat PUT fails when S3 is down");
+		Expect(d.CheckPublished() == S3NodeDirectory::RecordCheck::Transport,
+		       "published check is transport while S3 is down");
+		faulty->SetDown(false);
+		d.Heartbeat();
+		Expect(d.List().size() == 1, "heartbeat recovers when S3 returns");
+		auto stolen = inner->Put("leases/nodes/node-a.json", "{\"node_id\":\"x\"}", "", "");
+		Expect(stolen.status == 200, "unconditional put replaces the node record");
+		Expect(d.CheckPublished() == S3NodeDirectory::RecordCheck::Mismatch, "replaced node record is a mismatch");
+		ExpectThrowContains([&] { d.Heartbeat(); }, "mismatch", "renew against a replaced record is a mismatch fence");
+	}
 }

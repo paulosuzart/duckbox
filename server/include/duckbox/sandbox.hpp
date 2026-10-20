@@ -14,7 +14,9 @@
 #include "duckbox/tenant_key.hpp"
 #include "duckbox/duckdb_layer.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -47,6 +49,7 @@ public:
 
 	void Warmup(bool validate_lake); // attach lake, trusted initSQL, then disable external access + lock_configuration
 	void Passivate(const char *reason = "shutdown"); // frees DuckDB; definition stays in the registry
+	void Interrupt(); // abort an in-flight statement (fence); safe from another thread
 	bool Warm() const {
 		return static_cast<bool>(db_);
 	}
@@ -103,6 +106,7 @@ private:
 	std::shared_ptr<SecretResolver> secrets_;
 	std::unique_ptr<ddb::DuckDB> db_;
 	std::unique_ptr<ddb::Connection> con_;
+	std::mutex interrupt_mu_; // Interrupt vs Passivate; not held during Execute
 	ddb::shared_ptr<PlanGuardInfo> plan_info_;
 	std::mutex mu_; // held for the whole user statement; see UserStatementScope
 	std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
@@ -143,7 +147,20 @@ public:
 	// keep_from_version >= 0 keeps id@v for v >= that (N-1 during stale-handle grace).
 	void PassivateId(const std::string &id, const char *reason = "update", int keep_from_version = -1);
 	void SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes);
+	void SetClock(std::shared_ptr<Clock> clock);
+	void SetFenceHook(std::function<void(const std::string &)> hook); // tests; production SelfFence
 	void Drain(int64_t timeout_ms = 0); // stop new leases, grace wait, release, passivate, deregister
+	// Node-lease renew at ~1/3 TTL. Failed renew retries until published expiry;
+	// then (or on missing/mismatch record) fences: stop sandboxes, fail inflight, exit.
+	void TickLeases();
+	void AssertServing(); // request path: expiry passed → fence even before the watchdog
+	bool Serving() const;
+	bool fenced() const {
+		return fenced_.load();
+	}
+	const std::string &fence_reason() const {
+		return fence_reason_;
+	}
 	std::shared_ptr<ILeaseManager> Leases() const {
 		return leases_;
 	}
@@ -163,6 +180,8 @@ private:
 	void EvictIdleLocked();
 	void PublishResidentLocked();
 	const TenantSandbox *FindIdLocked(const std::string &id) const;
+	void Fence(const std::string &reason); // writes nothing; then fence hook / SelfFence
+	int64_t NowMs() const;
 
 	DaemonConfig daemon_;
 	std::shared_ptr<ILeaseManager> leases_;
@@ -170,6 +189,10 @@ private:
 	std::shared_ptr<IRouter> router_;
 	std::shared_ptr<SecretResolver> secrets_;
 	std::shared_ptr<S3NodeDirectory> nodes_;
+	std::shared_ptr<Clock> clock_;
+	std::function<void(const std::string &)> fence_hook_;
+	std::atomic<bool> fenced_{false};
+	std::string fence_reason_;
 	mutable std::mutex mu_;
 	std::unordered_map<std::string, std::shared_ptr<TenantSandbox>> boxes_;
 };

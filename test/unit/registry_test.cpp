@@ -63,6 +63,19 @@ void duckbox::test::RunRegistryTests() {
 		                    "H4 empty callers is not allow-all outside dev");
 	}
 	{
+		DaemonConfig ops = daemon;
+		ExpectThrowContains([&] { AuthorizeOperator(ops, "local"); }, "not a node operator",
+		                    "empty auth.operators denies everyone including local");
+		ExpectThrowContains([&] { AuthorizeOperator(ops, "analyst-svc"); }, "not a node operator",
+		                    "authenticated agent identity cannot DrainNode");
+		ops.operators = {"ops"};
+		AuthorizeOperator(ops, "ops");
+		ExpectThrowContains([&] { AuthorizeOperator(ops, "analyst-svc"); }, "not a node operator",
+		                    "sandbox CRUD caller is not a node operator");
+		ops.operators = {"*"};
+		AuthorizeOperator(ops, "anyone");
+	}
+	{
 		AuthRequest req;
 		req.key_header = "tenant_21:admin";
 		ExpectThrowContains([&] { AuthenticateSandbox(loaded, "tenant_21:user_sergio", req); }, "does not match",

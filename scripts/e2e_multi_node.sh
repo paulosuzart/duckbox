@@ -7,6 +7,7 @@ cd "$ROOT"
 export ROOT
 export PYTHONPATH="$ROOT/examples/python${PYTHONPATH:+:$PYTHONPATH}"
 export DUCKBOX_HANDLE_SECRET="${DUCKBOX_HANDLE_SECRET:-duckbox-dev-secret}"
+export DUCKBOX_PEER_SECRET="${DUCKBOX_PEER_SECRET:-duckbox-peer-dev}"
 export DUCKBOX_S3_KEY="${DUCKBOX_S3_KEY:-rustfsadmin}"
 export DUCKBOX_S3_SECRET="${DUCKBOX_S3_SECRET:-rustfsadmin}"
 BIN="${DUCKBOX_BIN:-$ROOT/build/duckbox}"
@@ -69,6 +70,9 @@ trap cleanup EXIT
 wait_port 4747
 wait_port 4748
 wait_port 4749
+wait_port 5747
+wait_port 5748
+wait_port 5749
 
 "$BIN" sandbox create --url grpc://127.0.0.1:4747 \
 	--spec "$ROOT/policies/memory/analyst.yaml" \
@@ -115,7 +119,7 @@ LIST2="$("$BIN" sandbox list --url grpc://127.0.0.1:4749 --id-prefix cluster-ana
 echo "$LIST2"
 echo "$LIST2" | grep -E -q '"owner":"node-(b|c)"'
 
-"$BIN" node drain --url grpc://127.0.0.1:4748 --timeout 1000
+"$BIN" node drain --url grpc://127.0.0.1:5748 --timeout 1000
 "$PY" - <<'PY'
 import time
 from duckbox_client import connect

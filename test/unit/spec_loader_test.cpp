@@ -21,6 +21,14 @@ void duckbox::test::RunSpecLoaderTests() {
 	ValidateDaemonOrThrow(daemon);
 	auto loaded_daemon = LoadDaemonFile(std::string(DUCKBOX_SOURCE_DIR) + "/daemons/memory.yaml");
 	Expect(loaded_daemon.listen.find("4747") != std::string::npos, "daemon yaml listen");
+	Expect(loaded_daemon.internal_listen.find("5747") != std::string::npos, "loopback listen defaults internal_listen");
+	setenv("DUCKBOX_PEER_SECRET", "duckbox-peer-dev", 1);
+	auto cluster_a = LoadDaemonFile(std::string(DUCKBOX_SOURCE_DIR) + "/daemons/cluster-node-a.yaml");
+	Expect(cluster_a.operators.size() == 1 && cluster_a.operators[0] == "local",
+	       "cluster daemon YAML lists local as a node operator");
+	Expect(cluster_a.internal_listen.find("5747") != std::string::npos, "cluster YAML sets internal_listen");
+	Expect(cluster_a.peer_secret == "duckbox-peer-dev", "peer secret is resolved from env ref");
+	Expect(cluster_a.lease.advertise.find("5747") != std::string::npos, "advertise is the internal address");
 	Expect(loaded_daemon.metrics_listen.find("9477") != std::string::npos, "daemon yaml metrics listen");
 	Expect(loaded_daemon.metrics_policy_classes.count("analyst") == 1, "daemon yaml policy class allowlist");
 	Expect(loaded_daemon.lease.bucket.empty(), "memory daemon has no lease/lake credentials");
@@ -284,26 +292,61 @@ void duckbox::test::RunSpecLoaderTests() {
 		auto path = "/tmp/duckbox-daemon-full.yaml";
 		{
 			std::ofstream o(path);
-			o << "name: full\nlisten: 127.0.0.1:4747\nhandle_secret_env: DUCKBOX_HANDLE_SECRET\n"
+			o << "name: full\nlisten: 127.0.0.1:4747\ninternal_listen: 127.0.0.1:5747\n"
+			     "handle_secret_env: DUCKBOX_HANDLE_SECRET\n"
 			     "debug_http: 127.0.0.1:18480\n"
 			     "auth:\n  mode: trusted\n  allow_insecure_dev: true\n"
+			     "  operators: [ops, local]\n"
+			     "  peer_secret_ref: env:DUCKBOX_PEER_SECRET\n"
 			     "  callers:\n    - identity: analyst-svc\n      keys: [\"tenant_21:*\"]\n"
 			     "  bearer_secrets:\n    - identity: analyst-svc\n      secret: super-secret-token\n"
 			     "lake_allow:\n  s3_endpoints: [\"127.0.0.1:9000\"]\n  secret_refs: [\"env:DUCKBOX_S3_KEY\"]\n"
 			     "lease:\n  endpoint: http://127.0.0.1:9\n  bucket: b\n  prefix: leases/\n  skip_probe: true\n"
-			     "  node_id: full-node\n  ttl: 15s\n  advertise: grpc://127.0.0.1:4747\n"
+			     "  node_id: full-node\n  ttl: 15s\n  advertise: grpc://127.0.0.1:5747\n"
 			     "limits:\n  idle_timeout: 30s\n  max_idle_timeout: 5m\n  max_sandboxes: 10\n";
 		}
 		auto d = LoadDaemonFile(path);
 		Expect(d.debug_http.find("18480") != std::string::npos, "daemon yaml debug_http");
 		Expect(d.callers.size() == 1 && d.callers[0].identity == "analyst-svc", "daemon yaml callers");
+		Expect(d.operators.size() == 2 && d.operators[0] == "ops" && d.operators[1] == "local",
+		       "daemon yaml auth.operators");
+		Expect(d.peer_secret == "duckbox-peer-dev", "daemon yaml peer_secret_ref resolves");
+		{
+			auto badp = "/tmp/duckbox-peer-plain.yaml";
+			{
+				std::ofstream o(badp);
+				o << "name: x\nlisten: 127.0.0.1:9\nhandle_secret: duckbox-dev-secret\n"
+				     "auth:\n  allow_insecure_dev: true\n  peer_secret: inline-secret\n";
+			}
+			ExpectThrowContains([&] { LoadDaemonFile(badp); }, "peer_secret_ref",
+			                    "plaintext auth.peer_secret is rejected");
+		}
 		Expect(d.bearer_secrets.size() == 1, "daemon yaml bearer_secrets");
 		Expect(d.lake_allow.s3_endpoints.size() == 1, "daemon yaml lake_allow");
 		Expect(d.lease.skip_probe, "daemon yaml lease skip_probe");
 		Expect(d.lease.node_id == "full-node" && d.lease.ttl_ms == 15000, "daemon yaml lease node_id and ttl");
-		Expect(d.lease.advertise.find("4747") != std::string::npos, "daemon yaml lease advertise");
+		Expect(d.lease.advertise.find("5747") != std::string::npos, "daemon yaml lease advertise is the internal listener");
 		Expect(d.idle_evict_ms == 30000, "daemon yaml idle_timeout 30s");
 		ValidateDaemonOrThrow(d);
+		{
+			DaemonConfig pub = TestDaemon();
+			pub.listen = "0.0.0.0:4747";
+			ExpectThrowContains([&] { ValidateDaemonOrThrow(pub); }, "internal_listen",
+			                    "non-loopback listen requires explicit internal_listen");
+			pub.internal_listen = "127.0.0.1:5747";
+			pub.internal_listen_configured = true;
+			ValidateDaemonOrThrow(pub);
+			DaemonConfig adv = TestDaemon();
+			adv.lease.advertise = "grpc://10.0.0.8:5747";
+			ExpectThrowContains([&] { ValidateDaemonOrThrow(adv); }, "internal_listen",
+			                    "explicit advertise requires internal_listen");
+			DaemonConfig cluster = TestDaemon();
+			cluster.lease.endpoint = "http://127.0.0.1:9";
+			cluster.lease.bucket = "b";
+			cluster.lease.skip_probe = true;
+			ExpectThrowContains([&] { ValidateDaemonOrThrow(cluster); }, "peer_secret_ref",
+			                    "multi-node requires a resolved peer secret");
+		}
 	}
 	setenv("DUCKBOX_TEST_SECRET", "value-must-not-appear-in-errors", 1);
 	EnvFileSecretResolver resolver;

@@ -43,6 +43,19 @@ void duckbox::test::RunS3ClientTests() {
 	auto del_miss = mem->Delete("sandboxes/a/current.json", "anything");
 	Expect(del_miss.status == 412, "memory Delete If-Match on a missing key is 412");
 
+	{
+		auto inner = MakeMemoryS3ControlClient("control");
+		inner->Put("k", "body", "", "*");
+		FaultyS3ControlClient faulty(inner);
+		Expect(faulty.Get("k").status == 200, "faulty wrapper passes through while up");
+		faulty.SetDown(true);
+		Expect(faulty.down() && faulty.Get("k").status == 0 && faulty.Put("k", "x").status == 0 &&
+		           faulty.Delete("k").status == 0 && faulty.ListKeys("").empty(),
+		       "faulty wrapper fails every op while down");
+		faulty.SetDown(false);
+		Expect(faulty.Get("k").status == 200, "faulty wrapper recovers");
+	}
+
 	LeaseSettings bad;
 	ExpectThrowContains([&] { MakeS3ControlClient(bad); }, "bucket", "aws client requires bucket");
 	bad.bucket = "control";

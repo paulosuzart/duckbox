@@ -26,7 +26,7 @@ struct Lease {
 	uint64_t epoch = 0; // 0 = missing / not yet fenced; first acquire is 1
 	std::string owner_id;
 	std::string etag;
-	std::string flight; // owner Flight URL, e.g. grpc://127.0.0.1:4747
+	std::string flight; // owner internal advertise URL, e.g. grpc://127.0.0.1:5747
 	int64_t expiry_ms = 0;
 	bool owned_locally = false;
 };
@@ -77,6 +77,12 @@ public:
 	virtual bool draining() const {
 		return false;
 	}
+	virtual void SetHealthy(bool v) {
+		(void)v;
+	}
+	virtual bool healthy() const {
+		return true;
+	}
 	virtual std::vector<std::string> OwnedIds() const {
 		return {};
 	}
@@ -117,11 +123,14 @@ public:
 	Lease Peek(const std::string &resource_id) override;
 	void SetDraining(bool v) override;
 	bool draining() const override;
+	void SetHealthy(bool v) override;
+	bool healthy() const override;
 	std::vector<std::string> OwnedIds() const override;
 	void ReleaseOwned() override;
 
 private:
 	bool draining_ = false;
+	bool healthy_ = true;
 };
 
 class LocalRouter : public IRouter, public LeaseTelemetry { // always RouteDecision::Local
@@ -165,6 +174,17 @@ public:
 	const std::string &node_id() const {
 		return opt_.owner_id;
 	}
+	std::shared_ptr<Clock> clock() const {
+		return clock_;
+	}
+	bool has_published() const {
+		return published_expiry_ms_ > 0;
+	}
+	int64_t published_expiry_ms() const {
+		return published_expiry_ms_;
+	}
+	enum class RecordCheck { Ok, Missing, Mismatch, Transport };
+	RecordCheck CheckPublished() const; // Get own node object vs last successful PUT
 
 private:
 	std::string ObjectKey(const std::string &node_id) const;
@@ -177,6 +197,8 @@ private:
 	std::shared_ptr<Clock> clock_;
 	int64_t started_at_ms_ = 0;
 	std::string etag_;
+	std::string last_body_;
+	int64_t published_expiry_ms_ = 0;
 };
 
 // S3 If-None-Match:* create, If-Match renew/steal/release. Clock is injectable for TTL tests.
@@ -190,6 +212,8 @@ public:
 	Lease Peek(const std::string &resource_id) override;
 	void SetDraining(bool v) override;
 	bool draining() const override;
+	void SetHealthy(bool v) override;
+	bool healthy() const override;
 	std::vector<std::string> OwnedIds() const override;
 	void ReleaseOwned() override;
 	void set_flight(std::string flight) override;
@@ -212,6 +236,7 @@ private:
 	mutable std::mutex mu_;
 	std::unordered_map<std::string, std::string> etags_;
 	bool draining_ = false;
+	bool healthy_ = true;
 };
 
 } // namespace duckbox

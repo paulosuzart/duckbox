@@ -77,6 +77,14 @@ bool SingleNodeLeaseManager::draining() const {
 	return draining_;
 }
 
+void SingleNodeLeaseManager::SetHealthy(bool v) {
+	healthy_ = v;
+}
+
+bool SingleNodeLeaseManager::healthy() const {
+	return healthy_;
+}
+
 std::vector<std::string> SingleNodeLeaseManager::OwnedIds() const {
 	return {owned_.begin(), owned_.end()};
 }
@@ -418,6 +426,16 @@ bool S3ConditionalLeaseManager::draining() const {
 	return draining_;
 }
 
+void S3ConditionalLeaseManager::SetHealthy(bool v) {
+	std::lock_guard<std::mutex> hold(mu_);
+	healthy_ = v;
+}
+
+bool S3ConditionalLeaseManager::healthy() const {
+	std::lock_guard<std::mutex> hold(mu_);
+	return healthy_;
+}
+
 std::vector<std::string> S3ConditionalLeaseManager::OwnedIds() const {
 	std::lock_guard<std::mutex> hold(mu_);
 	return {owned_.begin(), owned_.end()};
@@ -505,29 +523,39 @@ void S3NodeDirectory::Heartbeat() {
 	S3Object put;
 	if (etag_.empty()) {
 		put = client_->Put(key, body, "", "*");
-		if (put.status == 412 || put.status == 409) {
-			auto got = client_->Get(key);
-			if (HttpOk(got.status)) {
-				put = client_->Put(key, body, got.etag, "");
-			}
-		}
 	} else {
 		put = client_->Put(key, body, etag_, "");
-		if (put.status == 412 || put.status == 409) {
-			auto got = client_->Get(key);
-			if (HttpOk(got.status)) {
-				put = client_->Put(key, body, got.etag, "");
-			}
-		}
+	}
+	if (put.status == 412 || put.status == 409) {
+		throw Error("node_lease_record_mismatch_fence");
 	}
 	if (!HttpOk(put.status)) {
 		throw Error(put.error.empty() ? "node heartbeat PUT failed" : put.error);
 	}
 	etag_ = put.etag;
+	last_body_ = body;
+	published_expiry_ms_ = n.expiry_ms;
 	auto live = List();
 	if (metrics_) {
 		metrics_->SetClusterNodes(live.size());
 	}
+}
+
+S3NodeDirectory::RecordCheck S3NodeDirectory::CheckPublished() const {
+	auto obj = client_->Get(ObjectKey(opt_.owner_id));
+	if (obj.status == 404) {
+		return RecordCheck::Missing;
+	}
+	if (!HttpOk(obj.status)) {
+		return RecordCheck::Transport;
+	}
+	if (last_body_.empty()) {
+		return RecordCheck::Ok;
+	}
+	if (obj.body != last_body_) {
+		return RecordCheck::Mismatch;
+	}
+	return RecordCheck::Ok;
 }
 
 void S3NodeDirectory::Deregister() {

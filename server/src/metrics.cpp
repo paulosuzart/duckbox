@@ -131,6 +131,18 @@ const char *Help(const std::string &name) {
 	if (name == "duckbox_cluster_nodes") {
 		return "Live cluster members this node has discovered.";
 	}
+	if (name == "duckbox_node_healthy") {
+		return "1 while this node's published lease is live; 0 after a self-fence.";
+	}
+	if (name == "duckbox_proxy_requests_total") {
+		return "Flight SQL calls forwarded to the sandbox owner over the internal peer channel.";
+	}
+	if (name == "duckbox_proxy_errors_total") {
+		return "Peer proxy failures (owner unreachable, not replayed to a new owner).";
+	}
+	if (name == "duckbox_proxy_seconds") {
+		return "Peer proxy round-trip time.";
+	}
 	if (name == "duckbox_route_decisions_total") {
 		return "Control-plane routing decisions.";
 	}
@@ -233,6 +245,7 @@ MetricsRegistry::MetricsRegistry(std::string node, std::unordered_set<std::strin
 	SetLocked("duckbox_sandboxes_resident", NodeLabels("state=\"passive\""), 0);
 	SetLocked("duckbox_owned_keys", NodeLabels(""), 0);
 	SetLocked("duckbox_cluster_nodes", NodeLabels(""), 1);
+	SetLocked("duckbox_node_healthy", NodeLabels(""), 1);
 	SetLocked("duckbox_node_lease_last_renewal_timestamp_seconds", NodeLabels(""), 0);
 }
 
@@ -413,6 +426,11 @@ void MetricsRegistry::SetClusterNodes(size_t n) {
 	SetLocked("duckbox_cluster_nodes", NodeLabels(""), static_cast<double>(n));
 }
 
+void MetricsRegistry::SetNodeHealthy(bool healthy) {
+	std::lock_guard<std::mutex> hold(mu_);
+	SetLocked("duckbox_node_healthy", NodeLabels(""), healthy ? 1 : 0);
+}
+
 void MetricsRegistry::IncRoute(const char *decision) {
 	std::string labels = NodeLabels(std::string("decision=\"") + EscapeLabel(decision ? decision : "local") + "\"");
 	std::lock_guard<std::mutex> hold(mu_);
@@ -435,6 +453,25 @@ void MetricsRegistry::IncS3LeaseError(const char *op, const char *code) {
 	                               EscapeLabel(code ? code : "error") + "\"");
 	std::lock_guard<std::mutex> hold(mu_);
 	IncLocked("duckbox_s3_lease_errors_total", labels);
+}
+
+void MetricsRegistry::IncProxy(const char *op) {
+	std::string labels = NodeLabels(std::string("op=\"") + EscapeLabel(op ? op : "get") + "\"");
+	std::lock_guard<std::mutex> hold(mu_);
+	IncLocked("duckbox_proxy_requests_total", labels);
+}
+
+void MetricsRegistry::IncProxyError(const char *op, const char *code) {
+	std::string labels = NodeLabels(std::string("op=\"") + EscapeLabel(op ? op : "get") + "\",code=\"" +
+	                               EscapeLabel(code ? code : "error") + "\"");
+	std::lock_guard<std::mutex> hold(mu_);
+	IncLocked("duckbox_proxy_errors_total", labels);
+}
+
+void MetricsRegistry::ObserveProxy(const char *op, double seconds) {
+	std::string labels = NodeLabels(std::string("op=\"") + EscapeLabel(op ? op : "get") + "\"");
+	std::lock_guard<std::mutex> hold(mu_);
+	ObserveHistLocked("duckbox_proxy_seconds", labels, kFwdBuckets, seconds);
 }
 
 std::string MetricsRegistry::Render() const {

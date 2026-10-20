@@ -1,9 +1,13 @@
 # Cluster member A. Same lease prefix as B/C; unique name, listen, metrics, advertise.
 name: node-a
 listen: 127.0.0.1:4747
+internal_listen: 127.0.0.1:5747
 auth:
   mode: trusted
   allow_insecure_dev: true
+  operators:
+    - local
+  peer_secret_ref: env:DUCKBOX_PEER_SECRET
 lake_allow:
   s3_endpoints:
     - "127.0.0.1:9000"
@@ -30,6 +34,6 @@ lease:
   access_key_env: DUCKBOX_S3_KEY
   secret_key_env: DUCKBOX_S3_SECRET
   node_id: node-a
-  advertise: grpc://127.0.0.1:4747
+  advertise: grpc://127.0.0.1:5747
   ttl: 5s
   heartbeat: 1s

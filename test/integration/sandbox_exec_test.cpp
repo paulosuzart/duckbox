@@ -7,8 +7,10 @@
 #include "duckbox/lake.hpp"
 #include "duckbox/plan_check.hpp"
 #include "duckbox/rewriter.hpp"
+#include "duckbox/lease.hpp"
 #include "duckbox/sandbox.hpp"
 #include "duckbox/sandbox_registry.hpp"
+#include "duckbox/s3.hpp"
 #include "duckbox/tenant_key.hpp"
 
 #include "httplib.h"
@@ -370,7 +372,52 @@ void duckbox::test::RunSandboxExecTests() {
 			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(20));
 		}
-		Expect(health && health->body.find("ok") != std::string::npos, "debug HTTP /health");
+		Expect(health && health->status == 200 && health->body.find("\"healthy\":true") != std::string::npos,
+		       "debug HTTP /health is 200 when the node is serving");
+		std::string fenced;
+		runtime->SetFenceHook([&](const std::string &r) { fenced = r; });
+		runtime->AssertServing();
+		Expect(runtime->Serving(), "single-node runtime stays serving");
+		{
+			auto s3h = MakeMemoryS3ControlClient("health-fence");
+			auto clockh = std::make_shared<FakeClock>(6'000'000);
+			S3LeaseOptions oh;
+			oh.owner_id = "node-http";
+			oh.prefix = "leases/";
+			oh.ttl_ms = 5'000;
+			auto leases_h = std::make_shared<S3ConditionalLeaseManager>(s3h, oh, std::shared_ptr<IMetrics>{}, clockh);
+			auto nodes_h = std::make_shared<S3NodeDirectory>(s3h, oh, std::shared_ptr<IMetrics>{}, clockh);
+			auto defs_h = std::make_shared<S3SandboxRegistry>(s3h);
+			auto runtime_h = std::make_shared<SandboxRuntime>(cfg, leases_h, defs_h);
+			runtime_h->SetNodeDirectory(nodes_h);
+			runtime_h->SetClock(clockh);
+			std::string fence_h;
+			runtime_h->SetFenceHook([&](const std::string &r) { fence_h = r; });
+			runtime_h->TickLeases();
+			DaemonConfig cfg_h = cfg;
+			cfg_h.debug_http = "127.0.0.1:18482";
+			ServerOptions opt_h;
+			opt_h.daemon = cfg_h;
+			std::thread th_h([&] { StartDebugHttp(opt_h, defs_h, runtime_h); });
+			th_h.detach();
+			httplib::Client cli_h("127.0.0.1", 18482);
+			cli_h.set_connection_timeout(1, 0);
+			httplib::Result okh;
+			for (int i = 0; i < 50; i++) {
+				okh = cli_h.Get("/health");
+				if (okh) {
+					break;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			}
+			Expect(okh && okh->status == 200, "debug HTTP /health is 200 before fence");
+			clockh->AdvanceMs(5'000);
+			runtime_h->TickLeases();
+			Expect(runtime_h->fenced() && fence_h == "node_lease_watchdog_fence", "expiry fence runs for /health fixture");
+			auto down = cli_h.Get("/health");
+			Expect(down && down->status == 503 && down->body.find("\"fenced\":true") != std::string::npos,
+			       "debug HTTP /health is 503 when the node is fenced");
+		}
 		httplib::Headers hdr = {{"X-Duckbox-Sandbox", "http-a"}};
 		auto q = cli.Post("/v1/query", hdr, "{\"sql\":\"SELECT id FROM deals\"}", "application/json");
 		Expect(q && q->status == 200 && !q->body.empty(), "debug HTTP query returns Arrow");

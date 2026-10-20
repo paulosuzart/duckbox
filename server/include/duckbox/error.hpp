@@ -73,8 +73,9 @@ public:
 	}
 };
 
-// This node is not the owner. `what()` is `duckbox redirect owner=ID location=URL`
-// so clients can follow it; GetFlightInfo also puts `location` on the endpoint.
+// This node is not the owner. Internal proxy trigger only — never returned to
+// clients. `what()` is `duckbox redirect owner=ID location=URL` (the owner's
+// internal advertise address). Endpoint locations sent to clients stay empty.
 class RedirectError : public Error {
 public:
 	RedirectError(std::string owner_id, std::string flight);

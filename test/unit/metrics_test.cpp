@@ -23,6 +23,10 @@ void duckbox::test::RunMetricsTests() {
 	reg.IncOwnershipAcquired("new");
 	reg.SetOwnedKeys(1);
 	reg.SetResident(1, 0);
+	reg.SetNodeHealthy(true);
+	reg.IncProxy("get_flight_info");
+	reg.IncProxyError("do_get", "error");
+	reg.ObserveProxy("do_get", 0.01);
 	auto text = reg.Render();
 	Expect(text.find("# TYPE duckbox_query_duration_seconds histogram") != std::string::npos,
 	       "exposition declares query histogram");
@@ -38,6 +42,13 @@ void duckbox::test::RunMetricsTests() {
 	Expect(text.find("duckbox_query_rejections_total{") != std::string::npos, "rejections counter");
 	Expect(text.find("reason=\"table_function\"") != std::string::npos, "rejection reason");
 	Expect(text.find("duckbox_queries_active{node=\"node-a\"}") != std::string::npos, "active gauge");
+	Expect(text.find("duckbox_node_healthy{node=\"node-a\"} 1") != std::string::npos, "healthy gauge is 1");
+	Expect(text.find("duckbox_proxy_requests_total{") != std::string::npos, "proxy request counter");
+	Expect(text.find("duckbox_proxy_errors_total{") != std::string::npos, "proxy error counter");
+	Expect(text.find("duckbox_proxy_seconds") != std::string::npos, "proxy latency histogram");
+	reg.SetNodeHealthy(false);
+	auto down = reg.Render();
+	Expect(down.find("duckbox_node_healthy{node=\"node-a\"} 0") != std::string::npos, "unhealthy gauge is 0");
 	Expect(text.find("tenant=\"") == std::string::npos, "no tenant label");
 	Expect(text.find("user=\"") == std::string::npos, "no user label");
 	Expect(text.find(",key=\"") == std::string::npos && text.find("{key=\"") == std::string::npos, "no key label");
