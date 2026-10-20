@@ -11,7 +11,7 @@
 namespace duckbox {
 namespace {
 
-ddb::string TrimCopy(const std::string &s) {
+ddb::string TrimTypeName(const std::string &s) {
     size_t a = 0;
     size_t b = s.size();
     while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) {
@@ -76,7 +76,19 @@ TypeParser &Parser() {
 ddb::LogicalType ParseWithContext(const std::string &name) {
     auto &p = Parser();
     std::lock_guard<std::mutex> hold(p.mu);
-    return ddb::TransformStringToLogicalType(name, *p.Con().context);
+    auto &con = p.Con();
+    if (!con.HasActiveTransaction()) {
+        con.BeginTransaction();
+    }
+    try {
+        return ddb::TransformStringToLogicalType(name, *con.context);
+    } catch (...) {
+        auto q = con.Query("SELECT NULL::" + name);
+        if (q && !q->HasError() && !q->types.empty()) {
+            return q->types[0];
+        }
+        throw;
+    }
 }
 
 } // namespace
@@ -86,7 +98,7 @@ ddb::ClientProperties DefaultArrowClientProperties() {
 }
 
 ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
-    auto name = TrimCopy(logical_type);
+    auto name = TrimTypeName(logical_type);
     if (name.empty()) {
         return ddb::LogicalType(ddb::LogicalTypeId::VARCHAR);
     }
@@ -98,12 +110,26 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
         }
         return u.rfind("DECIMAL", 0) == 0 || u.rfind("NUMERIC", 0) == 0;
     };
+    auto looks_nested = [&]() {
+        auto u = name;
+        for (char &c : u) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        if (u.find('[') != std::string::npos) {
+            return true;
+        }
+        return u.rfind("STRUCT", 0) == 0 || u.rfind("MAP", 0) == 0 || u.rfind("UNION", 0) == 0 ||
+               u.rfind("LIST", 0) == 0 || u.rfind("ARRAY", 0) == 0;
+    };
     if (id == ddb::LogicalTypeId::DECIMAL || looks_decimal()) {
         uint8_t width = 18;
         uint8_t scale = 3;
         if (ParseDecimalParams(name, &width, &scale)) {
             return ddb::LogicalType::DECIMAL(width, scale);
         }
+        return ParseWithContext(name);
+    }
+    if (looks_nested()) {
         return ParseWithContext(name);
     }
     switch (id) {

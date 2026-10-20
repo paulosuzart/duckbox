@@ -1,5 +1,4 @@
 #include "duckbox/flight_sql_server.hpp"
-#include "duckbox/arrow_types.hpp"
 #include "duckbox/auth.hpp"
 #include "duckbox/json.hpp"
 #include "duckbox/lake.hpp"
@@ -60,6 +59,35 @@ std::string Hdr(const ServerCallContext &ctx, std::initializer_list<const char *
 		}
 	}
 	return "";
+}
+
+std::string QuoteIdent(const std::string &id) {
+	std::string out = "\"";
+	for (char ch : id) {
+		if (ch == '"') {
+			out.push_back('"');
+		}
+		out.push_back(ch);
+	}
+	out.push_back('"');
+	return out;
+}
+
+std::string TableSelectSql(const TablePolicy &table) {
+	std::string sql = "SELECT ";
+	if (table.columns.empty()) {
+		sql += "*";
+	} else {
+		for (size_t i = 0; i < table.columns.size(); i++) {
+			if (i > 0) {
+				sql += ", ";
+			}
+			sql += QuoteIdent(table.columns[i]);
+		}
+	}
+	sql += " FROM ";
+	sql += QuoteIdent(table.name);
+	return sql;
 }
 
 arrow::Result<std::unique_ptr<arrow::flight::SchemaResult>>
@@ -826,9 +854,16 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetDb
 arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfoTables(
     const ServerCallContext &context, const sql::GetTables &command, const FlightDescriptor &descriptor) {
 	try {
-		Auth(context);
+		auto c = Auth(context);
 		auto schema = command.include_schema ? sql::SqlSchema::GetTablesSchemaWithIncludedSchema()
 		                                     : sql::SqlSchema::GetTablesSchema();
+		if (command.include_schema) {
+			try {
+				(void)Box(c);
+			} catch (const RedirectError &re) {
+				return MaybeProxyInfo(re, descriptor, c.rec.id, c.rec.key, "", schema);
+			}
+		}
 		return MetaInfo(descriptor, schema);
 	} catch (const std::exception &e) {
 		return FromEx(e);
@@ -842,6 +877,10 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetTa
 		auto spec = c.spec;
 		auto schema = command.include_schema ? sql::SqlSchema::GetTablesSchemaWithIncludedSchema()
 		                                     : sql::SqlSchema::GetTablesSchema();
+		std::shared_ptr<TenantSandbox> box;
+		if (command.include_schema) {
+			box = Box(c);
+		}
 		arrow::StringBuilder cat, db, name, typ;
 		arrow::BinaryBuilder schb;
 		int64_t rows = 0;
@@ -856,17 +895,7 @@ arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::DoGetTa
 			ARROW_RETURN_NOT_OK(name.Append(kv.second.name));
 			ARROW_RETURN_NOT_OK(typ.Append("TABLE"));
 			if (command.include_schema) {
-				std::vector<std::shared_ptr<arrow::Field>> fields;
-				for (auto &col : kv.second.columns) {
-					std::string lt = "VARCHAR";
-					for (auto &m : kv.second.lake_columns) {
-						if (m.name == ddb::StringUtil::Lower(col)) {
-							lt = m.lake_type;
-						}
-					}
-					fields.push_back(arrow::field(col, MapTypeName(lt)));
-				}
-				auto ts = arrow::schema(fields);
+				auto ts = box->DescribeRewrittenArrow(TableSelectSql(kv.second));
 				ARROW_ASSIGN_OR_RAISE(auto serialized, arrow::ipc::SerializeSchema(*ts));
 				ARROW_RETURN_NOT_OK(schb.Append(serialized->data(), static_cast<int32_t>(serialized->size())));
 			}

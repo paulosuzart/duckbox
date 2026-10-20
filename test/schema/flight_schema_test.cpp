@@ -9,10 +9,15 @@
 #include "duckbox/sandbox.hpp"
 #include "duckbox/sandbox_registry.hpp"
 
+#include <arrow/array.h>
 #include <arrow/buffer.h>
+#include <arrow/builder.h>
 #include <arrow/flight/client.h>
 #include <arrow/flight/sql/client.h>
+#include <arrow/io/memory.h>
 #include <arrow/ipc/dictionary.h>
+#include <arrow/ipc/reader.h>
+#include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
 
@@ -121,6 +126,70 @@ void ExpectFlightMatch(arrow::flight::sql::FlightSqlClient &sql, arrow::flight::
     duckbox::test::Expect((*tbl)->schema()->Equals(*advertised),
                           msg + " GetFlightInfo/GetSchema match DoGet batches advertised=" +
                               advertised->ToString() + " batch=" + (*tbl)->schema()->ToString());
+}
+
+std::shared_ptr<arrow::Schema> SchemaFromIpcMessage(const uint8_t *data, int32_t size,
+                                                    const std::string &msg) {
+    if (!data || size <= 0) {
+        duckbox::test::Expect(false, msg + " empty included schema");
+        return nullptr;
+    }
+    auto buf = std::make_shared<arrow::Buffer>(data, size);
+    auto reader = std::make_shared<arrow::io::BufferReader>(buf);
+    arrow::ipc::DictionaryMemo memo;
+    auto got = arrow::ipc::ReadSchema(reader.get(), &memo);
+    duckbox::test::Expect(got.ok(), msg + " ReadSchema: " + got.status().ToString());
+    if (!got.ok()) {
+        return nullptr;
+    }
+    return *got;
+}
+
+std::shared_ptr<arrow::Schema> IncludedTableSchema(arrow::flight::sql::FlightSqlClient &sql,
+                                                   arrow::flight::FlightClient &raw,
+                                                   const arrow::flight::FlightCallOptions &opt,
+                                                   const std::string &table_name) {
+    auto info_res = sql.GetTables(opt, nullptr, nullptr, &table_name, true, nullptr);
+    duckbox::test::Expect(info_res.ok(),
+                          table_name + " GetTables: " + info_res.status().ToString());
+    if (!info_res.ok()) {
+        return nullptr;
+    }
+    auto info = std::move(info_res).ValueOrDie();
+    duckbox::test::Expect(!info->endpoints().empty(), table_name + " GetTables has a ticket");
+    if (info->endpoints().empty()) {
+        return nullptr;
+    }
+    auto stream_res = raw.DoGet(opt, info->endpoints()[0].ticket);
+    duckbox::test::Expect(stream_res.ok(),
+                          table_name + " GetTables DoGet: " + stream_res.status().ToString());
+    if (!stream_res.ok()) {
+        return nullptr;
+    }
+    auto tbl = stream_res.ValueOrDie()->ToTable();
+    duckbox::test::Expect(tbl.ok() && (*tbl)->num_rows() >= 1,
+                          table_name + " GetTables rows: " + tbl.status().ToString());
+    if (!tbl.ok() || (*tbl)->num_rows() < 1) {
+        return nullptr;
+    }
+    auto names = (*tbl)->GetColumnByName("table_name");
+    auto schemas = (*tbl)->GetColumnByName("table_schema");
+    duckbox::test::Expect(names && schemas, table_name + " GetTables has table_schema");
+    if (!names || !schemas) {
+        return nullptr;
+    }
+    auto name_arr = std::static_pointer_cast<arrow::StringArray>(names->chunk(0));
+    auto schema_arr = std::static_pointer_cast<arrow::BinaryArray>(schemas->chunk(0));
+    for (int64_t i = 0; i < name_arr->length(); i++) {
+        if (name_arr->GetString(i) != table_name) {
+            continue;
+        }
+        int32_t nbytes = 0;
+        const uint8_t *bytes = schema_arr->GetValue(i, &nbytes);
+        return SchemaFromIpcMessage(bytes, nbytes, table_name + " include_schema");
+    }
+    duckbox::test::Expect(false, table_name + " missing from GetTables");
+    return nullptr;
 }
 
 } // namespace
@@ -232,6 +301,126 @@ void duckbox::test::RunFlightSchemaTests() {
                 }
             }
             Expect(ps->Close(opt).ok(), "ClosePreparedStatement count(*)");
+        }
+    }
+
+    {
+        auto prep_res = sql_client.Prepare(opt, "SELECT id, title FROM deals WHERE id = ?");
+        Expect(prep_res.ok(), "Prepare parameterized deals: " + prep_res.status().ToString());
+        if (prep_res.ok()) {
+            auto ps = std::move(prep_res).ValueOrDie();
+            arrow::Int32Builder ids;
+            Expect(ids.Append(1).ok(), "bind id parameter");
+            std::shared_ptr<arrow::Array> id_arr;
+            Expect(ids.Finish(&id_arr).ok(), "finish id parameter");
+            auto pschema = arrow::schema({arrow::field("$1", arrow::int32())});
+            auto batch = arrow::RecordBatch::Make(pschema, 1, {id_arr});
+            Expect(ps->SetParameters(batch).ok(), "SetParameters id = 1");
+            auto dataset = ps->dataset_schema();
+            Expect(dataset && dataset->num_fields() == 2, "parameterized dataset has id, title");
+            if (dataset && dataset->num_fields() == 2) {
+                Expect(dataset->field(0)->type()->id() == arrow::Type::INT32,
+                       "parameterized id is int32");
+                Expect(dataset->field(1)->type()->id() == arrow::Type::STRING,
+                       "parameterized title is utf8");
+            }
+            auto gs = ps->GetSchema(opt);
+            Expect(gs.ok(), "parameterized GetSchema: " + gs.status().ToString());
+            if (gs.ok() && dataset) {
+                arrow::ipc::DictionaryMemo memo;
+                auto got = (*gs)->GetSchema(&memo);
+                Expect(got.ok() && dataset->Equals(**got),
+                       "parameterized GetSchema matches dataset schema");
+            }
+            auto ex = ps->Execute(opt);
+            Expect(ex.ok(), "parameterized Execute: " + ex.status().ToString());
+            if (ex.ok()) {
+                auto info = std::move(ex).ValueOrDie();
+                auto advertised = InfoSchema(*info);
+                Expect(advertised && dataset && advertised->Equals(*dataset),
+                       "parameterized GetFlightInfo matches dataset schema");
+                Expect(!info->endpoints().empty(), "parameterized Execute has a ticket");
+                if (!info->endpoints().empty()) {
+                    auto stream_res = raw_client->DoGet(opt, info->endpoints()[0].ticket);
+                    Expect(stream_res.ok(),
+                           "parameterized DoGet: " + stream_res.status().ToString());
+                    if (stream_res.ok()) {
+                        auto tbl = stream_res.ValueOrDie()->ToTable();
+                        Expect(tbl.ok() && dataset && (*tbl)->schema()->Equals(*dataset),
+                               "parameterized DoGet matches GetSchema/GetFlightInfo");
+                        Expect(tbl.ok() && (*tbl)->num_rows() == 1,
+                               "parameterized DoGet returns the bound row");
+                    }
+                }
+            }
+            Expect(ps->Close(opt).ok(), "ClosePreparedStatement parameterized");
+        }
+    }
+
+    {
+        auto body = SpecBodyForAction(MemoryAnalystPath());
+        auto fn_at = body.find("functions:");
+        Expect(fn_at != std::string::npos, "memory analyst spec has functions");
+        if (fn_at != std::string::npos) {
+            body.insert(fn_at,
+                        "  qv:\n    authorized_view: true\n    columns: [x]\n"
+                        "  nested_v:\n    authorized_view: true\n    columns: [lst, st, mp]\n");
+        }
+        body += "\ninit_sql: \"CREATE TEMP VIEW qv AS SELECT 1 AS x; "
+                "CREATE TEMP VIEW nested_v AS SELECT [1, 2, 3] AS lst, "
+                "{'a': 1, 'b': 2} AS st, MAP(['k'], [1]) AS mp\"\n";
+        auto view_opt = opt;
+        view_opt.headers.clear();
+        view_opt.headers.emplace_back("x-duckbox-caller", "analyst-svc");
+        view_opt.headers.emplace_back("x-duckbox-sandbox", "schema-views");
+        view_opt.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+        auto created = ActionBody(*raw_client, view_opt, "CreateSandbox", body);
+        Expect(created.find("schema-views") != std::string::npos,
+               "CreateSandbox authorized/nested views");
+
+        ExpectFlightMatch(sql_client, *raw_client, view_opt, "SELECT x FROM qv",
+                          "authorized view qv");
+        auto qv_included = IncludedTableSchema(sql_client, *raw_client, view_opt, "qv");
+        if (qv_included) {
+            Expect(qv_included->num_fields() == 1 &&
+                       qv_included->field(0)->type()->id() == arrow::Type::INT32,
+                   "GetTables include_schema for authorized view qv is int32");
+        }
+
+        ExpectFlightMatch(sql_client, *raw_client, view_opt, "SELECT lst, st, mp FROM nested_v",
+                          "nested LIST/STRUCT/MAP");
+        auto nested_included = IncludedTableSchema(sql_client, *raw_client, view_opt, "nested_v");
+        auto nested_info = sql_client.Execute(view_opt, "SELECT lst, st, mp FROM nested_v");
+        Expect(nested_info.ok(), "nested DoGet info: " + nested_info.status().ToString());
+        if (nested_info.ok() && nested_included) {
+            auto info = std::move(nested_info).ValueOrDie();
+            auto advertised = InfoSchema(*info);
+            Expect(advertised && advertised->Equals(*nested_included),
+                   "GetTables include_schema matches GetFlightInfo for nested types "
+                   "included=" +
+                       nested_included->ToString() +
+                       " advertised=" + (advertised ? advertised->ToString() : "null"));
+            Expect(!info->endpoints().empty(), "nested Execute has a ticket");
+            if (!info->endpoints().empty()) {
+                auto stream_res = raw_client->DoGet(view_opt, info->endpoints()[0].ticket);
+                Expect(stream_res.ok(), "nested DoGet: " + stream_res.status().ToString());
+                if (stream_res.ok()) {
+                    auto tbl = stream_res.ValueOrDie()->ToTable();
+                    Expect(tbl.ok() && (*tbl)->schema()->Equals(*nested_included),
+                           "GetTables include_schema matches DoGet for LIST/STRUCT/MAP");
+                    if (tbl.ok()) {
+                        Expect((*tbl)->schema()->num_fields() == 3, "nested view has 3 columns");
+                        if ((*tbl)->schema()->num_fields() == 3) {
+                            Expect((*tbl)->schema()->field(0)->type()->id() == arrow::Type::LIST,
+                                   "lst is LIST, not utf8");
+                            Expect((*tbl)->schema()->field(1)->type()->id() == arrow::Type::STRUCT,
+                                   "st is STRUCT, not utf8");
+                            Expect((*tbl)->schema()->field(2)->type()->id() == arrow::Type::MAP,
+                                   "mp is MAP, not utf8");
+                        }
+                    }
+                }
+            }
         }
     }
 

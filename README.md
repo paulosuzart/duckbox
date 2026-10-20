@@ -204,6 +204,8 @@ Optional spec `lifecycle.idle_timeout` passivates an idle instance (daemon `limi
 
 `GetCatalogs` / `GetDbSchemas` / `GetTables` / `GetSqlInfo` are answered **by the sandbox** and filtered to spec-whitelisted tables/columns.
 
+Advertised Flight SQL schemas (`GetFlightInfo`, `GetSchema`, prepared `dataset_schema`, and `GetTables` with `include_schema`) use the same Arrow conversion as DoGet batches. Clients that cached the previous mapping will see type changes — for example `count(*)` is `int64` (BIGINT), not `int32`. Nested `LIST` / `STRUCT` / `MAP` columns keep those Arrow types instead of collapsing to `utf8`.
+
 Python is Arrow Flight SQL via ADBC. Use `examples/python/quickstart.ipynb` (or `quickstart.py`) after the daemon is up. `create_sandbox()` / `connect(sandbox=...)` send the id header for you.
 
 The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl for tests). With a `lease` endpoint, `S3ConditionalLeaseManager` owns sandboxes via If-None-Match / If-Match and a fencing epoch; memory daemons keep `SingleNodeLeaseManager`. Multi-node add/drain/crash: [docs/multi-node.md](docs/multi-node.md). CRUD also includes `DrainNode` (`duckbox node drain`).

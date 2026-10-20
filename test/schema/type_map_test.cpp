@@ -60,6 +60,10 @@ void duckbox::test::RunArrowTypeMapTests() {
     ExpectTypeId("DATE", arrow::Type::DATE32, "DATE is date32");
     ExpectTypeId("TIMESTAMP", arrow::Type::TIMESTAMP, "TIMESTAMP is timestamp");
     ExpectTypeId("INTERVAL", arrow::Type::INTERVAL_MONTH_DAY_NANO, "INTERVAL is not int32");
+    ExpectTypeId("INTEGER[]", arrow::Type::LIST, "INTEGER[] is list, not varchar");
+    ExpectTypeId("STRUCT(a INTEGER, b INTEGER)", arrow::Type::STRUCT,
+                 "STRUCT(...) is struct, not varchar");
+    ExpectTypeId("MAP(VARCHAR, INTEGER)", arrow::Type::MAP, "MAP(...) is map, not varchar");
 
     auto dec = MapTypeName("DECIMAL(10,2)");
     Expect(dec && dec->id() == arrow::Type::DECIMAL128, "DECIMAL maps to decimal128");
