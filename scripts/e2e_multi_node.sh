@@ -107,8 +107,9 @@ print("query via non-owner node-b ok", list(df["id"]))
 db.close()
 PY
 
-kill "$PID_A"
-wait "$PID_A" 2>/dev/null || true
+# Crash the owner (SIGKILL). SIGTERM can wait on the internal Serve thread.
+kill -9 "$PID_A" 2>/dev/null || true
+sleep 0.5
 PID_A=""
 
 "$PY" - <<'PY'

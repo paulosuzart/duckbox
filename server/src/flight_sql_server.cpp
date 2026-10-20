@@ -1261,7 +1261,9 @@ int RunServer(const ServerOptions &opt_in) {
 	(void)st;
 	st = pub->Serve();
 	running = false;
-	(void)internal->Shutdown();
+	auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
+	(void)internal->Shutdown(&deadline);
+	(void)pub->Shutdown(&deadline);
 	if (internal_th.joinable()) {
 		internal_th.join();
 	}

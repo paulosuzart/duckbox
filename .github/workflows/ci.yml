@@ -226,6 +226,7 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install -r examples/python/requirements.txt
       - name: Multi-node failover e2e
+        timeout-minutes: 8
         run: DUCKBOX_PYTHON=.venv/bin/python bash scripts/e2e_multi_node.sh
       - name: Compose logs on failure
         if: failure()
