@@ -896,9 +896,8 @@ arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContex
 					}
 				}
 			}
-			(void)timeout_ms;
 			auto ids = runtime_->Leases() ? runtime_->Leases()->OwnedIds() : std::vector<std::string>{};
-			runtime_->Drain();
+			runtime_->Drain(timeout_ms);
 			Json j;
 			j["draining"] = true;
 			j["released"] = ids.size();

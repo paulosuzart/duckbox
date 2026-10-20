@@ -663,9 +663,17 @@ void SandboxRuntime::SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes) {
 	nodes_ = std::move(nodes);
 }
 
-void SandboxRuntime::Drain() {
+void SandboxRuntime::Drain(int64_t timeout_ms) {
 	if (leases_) {
 		leases_->SetDraining(true);
+	}
+	if (timeout_ms > 0) {
+		if (timeout_ms > 60000) {
+			timeout_ms = 60000;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+	}
+	if (leases_) {
 		leases_->ReleaseOwned();
 	}
 	std::vector<std::string> ids;

@@ -82,11 +82,12 @@ duckbox node drain --url grpc://127.0.0.1:4748 --timeout 5000
 `DrainNode` (Flight DoAction):
 
 1. Stop taking **new** leases.
-2. Release owned leases (If-Match delete) so peers can acquire.
-3. Passivate local DuckDB instances.
-4. Delete the heartbeat object.
+2. Wait up to `timeout_ms` (cap 60s) so in-flight queries can finish.
+3. Release owned leases (If-Match delete) so peers can acquire.
+4. Passivate local DuckDB instances.
+5. Delete the heartbeat object.
 
-In-flight queries on the draining node may finish or fail the fence check; clients retry on another node. Then stop the process (`SIGINT`).
+Then stop the process (`SIGINT`). Clients that still hit this node after release get a redirect to the new owner.
 
 ## Crash
 

@@ -143,7 +143,7 @@ public:
 	// keep_from_version >= 0 keeps id@v for v >= that (N-1 during stale-handle grace).
 	void PassivateId(const std::string &id, const char *reason = "update", int keep_from_version = -1);
 	void SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes);
-	void Drain(); // stop new leases, release owned, passivate, deregister heartbeat
+	void Drain(int64_t timeout_ms = 0); // stop new leases, grace wait, release, passivate, deregister
 	std::shared_ptr<ILeaseManager> Leases() const {
 		return leases_;
 	}
