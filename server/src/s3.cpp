@@ -177,9 +177,21 @@ public:
 		return out;
 	}
 
-	S3Object Delete(const std::string &key) const override {
+	S3Object Delete(const std::string &key, const std::string &if_match) const override {
 		std::lock_guard<std::mutex> hold(mu_);
-		objects_.erase(key);
+		auto it = objects_.find(key);
+		if (!if_match.empty()) {
+			auto want = UnquoteEtag(if_match);
+			if (it == objects_.end() || it->second.etag != want) {
+				S3Object out;
+				out.status = 412;
+				out.error = "s3 DELETE " + key + " status 412";
+				return out;
+			}
+		}
+		if (it != objects_.end()) {
+			objects_.erase(it);
+		}
 		S3Object out;
 		out.status = 204;
 		return out;
@@ -281,10 +293,13 @@ public:
 		return out;
 	}
 
-	S3Object Delete(const std::string &key) const override {
+	S3Object Delete(const std::string &key, const std::string &if_match) const override {
 		Aws::S3::Model::DeleteObjectRequest req;
 		req.SetBucket(bucket_.c_str());
 		req.SetKey(key.c_str());
+		if (!if_match.empty()) {
+			req.SetIfMatch(QuoteEtag(if_match).c_str());
+		}
 		auto outc = client_->DeleteObject(req);
 		if (!outc.IsSuccess()) {
 			return FromAwsError(outc.GetError(), "DELETE", key);
@@ -339,6 +354,66 @@ std::shared_ptr<S3ControlClient> MakeMemoryS3ControlClient(std::string bucket) {
 	return std::make_shared<MemoryS3ControlClient>(std::move(bucket));
 }
 
+FaultyS3ControlClient::FaultyS3ControlClient(std::shared_ptr<S3ControlClient> inner) : inner_(std::move(inner)) {
+	if (!inner_) {
+		throw PolicyError("FaultyS3ControlClient requires an inner S3ControlClient");
+	}
+}
+
+void FaultyS3ControlClient::SetDown(bool down) {
+	std::lock_guard<std::mutex> hold(mu_);
+	down_ = down;
+}
+
+bool FaultyS3ControlClient::down() const {
+	return Down();
+}
+
+bool FaultyS3ControlClient::Down() const {
+	std::lock_guard<std::mutex> hold(mu_);
+	return down_;
+}
+
+S3Object FaultyS3ControlClient::Fail() const {
+	S3Object out;
+	out.status = 0;
+	out.error = "s3 transport down";
+	return out;
+}
+
+S3Object FaultyS3ControlClient::Get(const std::string &key) const {
+	if (Down()) {
+		return Fail();
+	}
+	return inner_->Get(key);
+}
+
+S3Object FaultyS3ControlClient::Put(const std::string &key, const std::string &body, const std::string &if_match,
+                                    const std::string &if_none_match) const {
+	if (Down()) {
+		return Fail();
+	}
+	return inner_->Put(key, body, if_match, if_none_match);
+}
+
+S3Object FaultyS3ControlClient::Delete(const std::string &key, const std::string &if_match) const {
+	if (Down()) {
+		return Fail();
+	}
+	return inner_->Delete(key, if_match);
+}
+
+std::vector<std::string> FaultyS3ControlClient::ListKeys(const std::string &prefix) const {
+	if (Down()) {
+		return {};
+	}
+	return inner_->ListKeys(prefix);
+}
+
+const std::string &FaultyS3ControlClient::bucket() const {
+	return inner_->bucket();
+}
+
 std::string ProbeControlPlaneS3(const LeaseSettings &lease) {
 	try {
 		auto client = MakeS3ControlClient(lease);
@@ -348,10 +423,21 @@ std::string ProbeControlPlaneS3(const LeaseSettings &lease) {
 		}
 		key += ".duckbox-cw-probe";
 		auto put = client->Put(key, "duckbox-lease-probe", "", "*");
-		if (put.status == 200 || put.status == 204 || put.status == 412) {
+		if (put.status != 200 && put.status != 204 && put.status != 412) {
+			return put.error.empty() ? "conditional PUT (If-None-Match) failed" : put.error;
+		}
+		auto got = client->Get(key);
+		if (got.status != 200) {
+			if (put.status == 200 || put.status == 204) {
+				return got.error.empty() ? "probe GET after PUT failed" : got.error;
+			}
 			return "";
 		}
-		return put.error.empty() ? "conditional PUT (If-None-Match) failed" : put.error;
+		auto del = client->Delete(key, got.etag);
+		if (del.status != 200 && del.status != 204 && del.status != 404 && del.status != 412) {
+			return del.error.empty() ? "conditional DELETE (If-Match) failed" : del.error;
+		}
+		return "";
 	} catch (const std::exception &e) {
 		return e.what();
 	}

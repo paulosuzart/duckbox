@@ -51,7 +51,7 @@ jobs:
   macos-arm64:
     name: macOS arm64 (build + unit)
     runs-on: macos-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     env:
       DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
     steps:
@@ -75,9 +75,12 @@ jobs:
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)"
-          cmake --build build --parallel
-      - name: Unit and guardrail tests
-        run: ctest --test-dir build -L 'unit|guardrails' --output-on-failure
+          JOBS="$(sysctl -n hw.ncpu)"
+          cmake --build build --parallel "$JOBS" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests
+      - name: Unit, guardrail, and integration tests
+        env:
+          DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+        run: ctest --test-dir build -L 'unit|guardrails|integration' --output-on-failure
 
   coverage:
     name: Line coverage (gcovr)
@@ -182,6 +185,54 @@ jobs:
             exit 1
           fi
           kill "$(cat /tmp/duckbox.pid)" || true
+      - name: Compose logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Stop compose
+        if: always()
+        run: docker compose down -v
+
+  multi-node:
+    name: Multi-node e2e (RustFS, 3 daemons)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      CC: gcc
+      CXX: g++
+      DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+      DUCKBOX_S3_KEY: rustfsadmin
+      DUCKBOX_S3_SECRET: rustfsadmin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Arrow Flight SQL + build tools
+        run: bash scripts/install_arrow.sh
+      - name: Cache DuckDB deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            .deps
+            ~/.duckdb
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch deps and build
+        run: |
+          bash scripts/fetch_deps.sh
+          bash scripts/install_aws_sdk.sh
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
+          cmake --build build --parallel
+      - name: Start RustFS
+        run: docker compose up -d --wait rustfs
+      - name: Python deps
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r examples/python/requirements.txt
+      - name: Multi-node failover e2e
+        timeout-minutes: 8
+        run: DUCKBOX_PYTHON=.venv/bin/python bash scripts/e2e_multi_node.sh
+      - name: SIGINT/SIGTERM exit and deregister
+        timeout-minutes: 5
+        run: DUCKBOX_PYTHON=.venv/bin/python bash scripts/e2e_signal_shutdown.sh
       - name: Compose logs on failure
         if: failure()
         run: docker compose logs

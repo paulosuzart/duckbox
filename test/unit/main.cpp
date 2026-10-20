@@ -14,5 +14,7 @@ int main() {
 	RunRegistryTests();
 	RunMetricsTests();
 	RunS3ClientTests();
+	RunLeaseTests();
+	RunMembershipTests();
 	return ReportAndExit("unit");
 }

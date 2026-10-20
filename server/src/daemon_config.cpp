@@ -12,6 +12,7 @@
 #include <fnmatch.h>
 #include <iostream>
 #include <sstream>
+#include <sys/stat.h>
 #include <unordered_set>
 
 namespace duckbox {
@@ -53,7 +54,44 @@ bool GlobMatch(const std::string &pattern, const std::string &value) {
 	return fnmatch(pattern.c_str(), value.c_str(), FNM_NOESCAPE) == 0;
 }
 
+bool IsLoopbackHost(const std::string &host) {
+	return host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]" || host == "0:0:0:0:0:0:0:1";
+}
+
+std::string DefaultInternalListen(const std::string &listen) {
+	auto lp = ParseListenAddress(listen, 4747);
+	return "127.0.0.1:" + std::to_string(lp.second + 1000);
+}
+
+void FinalizeDaemonListen(DaemonConfig &cfg) {
+	if (cfg.internal_listen.empty()) {
+		auto lp = ParseListenAddress(cfg.listen, 4747);
+		if (IsLoopbackHost(lp.first)) {
+			cfg.internal_listen = DefaultInternalListen(cfg.listen);
+		}
+	}
+	if (cfg.lease.advertise.empty() && !cfg.internal_listen.empty()) {
+		cfg.lease.advertise = "grpc://" + cfg.internal_listen;
+	}
+}
+
+void AuthorizeOperator(const DaemonConfig &cfg, const std::string &identity) {
+	std::string id = identity.empty() ? "local" : identity;
+	if (id == kPeerIdentity) {
+		return;
+	}
+	for (auto &op : cfg.operators) {
+		if (op == "*" || op == id) {
+			return;
+		}
+	}
+	throw AuthError("caller '" + id + "' is not a node operator");
+}
+
 void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity, const std::string &sandbox_key) {
+	if (identity == kPeerIdentity) {
+		return;
+	}
 	if (cfg.callers.empty()) {
 		if (!cfg.allow_insecure_dev) {
 			throw AuthError("auth.callers is required unless auth.allow_insecure_dev");
@@ -96,14 +134,18 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 		throw PolicyError("daemon config root must be a mapping: " + path);
 	}
 	// Allowed-but-forbidden: lake/tables/policy/spec are rejected below, not as unknown keys.
-	YamlRejectUnknownKeys(root, {"name", "listen", "handle_secret", "handle_secret_env", "auth", "limits", "metrics",
-	                             "metrics_listen", "lake_allow", "lease", "debug_http", "lake", "tables", "policy",
-	                             "spec"});
+	YamlRejectUnknownKeys(root, {"name", "listen", "internal_listen", "handle_secret", "handle_secret_env", "auth",
+	                             "limits", "metrics", "metrics_listen", "lake_allow", "lease", "debug_http", "lake",
+	                             "tables", "policy", "spec"});
 	DaemonConfig d;
 	d.allowed_init_settings = kDefaultAllowedInitSettings;
 	d.source_path = path;
 	d.name = root.GetString("name", d.name);
 	d.listen = root.GetString("listen", d.listen);
+	if (root.Get("internal_listen")) {
+		d.internal_listen_configured = true;
+		d.internal_listen = root.GetString("internal_listen");
+	}
 	d.handle_secret = root.GetString("handle_secret", d.handle_secret);
 	auto secret_env = root.GetString("handle_secret_env");
 	if (!secret_env.empty()) {
@@ -124,7 +166,10 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 	}
 	if (auto *auth = root.Get("auth")) {
 		YamlRejectUnknownKeys(*auth, {"mode", "allow_insecure_dev", "jwt_secret", "jwt_secret_env", "bearer_secrets",
-		                              "callers"});
+		                              "callers", "operators", "peer_secret_ref", "peer_secret"});
+		if (auth->Get("peer_secret")) {
+			throw PolicyError("auth.peer_secret is not allowed; use auth.peer_secret_ref (env: or file:)");
+		}
 		auto mode = auth->GetString("mode", "trusted");
 		for (char &c : mode) {
 			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -164,7 +209,23 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 				if (b.identity.empty() || b.secret.empty()) {
 					throw PolicyError("auth.bearer_secrets[].identity and secret are required");
 				}
+				if (b.identity == kPeerIdentity) {
+					throw PolicyError("auth.bearer_secrets[].identity 'peer' is reserved");
+				}
 				d.bearer_secrets.push_back(std::move(b));
+			}
+		}
+		d.operators = StringList(auth->Get("operators"), "auth.operators");
+		d.peer_secret_ref = auth->GetString("peer_secret_ref");
+		if (!d.peer_secret_ref.empty()) {
+			auto ref = ParseSecretRef(d.peer_secret_ref, "auth.peer_secret_ref");
+			d.peer_secret_ref = ref.Spec();
+			d.peer_secret = TrimCopy(EnvFileSecretResolver{}.Resolve(ref, "auth.peer_secret_ref"));
+			if (ref.scheme == SecretRef::Scheme::File) {
+				struct stat st {};
+				if (stat(ref.locator.c_str(), &st) == 0 && (st.st_mode & S_IROTH)) {
+					throw PolicyError("auth.peer_secret_ref: secret file is world-readable");
+				}
 			}
 		}
 		if (auto *callers = auth->Get("callers")) {
@@ -182,6 +243,9 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 				rule.key_patterns = StringList(item.Get("keys"), "auth.callers[" + std::to_string(i) + "].keys");
 				if (rule.identity.empty()) {
 					throw PolicyError("auth.callers[].identity is required");
+				}
+				if (rule.identity == kPeerIdentity) {
+					throw PolicyError("auth.callers[].identity 'peer' is reserved");
 				}
 				d.callers.push_back(std::move(rule));
 			}
@@ -218,7 +282,9 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 	}
 	if (auto *lease = root.Get("lease")) {
 		YamlRejectUnknownKeys(*lease, {"endpoint", "endpoint_env", "bucket", "prefix", "access_key_env",
-		                               "secret_key_env", "skip_probe"});
+		                               "secret_key_env", "skip_probe", "node_id", "advertise", "ttl", "ttl_ms",
+		                               "heartbeat", "heartbeat_ms", "skew", "skew_ms", "cache_ms", "gc", "gc_ms",
+		                               "proxy_timeout", "proxy_timeout_ms", "max_leases"});
 		d.lease.endpoint = lease->GetString("endpoint");
 		d.lease.endpoint_env = lease->GetString("endpoint_env");
 		d.lease.bucket = lease->GetString("bucket");
@@ -226,11 +292,78 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 		d.lease.access_key_env = lease->GetString("access_key_env");
 		d.lease.secret_key_env = lease->GetString("secret_key_env");
 		d.lease.skip_probe = lease->GetBool("skip_probe", false);
+		d.lease.node_id = lease->GetString("node_id");
+		d.lease.advertise = lease->GetString("advertise");
+		d.lease.ttl_ms = lease->GetInt("ttl_ms", d.lease.ttl_ms);
+		auto ttl_raw = lease->GetString("ttl");
+		if (!ttl_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(ttl_raw, &ms) || ms <= 0) {
+				throw PolicyError("lease.ttl: expected duration like 15s, 30s");
+			}
+			d.lease.ttl_ms = ms;
+		}
+		bool hb_set = lease->Get("heartbeat") || lease->Get("heartbeat_ms");
+		d.lease.heartbeat_ms = lease->GetInt("heartbeat_ms", d.lease.heartbeat_ms);
+		auto hb_raw = lease->GetString("heartbeat");
+		if (!hb_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(hb_raw, &ms) || ms <= 0) {
+				throw PolicyError("lease.heartbeat: expected duration like 5s");
+			}
+			d.lease.heartbeat_ms = ms;
+		}
+		if (!hb_set) {
+			d.lease.heartbeat_ms = d.lease.ttl_ms / 3;
+			if (d.lease.heartbeat_ms < 1000) {
+				d.lease.heartbeat_ms = 1000;
+			}
+		}
+		auto cap = lease->GetInt("max_leases", 0);
+		if (cap < 0) {
+			throw PolicyError("lease.max_leases must be >= 0");
+		}
+		d.lease.max_leases = static_cast<size_t>(cap);
+		d.lease.skew_ms = lease->GetInt("skew_ms", d.lease.skew_ms);
+		auto skew_raw = lease->GetString("skew");
+		if (!skew_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(skew_raw, &ms) || ms < 0) {
+				throw PolicyError("lease.skew: expected duration like 1s");
+			}
+			d.lease.skew_ms = ms;
+		}
+		d.lease.cache_ms = lease->GetInt("cache_ms", d.lease.cache_ms);
+		if (d.lease.cache_ms < 0) {
+			throw PolicyError("lease.cache_ms must be >= 0");
+		}
+		d.lease.gc_ms = lease->GetInt("gc_ms", d.lease.gc_ms);
+		auto gc_raw = lease->GetString("gc");
+		if (!gc_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(gc_raw, &ms) || ms < 0) {
+				throw PolicyError("lease.gc: expected duration like 24h");
+			}
+			d.lease.gc_ms = ms;
+		}
+		if (d.lease.gc_ms < 0) {
+			throw PolicyError("lease.gc_ms must be >= 0");
+		}
+		d.lease.proxy_timeout_ms = lease->GetInt("proxy_timeout_ms", d.lease.proxy_timeout_ms);
+		auto pto_raw = lease->GetString("proxy_timeout");
+		if (!pto_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(pto_raw, &ms) || ms <= 0) {
+				throw PolicyError("lease.proxy_timeout: expected duration like 5s");
+			}
+			d.lease.proxy_timeout_ms = ms;
+		}
 	}
 	if (root.Get("lake") || root.Get("tables") || root.Get("policy") || root.Get("spec")) {
 		throw PolicyError("daemon config is control-plane only (no lake, tables, or spec). "
 		                  "Lake attach and credentials belong on the named sandbox definition.");
 	}
+	FinalizeDaemonListen(d);
 	return d;
 }
 
@@ -268,6 +401,34 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
 	}
 	if (cfg.handle_ttl_seconds <= 0) {
 		add("limits.handle_ttl_seconds", "must be > 0");
+	}
+	try {
+		auto lp = ParseListenAddress(cfg.listen, 4747);
+		if (!cfg.internal_listen_configured) {
+			if (!IsLoopbackHost(lp.first)) {
+				add("internal_listen", "required when listen is not loopback (never expose the internal listener)");
+			} else if (!cfg.lease.advertise.empty()) {
+				auto expected = "grpc://" + DefaultInternalListen(cfg.listen);
+				if (cfg.lease.advertise != expected) {
+					add("internal_listen", "required when lease.advertise is set");
+				}
+			}
+		}
+		if (!cfg.internal_listen.empty()) {
+			auto ip = ParseListenAddress(cfg.internal_listen, 5747);
+			if (ip.second <= 0 || ip.second > 65535) {
+				add("internal_listen", "port out of range");
+			}
+		}
+	} catch (const std::exception &e) {
+		add("internal_listen", e.what());
+	}
+	if (cfg.internal_listen_configured && (!cfg.lease.endpoint.empty() || !cfg.lease.endpoint_env.empty()) &&
+	    cfg.peer_secret.empty()) {
+		add("auth.peer_secret_ref", "required for multi-node (env: or file:; never a plaintext value)");
+	}
+	if (!cfg.peer_secret.empty() && static_cast<int>(cfg.peer_secret.size()) < kMinPeerSecretLen) {
+		add("auth.peer_secret_ref", "must be at least 16 characters");
 	}
 	if (!cfg.metrics_listen.empty() && cfg.metrics_listen != "off" && cfg.metrics_listen != "false") {
 		try {

@@ -7,6 +7,8 @@ void RunSandboxExecTests();
 void RunRuntimeTests();
 void RunS3RegistryTests();
 void RunAuthFlightTests();
+void RunClusterTests();
+void RunSignalShutdownTests();
 
 } // namespace test
 } // namespace duckbox

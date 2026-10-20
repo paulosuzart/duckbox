@@ -1,5 +1,6 @@
 #include "duckbox/sandbox.hpp"
 #include "duckbox/arrow_ipc.hpp"
+#include "duckbox/error.hpp"
 #include "duckbox/init_sql.hpp"
 #include "duckbox/json.hpp"
 #include "duckbox/lake.hpp"
@@ -13,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <iostream>
 #include <sstream>
 #include <thread>
 
@@ -37,12 +39,20 @@ TenantSandbox::~TenantSandbox() {
 
 void TenantSandbox::Passivate(const char *reason) {
 	std::lock_guard<std::mutex> hold(mu_);
+	std::lock_guard<std::mutex> interrupt(interrupt_mu_);
 	bool was_warm = static_cast<bool>(db_);
 	con_.reset();
 	db_.reset();
 	plan_info_.reset();
 	if (was_warm) {
 		Metrics().IncPassivation(reason ? reason : "shutdown");
+	}
+}
+
+void TenantSandbox::Interrupt() {
+	std::lock_guard<std::mutex> interrupt(interrupt_mu_);
+	if (con_) {
+		con_->Interrupt();
 	}
 }
 
@@ -569,8 +579,41 @@ void SandboxRuntime::PassivateId(const std::string &id, const char *reason, int 
 	PublishResidentLocked();
 }
 
+void SandboxRuntime::BeginRequest() {
+	inflight_.fetch_add(1);
+}
+
+void SandboxRuntime::EndRequest() {
+	if (inflight_.fetch_sub(1) == 1) {
+		std::lock_guard<std::mutex> hold(drain_mu_);
+		drain_cv_.notify_all();
+	}
+}
+
+void SandboxRuntime::InterruptId(const std::string &id) {
+	std::lock_guard<std::mutex> hold(mu_);
+	auto prefix = id + "@";
+	for (auto &kv : boxes_) {
+		if (kv.first == id || kv.first.rfind(prefix, 0) == 0) {
+			kv.second->Interrupt();
+		}
+	}
+}
+
 std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
+	AssertServing();
 	auto key = ParseTenantKey(rec.key, rec.spec.key);
+	auto lease = leases_->Acquire(rec.id);
+	if (!lease.owned_locally) {
+		if (lease.owner_id.empty() || lease.flight.empty()) {
+			throw UnavailableError("sandbox has no owner; retry");
+		}
+		if (nodes_ && !nodes_->IsKnownFlight(lease.flight)) {
+			throw UnavailableError("peer advertise URL is not a registered node");
+		}
+		Metrics().IncRoute("redirect");
+		throw RedirectError(lease.owner_id, lease.flight);
+	}
 	if (router_) {
 		router_->Decide(key);
 	} else {
@@ -613,7 +656,6 @@ std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
 		oldest->second->Passivate("evict");
 		boxes_.erase(oldest);
 	}
-	leases_->Acquire(key);
 	auto t0 = std::chrono::steady_clock::now();
 	auto init_sql = rec.spec.init_sql;
 	auto box = std::make_shared<TenantSandbox>(daemon_, rec.spec, key, init_sql, rec.spec_dir, rec.id, rec.version,
@@ -649,6 +691,197 @@ void SandboxRuntime::EvictIdleLocked() {
 		auto idle = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second->last_used()).count();
 		if (idle >= idle_limit && it->second.use_count() == 1 && it->second->Warm()) {
 			it->second->Passivate("idle");
+		}
+	}
+}
+
+void SandboxRuntime::SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes) {
+	nodes_ = std::move(nodes);
+	if (nodes_ && !clock_) {
+		clock_ = nodes_->clock();
+	}
+}
+
+void SandboxRuntime::SetClock(std::shared_ptr<Clock> clock) {
+	clock_ = std::move(clock);
+}
+
+void SandboxRuntime::SetFenceHook(std::function<void(const std::string &)> hook) {
+	fence_hook_ = std::move(hook);
+}
+
+int64_t SandboxRuntime::NowMs() const {
+	return clock_ ? clock_->NowMs() : SystemClock().NowMs();
+}
+
+bool SandboxRuntime::Serving() const {
+	if (fenced_.load()) {
+		return false;
+	}
+	if (nodes_ && nodes_->has_published() && NowMs() >= nodes_->published_expiry_ms()) {
+		return false;
+	}
+	return true;
+}
+
+void SandboxRuntime::AssertServing() {
+	if (fenced_.load()) {
+		throw Error(fence_reason_.empty() ? "node is fenced" : fence_reason_);
+	}
+	if (nodes_ && nodes_->has_published() && NowMs() >= nodes_->published_expiry_ms()) {
+		Fence("node_lease_watchdog_fence");
+		throw Error("node_lease_watchdog_fence");
+	}
+}
+
+void SandboxRuntime::Fence(const std::string &reason) {
+	if (fenced_.exchange(true)) {
+		return;
+	}
+	fence_reason_ = reason;
+	Metrics().SetNodeHealthy(false);
+	std::vector<std::shared_ptr<TenantSandbox>> live;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		for (auto &kv : boxes_) {
+			live.push_back(kv.second);
+		}
+	}
+	for (auto &box : live) {
+		box->Interrupt();
+	}
+	std::vector<std::string> ids;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		for (auto &kv : boxes_) {
+			auto at = kv.first.find('@');
+			ids.push_back(at == std::string::npos ? kv.first : kv.first.substr(0, at));
+		}
+	}
+	for (auto &id : ids) {
+		PassivateId(id, "self_fence");
+	}
+	Json fence_log;
+	fence_log["event"] = "self_fence";
+	fence_log["reason"] = reason;
+	std::clog << fence_log.dump() << "\n";
+	if (fence_hook_) {
+		fence_hook_(reason);
+		return;
+	}
+	SelfFence(reason);
+}
+
+void SandboxRuntime::TickLeases() {
+	if (fenced_.load()) {
+		return;
+	}
+	if (nodes_ && nodes_->has_published() && NowMs() >= nodes_->published_expiry_ms()) {
+		Fence("node_lease_watchdog_fence");
+		return;
+	}
+	if (nodes_) {
+		try {
+			nodes_->Heartbeat();
+			Metrics().SetNodeHealthy(true);
+		} catch (const std::exception &e) {
+			std::string why = e.what();
+			auto chk = nodes_->CheckPublished();
+			if (why.find("mismatch") != std::string::npos || chk == S3NodeDirectory::RecordCheck::Mismatch) {
+				Fence("node_lease_record_mismatch_fence");
+				return;
+			}
+			if (chk == S3NodeDirectory::RecordCheck::Missing) {
+				Fence("node_lease_record_missing_fence");
+				return;
+			}
+			if (nodes_->has_published() && NowMs() >= nodes_->published_expiry_ms()) {
+				Fence("node_lease_watchdog_fence");
+				return;
+			}
+			Json retry;
+			retry["event"] = "node_lease_retry";
+			retry["reason"] = why;
+			std::clog << retry.dump() << "\n";
+		}
+	}
+	if (leases_) {
+		Metrics().SetNodeHealthy(Serving());
+		for (auto &id : leases_->OwnedIds()) {
+			try {
+				leases_->Renew(leases_->Held(id));
+			} catch (const std::exception &e) {
+				InterruptId(id);
+				PassivateId(id, "lease_lost");
+				Json lost;
+				lost["event"] = "lease_lost";
+				lost["resource"] = id;
+				lost["reason"] = e.what();
+				std::clog << lost.dump() << "\n";
+			}
+		}
+		if (!nodes_) {
+			try {
+				Lease node;
+				node.tenant_key = "__node__";
+				leases_->Renew(node);
+			} catch (const std::exception &e) {
+				Json nr;
+				nr["event"] = "node_renew";
+				nr["reason"] = e.what();
+				std::clog << nr.dump() << "\n";
+			}
+		}
+		try {
+			leases_->GcTombstones();
+		} catch (const std::exception &e) {
+			Json gc;
+			gc["event"] = "lease_gc";
+			gc["reason"] = e.what();
+			std::clog << gc.dump() << "\n";
+		}
+	} else {
+		Metrics().SetNodeHealthy(Serving());
+	}
+}
+
+void SandboxRuntime::Drain(int64_t timeout_ms) {
+	if (leases_) {
+		leases_->SetDraining(true);
+	}
+	if (nodes_) {
+		nodes_->SetDraining(true);
+		try {
+			nodes_->Heartbeat();
+		} catch (const std::exception &) {
+		}
+	}
+	if (timeout_ms > 0) {
+		if (timeout_ms > 60000) {
+			timeout_ms = 60000;
+		}
+		std::unique_lock<std::mutex> hold(drain_mu_);
+		drain_cv_.wait_for(hold, std::chrono::milliseconds(timeout_ms),
+		                   [this] { return inflight_.load() <= 0 || fenced_.load(); });
+	}
+	if (leases_) {
+		leases_->ReleaseOwned();
+	}
+	std::vector<std::string> ids;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		for (auto &kv : boxes_) {
+			auto at = kv.first.find('@');
+			ids.push_back(at == std::string::npos ? kv.first : kv.first.substr(0, at));
+		}
+	}
+	for (auto &id : ids) {
+		PassivateId(id, "drain");
+	}
+	if (nodes_) {
+		try {
+			nodes_->Deregister();
+		} catch (const std::exception &) {
 		}
 	}
 }
@@ -722,7 +955,12 @@ std::vector<SandboxSummary> SandboxRuntime::Summarize(const std::vector<SandboxR
 		s.key = r.key;
 		s.policy_class = r.policy_class;
 		s.version = r.version;
-		s.owner = daemon_.name;
+		auto own = leases_->Peek(r.id);
+		if (own.owned_locally || (own.expiry_ms > 0 && !own.owner_id.empty())) {
+			s.owner = own.owner_id;
+		} else {
+			s.owner = daemon_.name;
+		}
 		s.created_at_ms = r.created_at_ms;
 		s.updated_at_ms = r.updated_at_ms;
 		s.expires_at_ms = r.expires_at_ms;

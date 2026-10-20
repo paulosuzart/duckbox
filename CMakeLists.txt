@@ -359,7 +359,9 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/crypto_test.cpp
   test/unit/registry_test.cpp
   test/unit/metrics_test.cpp
-  test/unit/s3_test.cpp)
+  test/unit/s3_test.cpp
+  test/unit/lease_test.cpp
+  test/unit/membership_test.cpp)
 
 duckbox_add_test(duckbox_guardrail_tests
   test/support/check.cpp
@@ -371,7 +373,12 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/sandbox_exec_test.cpp
   test/integration/runtime_test.cpp
   test/integration/s3_registry_test.cpp
-  test/integration/auth_flight_test.cpp)
+  test/integration/auth_flight_test.cpp
+  test/integration/cluster_test.cpp
+  test/integration/signal_shutdown_test.cpp)
+add_dependencies(duckbox_integration_tests duckbox)
+target_compile_definitions(duckbox_integration_tests PRIVATE
+  DUCKBOX_BIN_PATH="$<TARGET_FILE:duckbox>")
 
 enable_testing()
 add_test(NAME unit COMMAND duckbox_unit_tests)

@@ -7,11 +7,13 @@
 // FlightServerBase wrapper intercepts those actions.
 
 #include "duckbox/daemon_config.hpp"
+#include "duckbox/error.hpp"
 #include "duckbox/handle.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/sandbox.hpp"
 #include "duckbox/sandbox_registry.hpp"
 
+#include <arrow/flight/client.h>
 #include <arrow/flight/sql/server.h>
 #include <arrow/flight/server.h>
 
@@ -34,7 +36,8 @@ class DuckboxFlightSqlServer : public arrow::flight::sql::FlightSqlServerBase {
 public:
 	DuckboxFlightSqlServer(DaemonConfig daemon, std::shared_ptr<SandboxRegistry> defs,
 	                       std::shared_ptr<SandboxRuntime> runtime, std::shared_ptr<IHandleSigner> signer,
-	                       std::shared_ptr<ISqlRewriter> rewriter);
+	                       std::shared_ptr<ISqlRewriter> rewriter, ListenerPlane plane = ListenerPlane::Public,
+	                       std::shared_ptr<class PeerFlight> peers = {});
 
 	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> GetFlightInfoStatement(
 	    const arrow::flight::ServerCallContext &context, const arrow::flight::sql::StatementQuery &command,
@@ -77,11 +80,15 @@ public:
 	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> DoGetTableTypes(
 	    const arrow::flight::ServerCallContext &context) override;
 
-	// CreateSandbox / Get / Update / Delete / List / Expire. Caller must match auth.callers.
+	// CreateSandbox / Get / Update / Delete / List / Expire (auth.callers).
+	// DrainNode is auth.operators only (deny by default).
 	arrow::Status HandleSandboxAction(const arrow::flight::ServerCallContext &context, const arrow::flight::Action &action,
 	                                  std::unique_ptr<arrow::flight::ResultStream> *result);
 
-	static const std::vector<arrow::flight::ActionType> &SandboxActionTypes();
+	static const std::vector<arrow::flight::ActionType> &SandboxActionTypes(ListenerPlane plane);
+	ListenerPlane plane() const {
+		return plane_;
+	}
 
 private:
 	struct CallCtx {
@@ -94,22 +101,32 @@ private:
 	};
 	CallCtx Auth(const arrow::flight::ServerCallContext &context) const;
 	std::string CallerOf(const arrow::flight::ServerCallContext &context) const;
+	void RequirePeerQuery(const std::string &caller) const;
 	std::shared_ptr<TenantSandbox> Box(const CallCtx &c) const;
 	StatementHandle MakeHandle(const CallCtx &c, const std::string &rewritten, int user_params) const;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> Info(
 	    const arrow::flight::FlightDescriptor &descriptor, const std::string &token,
-	    const std::shared_ptr<arrow::Schema> &schema) const;
+	    const std::shared_ptr<arrow::Schema> &schema, const std::string &redirect_flight = "") const;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> MetaInfo(
 	    const arrow::flight::FlightDescriptor &descriptor, const std::shared_ptr<arrow::Schema> &schema) const;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> StreamIpc(const std::vector<uint8_t> &ipc) const;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> StreamBatch(
 	    const std::shared_ptr<arrow::RecordBatch> &batch) const;
 
+	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> MaybeProxyInfo(
+	    const RedirectError &re, const arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
+	    const std::string &key, const std::string &token, const std::shared_ptr<arrow::Schema> &schema);
+	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> MaybeProxyDoGet(
+	    const RedirectError &re, const arrow::flight::Ticket &ticket, const std::string &sandbox_id,
+	    const std::string &key);
+
 	DaemonConfig daemon_;
 	std::shared_ptr<SandboxRegistry> defs_;
 	std::shared_ptr<SandboxRuntime> runtime_;
 	std::shared_ptr<IHandleSigner> signer_;
 	std::shared_ptr<ISqlRewriter> rewriter_;
+	ListenerPlane plane_ = ListenerPlane::Public;
+	std::shared_ptr<PeerFlight> peers_;
 	void RememberBind(const std::string &key, const std::string &ipc) const;
 
 	mutable std::mutex bind_mu_;
@@ -144,6 +161,9 @@ private:
 	std::unique_ptr<DuckboxFlightSqlServer> sql_;
 };
 
+// Block SIGINT/SIGTERM in this thread so later-spawned threads inherit the mask.
+// RunServer starts a sigwait thread; the first signal is graceful, the second _Exit.
+void BlockTerminationSignals();
 int RunServer(const ServerOptions &opt); // ValidateDaemonOrThrow then listen; returns process exit code
 int RunLocalQuery(const DaemonConfig &daemon, const std::string &spec_path, const std::string &key,
                   const std::string &sql, const std::string &init_sql);
@@ -163,13 +183,51 @@ struct SandboxCliRequest {
 };
 
 int RunSandboxCli(const SandboxCliRequest &req);
+struct NodeCliRequest {
+	std::string url = "grpc://127.0.0.1:5747"; // internal listener
+	std::string caller = "local";
+	std::string token;       // Authorization: Bearer (JWT / bearer secret)
+	std::string peer_secret; // internal handshake; env: / file: / literal
+	int64_t timeout_ms = 5000;
+};
+int RunNodeDrain(const NodeCliRequest &req);
+arrow::Result<arrow::flight::Location> ParseFlightLocation(const std::string &url);
 void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
                     std::shared_ptr<SandboxRuntime> runtime);
 
 // Handshake token is a bearer secret or JWT, never an unsigned spec payload.
+// Node-to-node Flight client. Authenticates with the shared peer secret, never the caller.
+class PeerFlight {
+public:
+	explicit PeerFlight(std::string secret, int64_t timeout_ms = 5000);
+	void set_timeout_ms(int64_t timeout_ms) {
+		timeout_ms_ = timeout_ms > 0 ? timeout_ms : 5000;
+	}
+	void SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes) {
+		nodes_ = std::move(nodes);
+	}
+	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> ForwardGetFlightInfo(
+	    const std::string &url, const arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
+	    const std::string &key);
+	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> ForwardDoGet(const std::string &url,
+	                                                                            const arrow::flight::Ticket &ticket,
+	                                                                            const std::string &sandbox_id,
+	                                                                            const std::string &key);
+
+private:
+	arrow::Result<std::shared_ptr<arrow::flight::FlightClient>> Client(const std::string &url);
+	arrow::flight::FlightCallOptions CallOpt(const std::string &sandbox_id, const std::string &key) const;
+
+	std::string secret_;
+	int64_t timeout_ms_ = 5000;
+	std::shared_ptr<S3NodeDirectory> nodes_;
+	std::mutex mu_;
+	std::unordered_map<std::string, std::shared_ptr<arrow::flight::FlightClient>> clients_;
+};
+
 class HandshakeAuthHandler : public arrow::flight::ServerAuthHandler {
 public:
-	explicit HandshakeAuthHandler(DaemonConfig daemon);
+	explicit HandshakeAuthHandler(DaemonConfig daemon, ListenerPlane plane = ListenerPlane::Public);
 	// Reads the handshake token and writes the resolved caller identity.
 	arrow::Status Authenticate(const arrow::flight::ServerCallContext &context, arrow::flight::ServerAuthSender *outgoing,
 	                           arrow::flight::ServerAuthReader *incoming) override;
@@ -179,6 +237,7 @@ public:
 
 private:
 	DaemonConfig daemon_;
+	ListenerPlane plane_ = ListenerPlane::Public;
 };
 
 } // namespace duckbox

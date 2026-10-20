@@ -38,7 +38,9 @@ bool ValidFilePath(const std::string &s) {
 	return true;
 }
 
-std::string Trim(const std::string &s) {
+} // namespace
+
+std::string TrimCopy(const std::string &s) {
 	size_t a = 0;
 	while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) {
 		a++;
@@ -49,8 +51,6 @@ std::string Trim(const std::string &s) {
 	}
 	return s.substr(a, b - a);
 }
-
-} // namespace
 
 std::string SecretRef::Spec() const {
 	if (Empty()) {
@@ -126,7 +126,7 @@ std::string EnvFileSecretResolver::Resolve(const SecretRef &ref, const std::stri
 		}
 		std::ostringstream os;
 		os << in.rdbuf();
-		auto v = Trim(os.str());
+		auto v = TrimCopy(os.str());
 		if (v.empty()) {
 			throw PolicyError(field_path + ": secret file is empty");
 		}

@@ -48,10 +48,15 @@ public:
 	virtual void IncOwnershipLost(const char *reason) = 0;
 	virtual void IncCasConflict() = 0;
 	virtual void SetOwnedKeys(size_t n) = 0;
+	virtual void SetClusterNodes(size_t n) = 0;
+	virtual void SetNodeHealthy(bool healthy) = 0; // 1 while the published node lease is live
 	virtual void IncRoute(const char *decision) = 0;
 	virtual void ObserveForward(double seconds) = 0;
 	virtual void ObserveS3LeaseOp(const char *op, double seconds) = 0;
 	virtual void IncS3LeaseError(const char *op, const char *code) = 0;
+	virtual void IncProxy(const char *op) = 0;
+	virtual void IncProxyError(const char *op, const char *code) = 0;
+	virtual void ObserveProxy(const char *op, double seconds) = 0;
 	virtual std::string Render() const = 0; // Prometheus text; no tenant/user/key/sandbox-id labels
 };
 
@@ -80,10 +85,15 @@ public:
 	void IncOwnershipLost(const char *reason) override;
 	void IncCasConflict() override;
 	void SetOwnedKeys(size_t n) override;
+	void SetClusterNodes(size_t n) override;
+	void SetNodeHealthy(bool healthy) override;
 	void IncRoute(const char *decision) override;
 	void ObserveForward(double seconds) override;
 	void ObserveS3LeaseOp(const char *op, double seconds) override;
 	void IncS3LeaseError(const char *op, const char *code) override;
+	void IncProxy(const char *op) override;
+	void IncProxyError(const char *op, const char *code) override;
+	void ObserveProxy(const char *op, double seconds) override;
 	std::string Render() const override;
 
 	std::string Node() const {
@@ -154,6 +164,10 @@ public:
 	}
 	void SetOwnedKeys(size_t) override {
 	}
+	void SetClusterNodes(size_t) override {
+	}
+	void SetNodeHealthy(bool) override {
+	}
 	void IncRoute(const char *) override {
 	}
 	void ObserveForward(double) override {
@@ -161,6 +175,12 @@ public:
 	void ObserveS3LeaseOp(const char *, double) override {
 	}
 	void IncS3LeaseError(const char *, const char *) override {
+	}
+	void IncProxy(const char *) override {
+	}
+	void IncProxyError(const char *, const char *) override {
+	}
+	void ObserveProxy(const char *, double) override {
 	}
 	std::string Render() const override {
 		return "";

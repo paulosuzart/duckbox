@@ -19,6 +19,8 @@ std::string HmacSha256(const std::string &key, const std::string &data); // raw 
 std::string Sha256Raw(const std::string &data);
 std::string Sha256Hex(const std::string &data);
 std::string HexEncode(const std::string &raw);
+// Lowercase hex of n cryptographically random bytes (OpenSSL RAND_bytes).
+std::string RandomHex(size_t n_bytes);
 // Length-mismatch returns false; comparison is constant-time when lengths match.
 bool ConstTimeEquals(const std::string &a, const std::string &b);
 

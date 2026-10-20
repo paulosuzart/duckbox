@@ -28,8 +28,17 @@ std::string JsonGetString(const std::string &body, const std::string &key) {
 void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
                     std::shared_ptr<SandboxRuntime> runtime) {
 	httplib::Server svr;
-	svr.Get("/health", [](const httplib::Request &, httplib::Response &res) {
-		res.set_content("{\"ok\":true,\"debug\":true}", "application/json");
+	svr.Get("/health", [runtime](const httplib::Request &, httplib::Response &res) {
+		bool healthy = runtime ? runtime->Serving() : true;
+		bool draining = runtime && runtime->Leases() && runtime->Leases()->draining();
+		Json j;
+		j["ok"] = healthy;
+		j["debug"] = true;
+		j["healthy"] = healthy;
+		j["draining"] = draining;
+		j["fenced"] = runtime && runtime->fenced();
+		res.status = healthy ? 200 : 503;
+		res.set_content(j.dump(), "application/json");
 	});
 	svr.Post("/v1/query", [&](const httplib::Request &req, httplib::Response &res) {
 		try {
@@ -56,6 +65,7 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
 			auto key = AuthenticateSandbox(rec.spec, rec.key, auth);
 			(void)key;
 			auto sql = JsonGetString(req.body, "sql");
+			SandboxRuntime::RequestGuard inflight(*runtime);
 			auto box = runtime->Get(rec);
 			auto out = box->Execute(sql);
 			res.status = 200;

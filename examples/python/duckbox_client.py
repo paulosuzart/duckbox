@@ -50,14 +50,22 @@ def format_error(exc: BaseException) -> str:
 class Duckbox:
     """One named-sandbox connection. `.query()` returns a pandas DataFrame."""
 
-    def __init__(self, conn: Any, sandbox: str, key: str):
+    def __init__(self, conn: Any, sandbox: str, key: str, url: str = DEFAULT_URL):
         """Wrap an ADBC connection already opened against `sandbox`."""
         self._conn = conn
         self.sandbox = sandbox
         self.key = key
+        self.url = url
 
     def query(self, sql: str, params: Optional[Sequence[Any]] = None) -> pd.DataFrame:
-        """Run one SELECT against this named sandbox. Optional `?` params are bound, not interpolated."""
+        """Run one SELECT against this named sandbox. Optional `?` params are bound, not interpolated.
+
+        Talk only to `url` (the load-balancer / public listener). Non-owner nodes proxy
+        to the owner over the internal peer channel; clients never see peer addresses.
+        """
+        return self._execute(sql, params)
+
+    def _execute(self, sql: str, params: Optional[Sequence[Any]] = None) -> pd.DataFrame:
         with self._conn.cursor() as cur:
             if params is None:
                 cur.execute(sql)
@@ -68,7 +76,9 @@ class Duckbox:
 
     def close(self) -> None:
         """Close the underlying ADBC connection."""
-        self._conn.close()
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
     def __enter__(self) -> "Duckbox":
         return self
@@ -143,7 +153,7 @@ def connect(
     for _ in range(max(retries, 1)):
         try:
             conn = dbapi.connect(url, db_kwargs=kwargs)
-            return Duckbox(conn, sandbox, key)
+            return Duckbox(conn, sandbox, key, url=url)
         except Exception as exc:  # noqa: BLE001
             text = str(exc).lower()
             if "connection refused" in text or "failed to connect" in text or "unavailable" in text:

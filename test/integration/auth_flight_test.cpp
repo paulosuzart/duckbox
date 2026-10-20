@@ -14,6 +14,7 @@
 
 #include <arrow/buffer.h>
 #include <arrow/flight/client.h>
+#include <arrow/flight/client_auth.h>
 #include <arrow/flight/sql/client.h>
 #include <arrow/table.h>
 
@@ -122,6 +123,32 @@ void duckbox::test::RunAuthFlightTests() {
 		                    "A1 wrong bearer is rejected");
 		ExpectThrowContains([&] { AuthenticateCallerIdentity(locked, "", "", "local"); }, "invalid caller",
 		                    "A1 header identity is not a substitute for a configured bearer");
+		locked.peer_secret = "peer-secret-value";
+		Expect(AuthenticateCallerIdentity(locked, "peer-secret-value", "peer-secret-value", "",
+		                                  ListenerPlane::Internal) == kPeerIdentity,
+		       "peer secret authenticates only on the internal listener");
+		ExpectThrowContains(
+		    [&] {
+			    AuthenticateCallerIdentity(locked, "peer-secret-value", "peer-secret-value", "", ListenerPlane::Public);
+		    },
+		    "public listener", "peer credential is rejected on the public listener");
+		ExpectThrowContains(
+		    [&] { AuthenticateCallerIdentity(locked, "wrong-secret", "wrong-secret", "", ListenerPlane::Internal); },
+		    "invalid caller", "wrong peer secret is rejected");
+		DaemonConfig jwt_peer;
+		jwt_peer.auth_mode = AuthMode::Token;
+		jwt_peer.jwt_secret = "jwt-hs256-secret";
+		jwt_peer.allow_insecure_dev = false;
+		ExpectThrowContains(
+		    [&] {
+			    AuthenticateCallerIdentity(jwt_peer, "", MkJwt(jwt_peer.jwt_secret, "peer", "HS256"), "");
+		    },
+		    "reserved", "JWT sub=peer is rejected");
+		DaemonConfig dev;
+		dev.allow_insecure_dev = true;
+		ExpectThrowContains([&] { AuthenticateCallerIdentity(dev, "", "", "peer"); }, "reserved",
+		                    "dev header identity peer is rejected");
+		AuthorizeCaller(locked, kPeerIdentity, "tenant_21:user_sergio");
 
 		DaemonConfig tok;
 		tok.auth_mode = AuthMode::Token;
@@ -186,6 +213,7 @@ void duckbox::test::RunAuthFlightTests() {
 		DaemonConfig cfg = daemon;
 		cfg.listen = "127.0.0.1:0";
 		cfg.callers.push_back(CallerRule{"analyst-svc", {"tenant_21:*"}});
+		cfg.operators = {"ops"};
 		auto defs = std::make_shared<MemorySandboxRegistry>();
 		auto leases = std::make_shared<SingleNodeLeaseManager>();
 		auto runtime = std::make_shared<SandboxRuntime>(cfg, leases, defs);
@@ -466,6 +494,134 @@ void duckbox::test::RunAuthFlightTests() {
 		                     "SELECT id, title FROM deals ORDER BY id", "") == 0,
 		       "RunLocalQuery executes a rewritten SELECT");
 
+		try {
+			(void)ActionBody(*raw_client, opt, "DrainNode", "timeout_ms: 1\n");
+			g_failed++;
+			std::cerr << "FAIL: DrainNode on the public listener must be rejected\n";
+		} catch (const std::exception &e) {
+			Expect(std::string(e.what()).find("internal listener") != std::string::npos ||
+			           std::string(e.what()).find("Invalid") != std::string::npos,
+			       "DrainNode on the public listener is rejected");
+		}
+		{
+			arrow::flight::FlightCallOptions opopt;
+			opopt.headers.emplace_back("x-duckbox-caller", "ops");
+			try {
+				(void)ActionBody(*raw_client, opopt, "DrainNode", "timeout_ms: 1\n");
+				g_failed++;
+				std::cerr << "FAIL: operator DrainNode on public listener must be rejected\n";
+			} catch (const std::exception &e) {
+				Expect(std::string(e.what()).find("internal listener") != std::string::npos ||
+				           std::string(e.what()).find("Invalid") != std::string::npos,
+				           "operator DrainNode is still rejected on the public listener");
+			}
+		}
+
+		cfg.peer_secret = "peer-secret-value";
+		auto int_sql = std::make_unique<DuckboxFlightSqlServer>(cfg, defs, runtime, signer, rewriter,
+		                                                       ListenerPlane::Internal);
+		auto int_server = std::make_unique<DuckboxFlightServer>(std::move(int_sql));
+		auto int_loc_res = arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
+		arrow::flight::FlightServerOptions iopt(*int_loc_res);
+		iopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
+		Expect(int_server->Init(iopt).ok(), "internal flight init");
+		std::thread int_th([&] { (void)int_server->Serve(); });
+		for (int i = 0; i < 50 && int_server->port() <= 0; i++) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		}
+		int iport = int_server->port();
+		Expect(iport > 0, "internal flight bound a port");
+		auto iclient_loc = arrow::flight::Location::ForGrpcTcp("127.0.0.1", iport);
+		auto iclient_res = arrow::flight::FlightClient::Connect(*iclient_loc);
+		Expect(iclient_res.ok(), "internal flight client connect");
+		auto iclient = std::shared_ptr<arrow::flight::FlightClient>(std::move(iclient_res).ValueOrDie());
+
+		try {
+			arrow::flight::FlightCallOptions agent;
+			agent.headers.emplace_back("x-duckbox-caller", "analyst-svc");
+			(void)ActionBody(*iclient, agent, "DrainNode", "timeout_ms: 1\n");
+			g_failed++;
+			std::cerr << "FAIL: agent identity must not DrainNode on the internal listener\n";
+		} catch (const std::exception &e) {
+			Expect(std::string(e.what()).find("not a node operator") != std::string::npos ||
+			           std::string(e.what()).find("Invalid") != std::string::npos,
+			       "DrainNode denies the authenticated agent identity");
+		}
+		{
+			arrow::flight::FlightCallOptions opopt;
+			opopt.headers.emplace_back("x-duckbox-caller", "ops");
+			auto drained = ActionBody(*iclient, opopt, "DrainNode", "timeout_ms: 1\n");
+			Expect(drained.find("\"draining\":true") != std::string::npos, "DrainNode allows a listed operator");
+			auto status = ActionBody(*iclient, opopt, "NodeStatus", "");
+			Expect(status.find("\"draining\":true") != std::string::npos, "NodeStatus shows draining");
+		}
+		{
+			NodeCliRequest nr;
+			nr.url = "grpc://127.0.0.1:" + std::to_string(iport);
+			nr.peer_secret = "peer-secret-value";
+			nr.timeout_ms = 1;
+			Expect(RunNodeDrain(nr) == 0, "drain CLI authenticates with --peer-secret");
+			nr.peer_secret.clear();
+			nr.token = "unused";
+			nr.caller = "ops";
+			Expect(RunNodeDrain(nr) != 0, "drain CLI --token without a valid credential fails handshake");
+			NodeCliRequest bad;
+			bad.url = "not a uri !!!";
+			Expect(RunNodeDrain(bad) != 0, "drain CLI rejects a bad URL");
+		}
+		{
+			arrow::flight::FlightCallOptions none;
+			try {
+				(void)ActionBody(*iclient, none, "CreateSandbox", body);
+				g_failed++;
+				std::cerr << "FAIL: peer listener must not serve sandbox CRUD\n";
+			} catch (const std::exception &e) {
+				Expect(std::string(e.what()).find("public listener") != std::string::npos ||
+				           std::string(e.what()).find("Invalid") != std::string::npos,
+				           "sandbox CRUD is rejected on the internal listener");
+			}
+		}
+		{
+			class SecretAuth : public arrow::flight::ClientAuthHandler {
+			public:
+				explicit SecretAuth(std::string s) : s_(std::move(s)) {
+				}
+				arrow::Status Authenticate(arrow::flight::ClientAuthSender *o,
+				                           arrow::flight::ClientAuthReader *i) override {
+					ARROW_RETURN_NOT_OK(o->Write(s_));
+					std::string id;
+					return i->Read(&id);
+				}
+				arrow::Status GetToken(std::string *t) override {
+					*t = s_;
+					return arrow::Status::OK();
+				}
+				std::string s_;
+			};
+			auto bad_loc = arrow::flight::Location::ForGrpcTcp("127.0.0.1", iport);
+			auto bad_cli = arrow::flight::FlightClient::Connect(*bad_loc);
+			Expect(bad_cli.ok(), "peer wrong-secret client connects");
+			auto bad = std::move(bad_cli).ValueOrDie();
+			auto auth_st = bad->Authenticate({}, std::make_unique<SecretAuth>("wrong-secret"));
+			Expect(!auth_st.ok(), "peer call with the wrong secret is rejected");
+			{
+				arrow::flight::sql::FlightSqlClient sql_int(iclient);
+				arrow::flight::FlightCallOptions qopt;
+				qopt.headers.emplace_back("x-duckbox-sandbox", "flight-c");
+				qopt.headers.emplace_back("x-duckbox-caller", "ops");
+				auto exec = sql_int.Execute(qopt, "SELECT 1");
+				Expect(!exec.ok(), "peer call without the peer secret is rejected");
+			}
+			auto good_cli = arrow::flight::FlightClient::Connect(*bad_loc);
+			auto good = std::move(good_cli).ValueOrDie();
+			auto good_st = good->Authenticate({}, std::make_unique<SecretAuth>("peer-secret-value"));
+			Expect(good_st.ok(), "peer call with the shared secret is accepted");
+		}
+
+		(void)int_server->Shutdown();
+		if (int_th.joinable()) {
+			int_th.join();
+		}
 		(void)server->Shutdown();
 		(void)server->Wait();
 		if (serve_th.joinable()) {
