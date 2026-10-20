@@ -15,6 +15,7 @@ void RunRegistryTests();
 void RunMetricsTests();
 void RunS3ClientTests();
 void RunLeaseTests();
+void RunMembershipTests();
 
 } // namespace test
 } // namespace duckbox

@@ -291,6 +291,7 @@ void duckbox::test::RunSpecLoaderTests() {
 			     "  bearer_secrets:\n    - identity: analyst-svc\n      secret: super-secret-token\n"
 			     "lake_allow:\n  s3_endpoints: [\"127.0.0.1:9000\"]\n  secret_refs: [\"env:DUCKBOX_S3_KEY\"]\n"
 			     "lease:\n  endpoint: http://127.0.0.1:9\n  bucket: b\n  prefix: leases/\n  skip_probe: true\n"
+			     "  node_id: full-node\n  ttl: 15s\n  advertise: grpc://127.0.0.1:4747\n"
 			     "limits:\n  idle_timeout: 30s\n  max_idle_timeout: 5m\n  max_sandboxes: 10\n";
 		}
 		auto d = LoadDaemonFile(path);
@@ -299,6 +300,8 @@ void duckbox::test::RunSpecLoaderTests() {
 		Expect(d.bearer_secrets.size() == 1, "daemon yaml bearer_secrets");
 		Expect(d.lake_allow.s3_endpoints.size() == 1, "daemon yaml lake_allow");
 		Expect(d.lease.skip_probe, "daemon yaml lease skip_probe");
+		Expect(d.lease.node_id == "full-node" && d.lease.ttl_ms == 15000, "daemon yaml lease node_id and ttl");
+		Expect(d.lease.advertise.find("4747") != std::string::npos, "daemon yaml lease advertise");
 		Expect(d.idle_evict_ms == 30000, "daemon yaml idle_timeout 30s");
 		ValidateDaemonOrThrow(d);
 	}

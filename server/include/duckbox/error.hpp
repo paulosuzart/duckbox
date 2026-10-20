@@ -73,6 +73,23 @@ public:
 	}
 };
 
+// This node is not the owner. `what()` is `duckbox redirect owner=ID location=URL`
+// so clients can follow it; GetFlightInfo also puts `location` on the endpoint.
+class RedirectError : public Error {
+public:
+	RedirectError(std::string owner_id, std::string flight);
+	const std::string &owner_id() const {
+		return owner_id_;
+	}
+	const std::string &flight() const {
+		return flight_;
+	}
+
+private:
+	std::string owner_id_;
+	std::string flight_;
+};
+
 // Handle version is not current and outside stale_version_grace (re-prepare).
 class StaleHandleError : public HandleError {
 public:

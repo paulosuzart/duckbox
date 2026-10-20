@@ -37,6 +37,11 @@ struct LeaseSettings {
 	std::string access_key_env;
 	std::string secret_key_env;
 	bool skip_probe = false;
+	std::string node_id;   // default: daemon name
+	std::string advertise; // grpc://host:port; default grpc://listen
+	int64_t ttl_ms = 15000;
+	int64_t heartbeat_ms = 5000;
+	size_t max_leases = 0; // 0 = unlimited
 };
 
 // Trusted caller → allowed tenant-key globs. Empty list is allow-all only when

@@ -15,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace duckbox {
 
@@ -70,6 +71,20 @@ public:
 	virtual void Renew(const Lease &lease) = 0; // If-Match; throws LeaseLostError on lost ownership
 	virtual void Release(const Lease &lease) = 0;
 	virtual Lease Peek(const std::string &resource_id) = 0; // missing => resource set, owned_locally=false, epoch=0
+	virtual void SetDraining(bool v) {
+		(void)v;
+	}
+	virtual bool draining() const {
+		return false;
+	}
+	virtual std::vector<std::string> OwnedIds() const {
+		return {};
+	}
+	virtual void ReleaseOwned() {
+	}
+	virtual void set_flight(std::string flight) {
+		(void)flight;
+	}
 };
 
 using LeaseManager = ILeaseManager;
@@ -100,6 +115,13 @@ public:
 	void Renew(const Lease &lease) override;
 	void Release(const Lease &lease) override;
 	Lease Peek(const std::string &resource_id) override;
+	void SetDraining(bool v) override;
+	bool draining() const override;
+	std::vector<std::string> OwnedIds() const override;
+	void ReleaseOwned() override;
+
+private:
+	bool draining_ = false;
 };
 
 class LocalRouter : public IRouter, public LeaseTelemetry { // always RouteDecision::Local
@@ -113,6 +135,48 @@ struct S3LeaseOptions {
 	std::string flight;
 	std::string prefix = "leases/";
 	int64_t ttl_ms = 15000;
+	int64_t heartbeat_ms = 5000;
+	size_t max_leases = 0; // 0 = unlimited
+	std::string version;
+};
+
+S3LeaseOptions LeaseOptionsFromDaemon(const DaemonConfig &daemon);
+
+struct NodeRecord {
+	std::string node_id;
+	std::string flight;
+	int64_t started_at_ms = 0;
+	std::string version;
+	int64_t expiry_ms = 0;
+	std::string etag;
+};
+
+// Heartbeat records under {prefix}nodes/{id}.json. Peers discover each other via ListKeys.
+class S3NodeDirectory {
+public:
+	S3NodeDirectory(std::shared_ptr<S3ControlClient> client, S3LeaseOptions opt, std::shared_ptr<IMetrics> metrics = {},
+	                std::shared_ptr<Clock> clock = {});
+	void Heartbeat();
+	void Deregister();
+	std::vector<NodeRecord> List(); // live (unexpired) nodes
+	void set_flight(std::string flight) {
+		opt_.flight = std::move(flight);
+	}
+	const std::string &node_id() const {
+		return opt_.owner_id;
+	}
+
+private:
+	std::string ObjectKey(const std::string &node_id) const;
+	std::string Encode(const NodeRecord &n) const;
+	NodeRecord Parse(const S3Object &obj) const;
+
+	std::shared_ptr<S3ControlClient> client_;
+	S3LeaseOptions opt_;
+	std::shared_ptr<IMetrics> metrics_;
+	std::shared_ptr<Clock> clock_;
+	int64_t started_at_ms_ = 0;
+	std::string etag_;
 };
 
 // S3 If-None-Match:* create, If-Match renew/steal/release. Clock is injectable for TTL tests.
@@ -124,6 +188,11 @@ public:
 	void Renew(const Lease &lease) override;
 	void Release(const Lease &lease) override;
 	Lease Peek(const std::string &resource_id) override;
+	void SetDraining(bool v) override;
+	bool draining() const override;
+	std::vector<std::string> OwnedIds() const override;
+	void ReleaseOwned() override;
+	void set_flight(std::string flight) override;
 
 	const std::string &owner_id() const {
 		return opt_.owner_id;
@@ -140,8 +209,9 @@ private:
 	std::shared_ptr<S3ControlClient> client_;
 	S3LeaseOptions opt_;
 	std::shared_ptr<Clock> clock_;
-	std::mutex mu_;
+	mutable std::mutex mu_;
 	std::unordered_map<std::string, std::string> etags_;
+	bool draining_ = false;
 };
 
 } // namespace duckbox

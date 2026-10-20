@@ -142,6 +142,11 @@ public:
 	std::shared_ptr<TenantSandbox> Get(const SandboxRecord &rec); // warms on miss; respects max_sandboxes
 	// keep_from_version >= 0 keeps id@v for v >= that (N-1 during stale-handle grace).
 	void PassivateId(const std::string &id, const char *reason = "update", int keep_from_version = -1);
+	void SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes);
+	void Drain(); // stop new leases, release owned, passivate, deregister heartbeat
+	std::shared_ptr<ILeaseManager> Leases() const {
+		return leases_;
+	}
 	size_t Size() const;
 	size_t WarmCount() const;
 	// Idle-passivate instances and report per-id state for ListSandboxes.
@@ -164,6 +169,7 @@ private:
 	std::shared_ptr<SandboxRegistry> defs_;
 	std::shared_ptr<IRouter> router_;
 	std::shared_ptr<SecretResolver> secrets_;
+	std::shared_ptr<S3NodeDirectory> nodes_;
 	mutable std::mutex mu_;
 	std::unordered_map<std::string, std::shared_ptr<TenantSandbox>> boxes_;
 };

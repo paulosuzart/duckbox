@@ -1,5 +1,6 @@
 #include "duckbox/sandbox.hpp"
 #include "duckbox/arrow_ipc.hpp"
+#include "duckbox/error.hpp"
 #include "duckbox/init_sql.hpp"
 #include "duckbox/json.hpp"
 #include "duckbox/lake.hpp"
@@ -571,6 +572,12 @@ void SandboxRuntime::PassivateId(const std::string &id, const char *reason, int 
 
 std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
 	auto key = ParseTenantKey(rec.key, rec.spec.key);
+	auto lease = leases_->Acquire(rec.id);
+	if (!lease.owned_locally) {
+		Metrics().IncRoute("redirect");
+		throw RedirectError(lease.owner_id.empty() ? "none" : lease.owner_id,
+		                    lease.flight.empty() ? "" : lease.flight);
+	}
 	if (router_) {
 		router_->Decide(key);
 	} else {
@@ -613,7 +620,6 @@ std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
 		oldest->second->Passivate("evict");
 		boxes_.erase(oldest);
 	}
-	leases_->Acquire(rec.id);
 	auto t0 = std::chrono::steady_clock::now();
 	auto init_sql = rec.spec.init_sql;
 	auto box = std::make_shared<TenantSandbox>(daemon_, rec.spec, key, init_sql, rec.spec_dir, rec.id, rec.version,
@@ -649,6 +655,34 @@ void SandboxRuntime::EvictIdleLocked() {
 		auto idle = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second->last_used()).count();
 		if (idle >= idle_limit && it->second.use_count() == 1 && it->second->Warm()) {
 			it->second->Passivate("idle");
+		}
+	}
+}
+
+void SandboxRuntime::SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes) {
+	nodes_ = std::move(nodes);
+}
+
+void SandboxRuntime::Drain() {
+	if (leases_) {
+		leases_->SetDraining(true);
+		leases_->ReleaseOwned();
+	}
+	std::vector<std::string> ids;
+	{
+		std::lock_guard<std::mutex> hold(mu_);
+		for (auto &kv : boxes_) {
+			auto at = kv.first.find('@');
+			ids.push_back(at == std::string::npos ? kv.first : kv.first.substr(0, at));
+		}
+	}
+	for (auto &id : ids) {
+		PassivateId(id, "drain");
+	}
+	if (nodes_) {
+		try {
+			nodes_->Deregister();
+		} catch (const std::exception &) {
 		}
 	}
 }
@@ -722,7 +756,12 @@ std::vector<SandboxSummary> SandboxRuntime::Summarize(const std::vector<SandboxR
 		s.key = r.key;
 		s.policy_class = r.policy_class;
 		s.version = r.version;
-		s.owner = daemon_.name;
+		auto own = leases_->Peek(r.id);
+		if (own.owned_locally || (own.expiry_ms > 0 && !own.owner_id.empty())) {
+			s.owner = own.owner_id;
+		} else {
+			s.owner = daemon_.name;
+		}
 		s.created_at_ms = r.created_at_ms;
 		s.updated_at_ms = r.updated_at_ms;
 		s.expires_at_ms = r.expires_at_ms;

@@ -69,8 +69,33 @@ IMetrics &LeaseTelemetry::M() {
 SingleNodeLeaseManager::SingleNodeLeaseManager(std::shared_ptr<IMetrics> metrics) : LeaseTelemetry(std::move(metrics)) {
 }
 
+void SingleNodeLeaseManager::SetDraining(bool v) {
+	draining_ = v;
+}
+
+bool SingleNodeLeaseManager::draining() const {
+	return draining_;
+}
+
+std::vector<std::string> SingleNodeLeaseManager::OwnedIds() const {
+	return {owned_.begin(), owned_.end()};
+}
+
+void SingleNodeLeaseManager::ReleaseOwned() {
+	auto ids = OwnedIds();
+	for (auto &id : ids) {
+		Lease l;
+		l.resource = id;
+		l.tenant_key = id;
+		Release(l);
+	}
+}
+
 Lease SingleNodeLeaseManager::Acquire(const std::string &resource_id) {
 	ValidateResourceId(resource_id);
+	if (draining_ && !owned_.count(resource_id)) {
+		throw Error("node is draining");
+	}
 	Lease lease;
 	lease.resource = resource_id;
 	lease.tenant_key = resource_id;
@@ -131,9 +156,27 @@ S3ConditionalLeaseManager::S3ConditionalLeaseManager(std::shared_ptr<S3ControlCl
 	if (opt_.ttl_ms <= 0) {
 		opt_.ttl_ms = 15000;
 	}
+	if (opt_.heartbeat_ms <= 0) {
+		opt_.heartbeat_ms = opt_.ttl_ms / 3;
+		if (opt_.heartbeat_ms < 1000) {
+			opt_.heartbeat_ms = 1000;
+		}
+	}
 	if (!opt_.prefix.empty() && opt_.prefix.back() != '/') {
 		opt_.prefix += '/';
 	}
+}
+
+S3LeaseOptions LeaseOptionsFromDaemon(const DaemonConfig &daemon) {
+	S3LeaseOptions o;
+	o.owner_id = daemon.lease.node_id.empty() ? daemon.name : daemon.lease.node_id;
+	o.flight = daemon.lease.advertise.empty() ? ("grpc://" + daemon.listen) : daemon.lease.advertise;
+	o.prefix = daemon.lease.prefix;
+	o.ttl_ms = daemon.lease.ttl_ms;
+	o.heartbeat_ms = daemon.lease.heartbeat_ms;
+	o.max_leases = daemon.lease.max_leases;
+	o.version = DUCKBOX_DUCKDB_VERSION;
+	return o;
 }
 
 std::string S3ConditionalLeaseManager::ObjectKey(const std::string &resource_id) const {
@@ -226,6 +269,21 @@ Lease S3ConditionalLeaseManager::Acquire(const std::string &resource_id) {
 		if (!missing && !expired) {
 			current.owned_locally = false;
 			Forget(resource_id);
+			return current;
+		}
+		bool draining = false;
+		size_t held = 0;
+		{
+			std::lock_guard<std::mutex> hold(mu_);
+			draining = draining_;
+			held = owned_.size();
+		}
+		if (draining) {
+			current.owned_locally = false;
+			return current;
+		}
+		if (opt_.max_leases > 0 && held >= opt_.max_leases) {
+			current.owned_locally = false;
 			return current;
 		}
 
@@ -348,6 +406,157 @@ void S3ConditionalLeaseManager::Release(const Lease &lease) {
 Lease S3ConditionalLeaseManager::Peek(const std::string &resource_id) {
 	ValidateResourceId(resource_id);
 	return Load(resource_id);
+}
+
+void S3ConditionalLeaseManager::SetDraining(bool v) {
+	std::lock_guard<std::mutex> hold(mu_);
+	draining_ = v;
+}
+
+bool S3ConditionalLeaseManager::draining() const {
+	std::lock_guard<std::mutex> hold(mu_);
+	return draining_;
+}
+
+std::vector<std::string> S3ConditionalLeaseManager::OwnedIds() const {
+	std::lock_guard<std::mutex> hold(mu_);
+	return {owned_.begin(), owned_.end()};
+}
+
+void S3ConditionalLeaseManager::ReleaseOwned() {
+	auto ids = OwnedIds();
+	for (auto &id : ids) {
+		try {
+			Release(Peek(id));
+		} catch (const std::exception &) {
+		}
+	}
+}
+
+void S3ConditionalLeaseManager::set_flight(std::string flight) {
+	opt_.flight = std::move(flight);
+}
+
+namespace {
+
+const char *kNodeWhat = "node heartbeat JSON";
+const std::set<std::string> kNodeKeys = {"node_id", "flight", "started_at_ms", "version", "expiry_ms"};
+
+} // namespace
+
+S3NodeDirectory::S3NodeDirectory(std::shared_ptr<S3ControlClient> client, S3LeaseOptions opt,
+                                 std::shared_ptr<IMetrics> metrics, std::shared_ptr<Clock> clock)
+    : client_(std::move(client)), opt_(std::move(opt)), metrics_(std::move(metrics)), clock_(std::move(clock)) {
+	if (!client_) {
+		throw PolicyError("S3NodeDirectory requires an S3ControlClient");
+	}
+	if (!clock_) {
+		clock_ = std::make_shared<SystemClock>();
+	}
+	if (opt_.owner_id.empty()) {
+		opt_.owner_id = "local";
+	}
+	if (opt_.ttl_ms <= 0) {
+		opt_.ttl_ms = 15000;
+	}
+	if (!opt_.prefix.empty() && opt_.prefix.back() != '/') {
+		opt_.prefix += '/';
+	}
+	started_at_ms_ = clock_->NowMs();
+}
+
+std::string S3NodeDirectory::ObjectKey(const std::string &node_id) const {
+	ValidateResourceId(node_id);
+	return opt_.prefix + "nodes/" + node_id + ".json";
+}
+
+std::string S3NodeDirectory::Encode(const NodeRecord &n) const {
+	Json j;
+	j["node_id"] = n.node_id;
+	j["flight"] = n.flight;
+	j["started_at_ms"] = n.started_at_ms;
+	j["version"] = n.version;
+	j["expiry_ms"] = n.expiry_ms;
+	return j.dump();
+}
+
+NodeRecord S3NodeDirectory::Parse(const S3Object &obj) const {
+	auto j = ParseJsonObject(obj.body, kNodeWhat);
+	JsonRejectUnknown(j, kNodeKeys, kNodeWhat);
+	NodeRecord n;
+	n.node_id = JsonRequireString(j, "node_id", kNodeWhat);
+	n.flight = JsonRequireString(j, "flight", kNodeWhat);
+	n.started_at_ms = JsonRequireInt(j, "started_at_ms", kNodeWhat);
+	n.version = JsonHas(j, "version") ? JsonRequireString(j, "version", kNodeWhat) : "";
+	n.expiry_ms = JsonRequireInt(j, "expiry_ms", kNodeWhat);
+	n.etag = obj.etag;
+	return n;
+}
+
+void S3NodeDirectory::Heartbeat() {
+	NodeRecord n;
+	n.node_id = opt_.owner_id;
+	n.flight = opt_.flight;
+	n.started_at_ms = started_at_ms_;
+	n.version = opt_.version.empty() ? std::string(DUCKBOX_DUCKDB_VERSION) : opt_.version;
+	n.expiry_ms = clock_->NowMs() + opt_.ttl_ms;
+	auto key = ObjectKey(n.node_id);
+	auto body = Encode(n);
+	S3Object put;
+	if (etag_.empty()) {
+		put = client_->Put(key, body, "", "*");
+		if (put.status == 412 || put.status == 409) {
+			auto got = client_->Get(key);
+			if (HttpOk(got.status)) {
+				put = client_->Put(key, body, got.etag, "");
+			}
+		}
+	} else {
+		put = client_->Put(key, body, etag_, "");
+		if (put.status == 412 || put.status == 409) {
+			auto got = client_->Get(key);
+			if (HttpOk(got.status)) {
+				put = client_->Put(key, body, got.etag, "");
+			}
+		}
+	}
+	if (!HttpOk(put.status)) {
+		throw Error(put.error.empty() ? "node heartbeat PUT failed" : put.error);
+	}
+	etag_ = put.etag;
+	auto live = List();
+	if (metrics_) {
+		metrics_->SetClusterNodes(live.size());
+	}
+}
+
+void S3NodeDirectory::Deregister() {
+	auto key = ObjectKey(opt_.owner_id);
+	(void)client_->Delete(key, etag_);
+	etag_.clear();
+	if (metrics_) {
+		auto live = List();
+		metrics_->SetClusterNodes(live.size());
+	}
+}
+
+std::vector<NodeRecord> S3NodeDirectory::List() {
+	std::vector<NodeRecord> out;
+	int64_t now = clock_->NowMs();
+	for (auto &key : client_->ListKeys(opt_.prefix + "nodes/")) {
+		auto obj = client_->Get(key);
+		if (!HttpOk(obj.status)) {
+			continue;
+		}
+		try {
+			auto n = Parse(obj);
+			if (n.expiry_ms > now) {
+				out.push_back(std::move(n));
+			}
+		} catch (const std::exception &) {
+		}
+	}
+	return out;
 }
 
 } // namespace duckbox

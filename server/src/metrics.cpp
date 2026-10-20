@@ -126,7 +126,10 @@ const char *Help(const std::string &name) {
 		return "S3 If-Match / If-None-Match conflicts on lease objects.";
 	}
 	if (name == "duckbox_owned_keys") {
-		return "Tenant keys this node currently owns.";
+		return "Sandbox leases this node currently owns.";
+	}
+	if (name == "duckbox_cluster_nodes") {
+		return "Live cluster members this node has discovered.";
 	}
 	if (name == "duckbox_route_decisions_total") {
 		return "Control-plane routing decisions.";
@@ -229,6 +232,7 @@ MetricsRegistry::MetricsRegistry(std::string node, std::unordered_set<std::strin
 	SetLocked("duckbox_sandboxes_resident", NodeLabels("state=\"warm\""), 0);
 	SetLocked("duckbox_sandboxes_resident", NodeLabels("state=\"passive\""), 0);
 	SetLocked("duckbox_owned_keys", NodeLabels(""), 0);
+	SetLocked("duckbox_cluster_nodes", NodeLabels(""), 1);
 	SetLocked("duckbox_node_lease_last_renewal_timestamp_seconds", NodeLabels(""), 0);
 }
 
@@ -402,6 +406,11 @@ void MetricsRegistry::IncCasConflict() {
 void MetricsRegistry::SetOwnedKeys(size_t n) {
 	std::lock_guard<std::mutex> hold(mu_);
 	SetLocked("duckbox_owned_keys", NodeLabels(""), static_cast<double>(n));
+}
+
+void MetricsRegistry::SetClusterNodes(size_t n) {
+	std::lock_guard<std::mutex> hold(mu_);
+	SetLocked("duckbox_cluster_nodes", NodeLabels(""), static_cast<double>(n));
 }
 
 void MetricsRegistry::IncRoute(const char *decision) {

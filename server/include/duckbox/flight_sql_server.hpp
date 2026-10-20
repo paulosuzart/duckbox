@@ -98,7 +98,7 @@ private:
 	StatementHandle MakeHandle(const CallCtx &c, const std::string &rewritten, int user_params) const;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> Info(
 	    const arrow::flight::FlightDescriptor &descriptor, const std::string &token,
-	    const std::shared_ptr<arrow::Schema> &schema) const;
+	    const std::shared_ptr<arrow::Schema> &schema, const std::string &redirect_flight = "") const;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightInfo>> MetaInfo(
 	    const arrow::flight::FlightDescriptor &descriptor, const std::shared_ptr<arrow::Schema> &schema) const;
 	arrow::Result<std::unique_ptr<arrow::flight::FlightDataStream>> StreamIpc(const std::vector<uint8_t> &ipc) const;
@@ -163,6 +163,12 @@ struct SandboxCliRequest {
 };
 
 int RunSandboxCli(const SandboxCliRequest &req);
+struct NodeCliRequest {
+	std::string url = "grpc://127.0.0.1:4747";
+	std::string caller = "local";
+	int64_t timeout_ms = 5000;
+};
+int RunNodeDrain(const NodeCliRequest &req);
 void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
                     std::shared_ptr<SandboxRuntime> runtime);
 

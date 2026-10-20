@@ -218,7 +218,8 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 	}
 	if (auto *lease = root.Get("lease")) {
 		YamlRejectUnknownKeys(*lease, {"endpoint", "endpoint_env", "bucket", "prefix", "access_key_env",
-		                               "secret_key_env", "skip_probe"});
+		                               "secret_key_env", "skip_probe", "node_id", "advertise", "ttl", "ttl_ms",
+		                               "heartbeat", "heartbeat_ms", "max_leases"});
 		d.lease.endpoint = lease->GetString("endpoint");
 		d.lease.endpoint_env = lease->GetString("endpoint_env");
 		d.lease.bucket = lease->GetString("bucket");
@@ -226,6 +227,31 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 		d.lease.access_key_env = lease->GetString("access_key_env");
 		d.lease.secret_key_env = lease->GetString("secret_key_env");
 		d.lease.skip_probe = lease->GetBool("skip_probe", false);
+		d.lease.node_id = lease->GetString("node_id");
+		d.lease.advertise = lease->GetString("advertise");
+		d.lease.ttl_ms = lease->GetInt("ttl_ms", d.lease.ttl_ms);
+		auto ttl_raw = lease->GetString("ttl");
+		if (!ttl_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(ttl_raw, &ms) || ms <= 0) {
+				throw PolicyError("lease.ttl: expected duration like 15s, 30s");
+			}
+			d.lease.ttl_ms = ms;
+		}
+		d.lease.heartbeat_ms = lease->GetInt("heartbeat_ms", d.lease.heartbeat_ms);
+		auto hb_raw = lease->GetString("heartbeat");
+		if (!hb_raw.empty()) {
+			int64_t ms = 0;
+			if (!ParseDurationMs(hb_raw, &ms) || ms <= 0) {
+				throw PolicyError("lease.heartbeat: expected duration like 5s");
+			}
+			d.lease.heartbeat_ms = ms;
+		}
+		auto cap = lease->GetInt("max_leases", 0);
+		if (cap < 0) {
+			throw PolicyError("lease.max_leases must be >= 0");
+		}
+		d.lease.max_leases = static_cast<size_t>(cap);
 	}
 	if (root.Get("lake") || root.Get("tables") || root.Get("policy") || root.Get("spec")) {
 		throw PolicyError("daemon config is control-plane only (no lake, tables, or spec). "

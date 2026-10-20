@@ -7,6 +7,7 @@ duckbox serve --daemon ./daemons/memory.yaml [--listen HOST:PORT] [--metrics HOS
 duckbox sandbox create|get|update|delete|list|expire --url grpc://127.0.0.1:4747 [--spec FILE] [--id ID] [--key KEY]
 duckbox sandbox list [--id-prefix P] [--key-prefix P] [--policy-class C] [--state warm|passive|defined] [--limit N] [--offset N]
 duckbox sandbox expire --id ID
+duckbox node drain --url grpc://127.0.0.1:4747 [--timeout 5000]
 duckbox run --daemon FILE --spec FILE --key KEY --sql SQL [--init-sql SQL]
 duckbox validate --daemon FILE --spec FILE
 ```

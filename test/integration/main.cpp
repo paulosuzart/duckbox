@@ -7,5 +7,6 @@ int main() {
 	RunRuntimeTests();
 	RunS3RegistryTests();
 	RunAuthFlightTests();
+	RunClusterTests();
 	return ReportAndExit("integration");
 }

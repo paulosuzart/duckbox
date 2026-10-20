@@ -148,6 +148,12 @@ Status FromEx(const std::exception &e) {
 	if (dynamic_cast<const NotFoundError *>(&e)) {
 		return Status::KeyError(e.what());
 	}
+	if (dynamic_cast<const RedirectError *>(&e)) {
+		return Status::Invalid(e.what());
+	}
+	if (dynamic_cast<const LeaseLostError *>(&e)) {
+		return Status::Invalid(e.what());
+	}
 	return Status::Invalid(e.what());
 }
 
@@ -173,10 +179,21 @@ std::string CreateUpdateResultJson(const SandboxRecord &rec, const char *action)
 }
 
 arrow::Result<std::unique_ptr<FlightInfo>> MakeInfo(const FlightDescriptor &desc, const std::string &token,
-                                                    const std::shared_ptr<arrow::Schema> &schema) {
+                                                    const std::shared_ptr<arrow::Schema> &schema,
+                                                    const std::string &redirect_flight = "") {
 	ARROW_ASSIGN_OR_RAISE(auto ticket_str, sql::CreateStatementQueryTicket(token));
+	std::vector<Location> locs;
+	if (!redirect_flight.empty()) {
+		auto parsed = Location::Parse(redirect_flight);
+		if (!parsed.ok()) {
+			parsed = Location::ForGrpcTcp("127.0.0.1", 4747);
+		}
+		if (parsed.ok()) {
+			locs.push_back(*parsed);
+		}
+	}
 	std::vector<FlightEndpoint> endpoints;
-	endpoints.emplace_back(FlightEndpoint{Ticket{ticket_str}, {}, std::nullopt, ""});
+	endpoints.emplace_back(FlightEndpoint{Ticket{ticket_str}, locs, std::nullopt, ""});
 	ARROW_ASSIGN_OR_RAISE(auto info, FlightInfo::Make(*schema, desc, endpoints, -1, -1));
 	return std::make_unique<FlightInfo>(std::move(info));
 }
@@ -311,8 +328,9 @@ StatementHandle DuckboxFlightSqlServer::MakeHandle(const CallCtx &c, const std::
 
 arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::Info(const FlightDescriptor &descriptor,
                                                                        const std::string &token,
-                                                                       const std::shared_ptr<arrow::Schema> &schema) const {
-	return MakeInfo(descriptor, token, schema);
+                                                                       const std::shared_ptr<arrow::Schema> &schema,
+                                                                       const std::string &redirect_flight) const {
+	return MakeInfo(descriptor, token, schema, redirect_flight);
 }
 
 arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::MetaInfo(
@@ -361,9 +379,13 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 		}
 		auto h = MakeHandle(c, rw.sql, rw.user_param_count);
 		auto token = signer_->Sign(h);
-		auto box = Box(c);
-		auto schema = SchemaFromCols(box->DescribeRewritten(rw.sql));
-		return Info(descriptor, token, schema);
+		try {
+			auto box = Box(c);
+			auto schema = SchemaFromCols(box->DescribeRewritten(rw.sql));
+			return Info(descriptor, token, schema);
+		} catch (const RedirectError &re) {
+			return Info(descriptor, token, SchemaFromCols({}), re.flight());
+		}
 	} catch (const std::exception &e) {
 		return FromEx(e);
 	}
@@ -443,10 +465,14 @@ arrow::Result<sql::ActionCreatePreparedStatementResult> DuckboxFlightSqlServer::
 		}
 		auto h = MakeHandle(c, rw.sql, rw.user_param_count);
 		auto token = signer_->Sign(h);
-		auto box = Box(c);
 		sql::ActionCreatePreparedStatementResult res;
 		res.prepared_statement_handle = token;
-		res.dataset_schema = SchemaFromCols(box->DescribeRewritten(rw.sql));
+		try {
+			auto box = Box(c);
+			res.dataset_schema = SchemaFromCols(box->DescribeRewritten(rw.sql));
+		} catch (const RedirectError &) {
+			res.dataset_schema = SchemaFromCols({});
+		}
 		arrow::FieldVector pfields;
 		for (int i = 0; i < rw.user_param_count; i++) {
 			pfields.push_back(arrow::field("$" + std::to_string(i + 1), UnknownParamType()));
@@ -511,9 +537,13 @@ arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::GetFlightInfo
 		}
 		AuthorizeCaller(daemon_, CallerOf(context), current.key);
 		auto rec = ResolveHandleVersion(*defs_, current, h.version);
-		auto box = runtime_->Get(rec);
-		auto schema = SchemaFromCols(box->DescribeRewritten(h.rewritten_sql));
-		return Info(descriptor, token, schema);
+		try {
+			auto box = runtime_->Get(rec);
+			auto schema = SchemaFromCols(box->DescribeRewritten(h.rewritten_sql));
+			return Info(descriptor, token, schema);
+		} catch (const RedirectError &re) {
+			return Info(descriptor, token, SchemaFromCols({}), re.flight());
+		}
 	} catch (const std::exception &e) {
 		return FromEx(e);
 	}
@@ -695,6 +725,7 @@ const std::vector<arrow::flight::ActionType> &DuckboxFlightSqlServer::SandboxAct
 	    {"ListSandboxes",
 	     "List authorized sandboxes. YAML body: id_prefix, key_prefix, policy_class, state, limit, offset."},
 	    {"ExpireSandbox", "Passivate the instance and invalidate prepared handles. Definition stays."},
+	    {"DrainNode", "Stop taking new leases, release owned sandboxes, deregister this node. YAML: timeout_ms."},
 	};
 	return k;
 }
@@ -848,6 +879,31 @@ arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContex
 			j["limit"] = lim;
 			return ResultJson(j.dump(), result);
 		}
+		if (action.type == "DrainNode") {
+			(void)caller;
+			int64_t timeout_ms = 5000;
+			if (!body.empty()) {
+				auto root = ParseYaml(body);
+				if (root.IsMap()) {
+					YamlRejectUnknownKeys(root, {"timeout_ms", "timeout"});
+					timeout_ms = root.GetInt("timeout_ms", timeout_ms);
+					auto traw = root.GetString("timeout");
+					if (!traw.empty()) {
+						int64_t ms = 0;
+						if (ParseDurationMs(traw, &ms) && ms > 0) {
+							timeout_ms = ms;
+						}
+					}
+				}
+			}
+			(void)timeout_ms;
+			auto ids = runtime_->Leases() ? runtime_->Leases()->OwnedIds() : std::vector<std::string>{};
+			runtime_->Drain();
+			Json j;
+			j["draining"] = true;
+			j["released"] = ids.size();
+			return ResultJson(j.dump(), result);
+		}
 		return Status::NotImplemented("unknown action " + action.type);
 	} catch (const std::exception &e) {
 		return FromEx(e);
@@ -897,35 +953,29 @@ int RunServer(const ServerOptions &opt) {
 	auto metrics = std::make_shared<MetricsRegistry>(opt.daemon.name, opt.daemon.metrics_policy_classes);
 	SetMetrics(metrics);
 	StartMetricsHttp(opt.daemon.metrics_listen, metrics);
-	auto leases = std::make_shared<SingleNodeLeaseManager>(metrics);
+	std::shared_ptr<ILeaseManager> leases;
+	std::shared_ptr<S3NodeDirectory> nodes;
 	auto router = std::make_shared<LocalRouter>(metrics);
+	auto lopt = LeaseOptionsFromDaemon(opt.daemon);
 	if (!opt.daemon.lease.endpoint.empty() || !opt.daemon.lease.endpoint_env.empty()) {
-		std::clog << "daemon: lease endpoint configured; S3ConditionalLeaseManager is implemented "
-		             "(If-None-Match / If-Match + fencing epoch). Daemon routing still uses "
-		             "SingleNodeLeaseManager until multi-node membership is wired. "
-		             "Named sandbox registry uses the same S3 prefix credential.\n";
+		auto s3 = MakeS3ControlClient(opt.daemon.lease);
+		leases = std::make_shared<S3ConditionalLeaseManager>(s3, lopt, metrics);
+		nodes = std::make_shared<S3NodeDirectory>(s3, lopt, metrics);
+		std::clog << "daemon: S3ConditionalLeaseManager on prefix " << lopt.prefix << " node " << lopt.owner_id
+		          << "\n";
+	} else {
+		leases = std::make_shared<SingleNodeLeaseManager>(metrics);
 	}
 	auto defs = MakeSandboxRegistry(opt.daemon);
 	auto runtime = std::make_shared<SandboxRuntime>(opt.daemon, leases, defs, router);
+	if (nodes) {
+		runtime->SetNodeDirectory(nodes);
+	}
 	auto signer = std::make_shared<HmacHandleSigner>(opt.daemon.handle_secret, opt.daemon.handle_ttl_seconds);
 	auto rewriter = std::make_shared<SqlRewriter>();
 	auto sql = std::make_unique<DuckboxFlightSqlServer>(opt.daemon, defs, runtime, signer, rewriter);
 	auto server = std::make_unique<DuckboxFlightServer>(std::move(sql));
 	std::atomic<bool> running{true};
-	std::thread renew([&]() {
-		Lease node;
-		node.tenant_key = "__node__";
-		while (running.load()) {
-			try {
-				leases->Renew(node);
-			} catch (const std::exception &e) {
-				SelfFence(std::string("lease_renew:") + e.what());
-			}
-			for (int i = 0; i < 50 && running.load(); i++) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
-			}
-		}
-	});
 
 	auto listen = opt.daemon.listen;
 	auto colon = listen.rfind(':');
@@ -943,6 +993,47 @@ int RunServer(const ServerOptions &opt) {
 		std::cerr << "flight init failed: " << st.ToString() << "\n";
 		return 1;
 	}
+	std::string flight = opt.daemon.lease.advertise;
+	if (flight.empty()) {
+		flight = "grpc://" + host + ":" + std::to_string(server->port());
+	}
+	leases->set_flight(flight);
+	if (nodes) {
+		nodes->set_flight(flight);
+	}
+	int64_t beat_ms = lopt.heartbeat_ms > 0 ? lopt.heartbeat_ms : 5000;
+	std::thread renew([&]() {
+		while (running.load()) {
+			try {
+				if (nodes) {
+					nodes->Heartbeat();
+				}
+				for (auto &id : leases->OwnedIds()) {
+					try {
+						leases->Renew(leases->Peek(id));
+					} catch (const LeaseLostError &e) {
+						runtime->PassivateId(id, "lease_lost");
+						std::clog << "{\"event\":\"lease_lost\",\"resource\":\"" << id << "\",\"reason\":\""
+						          << e.what() << "\"}\n";
+					}
+				}
+				if (!nodes) {
+					Lease node;
+					node.tenant_key = "__node__";
+					leases->Renew(node);
+				}
+			} catch (const std::exception &e) {
+				SelfFence(std::string(nodes ? "node_heartbeat:" : "lease_renew:") + e.what());
+			}
+			int ticks = static_cast<int>(beat_ms / 100);
+			if (ticks < 1) {
+				ticks = 1;
+			}
+			for (int i = 0; i < ticks && running.load(); i++) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			}
+		}
+	});
 	std::cout << "duckbox Flight SQL listening on grpc://" << host << ":" << server->port() << " (DuckDB "
 	          << DUCKBOX_DUCKDB_VERSION << ", control plane only)" << std::endl;
 	if (!opt.daemon.debug_http.empty()) {
@@ -1070,6 +1161,60 @@ int RunSandboxCli(const SandboxCliRequest &req) {
 	arrow::flight::Action action;
 	action.type = action_type;
 	action.body = BufOf(body);
+	auto stream_res = client->DoAction(opt, action);
+	if (!stream_res.ok()) {
+		std::cerr << stream_res.status().ToString() << "\n";
+		return 1;
+	}
+	auto stream = std::move(*stream_res);
+	while (true) {
+		auto n = stream->Next();
+		if (!n.ok()) {
+			std::cerr << n.status().ToString() << "\n";
+			return 1;
+		}
+		if (!n.ValueOrDie()) {
+			break;
+		}
+		auto &r = *n.ValueOrDie();
+		if (r.body) {
+			std::cout.write(reinterpret_cast<const char *>(r.body->data()), static_cast<std::streamsize>(r.body->size()));
+			std::cout << "\n";
+		}
+	}
+	return 0;
+}
+
+int RunNodeDrain(const NodeCliRequest &req) {
+	std::string host = "127.0.0.1";
+	int port = 4747;
+	auto u = req.url;
+	if (u.rfind("grpc://", 0) == 0) {
+		u = u.substr(7);
+	}
+	auto colon = u.rfind(':');
+	if (colon != std::string::npos) {
+		host = u.substr(0, colon);
+		port = std::stoi(u.substr(colon + 1));
+	} else if (!u.empty()) {
+		host = u;
+	}
+	auto loc_res = Location::ForGrpcTcp(host, port);
+	if (!loc_res.ok()) {
+		std::cerr << loc_res.status().ToString() << "\n";
+		return 1;
+	}
+	auto client_res = arrow::flight::FlightClient::Connect(*loc_res);
+	if (!client_res.ok()) {
+		std::cerr << client_res.status().ToString() << "\n";
+		return 1;
+	}
+	auto client = std::move(*client_res);
+	arrow::flight::FlightCallOptions opt;
+	opt.headers.emplace_back("x-duckbox-caller", req.caller.empty() ? "local" : req.caller);
+	arrow::flight::Action action;
+	action.type = "DrainNode";
+	action.body = BufOf("timeout_ms: " + std::to_string(req.timeout_ms) + "\n");
 	auto stream_res = client->DoAction(opt, action);
 	if (!stream_res.ok()) {
 		std::cerr << stream_res.status().ToString() << "\n";

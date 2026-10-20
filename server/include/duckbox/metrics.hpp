@@ -48,6 +48,7 @@ public:
 	virtual void IncOwnershipLost(const char *reason) = 0;
 	virtual void IncCasConflict() = 0;
 	virtual void SetOwnedKeys(size_t n) = 0;
+	virtual void SetClusterNodes(size_t n) = 0;
 	virtual void IncRoute(const char *decision) = 0;
 	virtual void ObserveForward(double seconds) = 0;
 	virtual void ObserveS3LeaseOp(const char *op, double seconds) = 0;
@@ -80,6 +81,7 @@ public:
 	void IncOwnershipLost(const char *reason) override;
 	void IncCasConflict() override;
 	void SetOwnedKeys(size_t n) override;
+	void SetClusterNodes(size_t n) override;
 	void IncRoute(const char *decision) override;
 	void ObserveForward(double seconds) override;
 	void ObserveS3LeaseOp(const char *op, double seconds) override;
@@ -153,6 +155,8 @@ public:
 	void IncCasConflict() override {
 	}
 	void SetOwnedKeys(size_t) override {
+	}
+	void SetClusterNodes(size_t) override {
 	}
 	void IncRoute(const char *) override {
 	}
