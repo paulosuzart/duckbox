@@ -76,7 +76,7 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)"
           JOBS="$(sysctl -n hw.ncpu)"
-          cmake --build build --parallel "$JOBS" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests
+          cmake --build build --parallel "$JOBS" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests duckbox_schema_tests
       - name: Unit, guardrail, and integration tests
         env:
           DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
