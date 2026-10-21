@@ -28,7 +28,8 @@ bool HasForbiddenTypeChars(const std::string &s) {
             return true;
         }
     }
-    return s.find(';') != std::string::npos || s.find("--") != std::string::npos;
+    return s.find(';') != std::string::npos || s.find("--") != std::string::npos ||
+           s.find("/*") != std::string::npos || s.find("$$") != std::string::npos;
 }
 
 struct TypeParser {
@@ -60,6 +61,21 @@ ddb::LogicalType ParseWithContext(const std::string &name) {
     return ddb::TransformStringToLogicalType(name, *con.context);
 }
 
+// Shape-only: leftover / injection is rejected before TransformStringToLogicalType,
+// which is otherwise lenient (`INTEGER) OR (1=1` parses as INTEGER).
+const ddb::CastExpression *
+NullCastShape(const ddb::vector<ddb::unique_ptr<ddb::ParsedExpression>> &exprs) {
+    if (exprs.size() != 1 || !exprs[0] ||
+        exprs[0]->GetExpressionClass() != ddb::ExpressionClass::CAST) {
+        return nullptr;
+    }
+    auto &cast = exprs[0]->Cast<ddb::CastExpression>();
+    return (cast.child && cast.child->GetExpressionClass() == ddb::ExpressionClass::CONSTANT &&
+            cast.child->Cast<ddb::ConstantExpression>().value.IsNull())
+               ? &cast
+               : nullptr;
+}
+
 } // namespace
 
 ddb::ClientProperties DefaultArrowClientProperties() {
@@ -74,17 +90,22 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     if (name.empty()) {
         throw Error("invalid logical type name");
     }
+    // Leftover / injection via the parser (not Query). Require a single
+    // CAST(NULL AS <type>) whose cast_type equals the parsed LogicalType so
+    // `INTEGER leftover` and `INTEGER) OR (1=1` cannot sneak through.
+    ddb::vector<ddb::unique_ptr<ddb::ParsedExpression>> exprs;
+    try {
+        exprs = ddb::Parser::ParseExpressionList("CAST(NULL AS " + std::string(name) + ")");
+    } catch (...) {
+        throw Error("invalid logical type name");
+    }
+    auto *cast = NullCastShape(exprs);
+    if (!cast) {
+        throw Error("invalid logical type name");
+    }
     ddb::LogicalType parsed;
     try {
         parsed = ParseWithContext(name);
-        // Leftover tokens via the parser (not Query). CAST(NULL AS INTEGER leftover)
-        // fails; DOUBLE PRECISION / DECIMAL(10, 2) remain one type.
-        auto exprs = ddb::Parser::ParseExpressionList("CAST(NULL AS " + std::string(name) + ")");
-        if (exprs.size() != 1) {
-            throw Error("invalid logical type name");
-        }
-    } catch (const Error &) {
-        throw;
     } catch (...) {
         throw Error("invalid logical type name");
     }
@@ -93,16 +114,8 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
         id == ddb::LogicalTypeId::UNKNOWN || id == ddb::LogicalTypeId::ANY) {
         throw Error("invalid logical type name");
     }
-    // Compare LogicalType, not the input spelling, so aliases and spacing
-    // (DOUBLE PRECISION, DECIMAL(10, 2), NUMERIC, VARCHAR(n)) are accepted.
-    try {
-        auto again = ParseWithContext(parsed.ToString());
-        if (again != parsed) {
-            throw Error("invalid logical type name");
-        }
-    } catch (const Error &) {
-        throw;
-    } catch (...) {
+    // Parser CAST types are not operator== with TransformStringToLogicalType.
+    if (ParseWithContext(cast->cast_type.ToString()) != parsed) {
         throw Error("invalid logical type name");
     }
     return parsed;

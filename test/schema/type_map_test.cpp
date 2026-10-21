@@ -115,6 +115,21 @@ void duckbox::test::RunArrowTypeMapTests() {
                         "SQL comment in a type name is rejected");
     ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER -- comment"); }, "invalid",
                         "spaced SQL comment in a type name is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER) OR (1=1"); }, "invalid",
+                        "CAST leftover OR-injection is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER), 1"); }, "invalid",
+                        "extra expression after a type name is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER/*x*/"); }, "invalid",
+                        "block comment in a type name is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER$$x"); }, "invalid",
+                        "dollar-quote in a type name is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("ANY"); }, "invalid",
+                        "ANY is not a concrete column type");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("UNKNOWN"); }, "invalid",
+                        "UNKNOWN is not a concrete column type");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("   "); }, "invalid",
+                        "whitespace-only type name is rejected");
+    ExpectTypeId("INTEGER  ", arrow::Type::INT32, "trailing spaces are trimmed");
 
     {
         std::vector<ColumnSchema> cols{

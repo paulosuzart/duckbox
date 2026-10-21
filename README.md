@@ -185,9 +185,9 @@ Runtime instances are keyed by **id@version**. Idle instances **passivate** (Duc
 
 **initSQL**: trusted SaaS SQL, rerun on every warmup, then `enable_external_access=false` and `lock_configuration`. Objects it creates are visible to agent SQL **only if the spec lists them**. Exposed views are authorized (expansion opaque in the plan guard by catalog-entry oid / table-function operator; agent-written SQL around them is still checked). Authorized views are **not** wrapped with spec tenant filters, and initSQL does not bind `:tenant_id`. DuckDB `allowed_directories`/`allowed_paths` are derived from `lake.data_path`, path-like `attachments`, and optional `extra_paths` before external access is disabled (prefixes are canonicalized: no `..`, no extra `//`, no query string, trailing slash). Agent SQL cannot `COPY`/`read_*` except through those views, and only for prefixes the spec already declared.
 
-Spec table and column names are ASCII-only (see validation above). A DuckLake table or column whose real name is unicode, quoted, or otherwise not a safe unquoted identifier cannot appear in `tables:` / `columns:`. Give it an ASCII alias with a trusted initSQL authorized view, and list that alias in the spec.
+Spec table and column names are ASCII-only. A DuckLake table or column whose real name is unicode or quoted can only be exposed through an ASCII alias created by a trusted initSQL authorized view.
 
-Tenant isolation on ordinary tables comes from the rewriter: it wraps the table in a subquery that applies the spec’s `filters` and binds `:tenant_id` from the sandbox key. Authorized views skip that wrap, so this alias is not tenant-filtered unless the SaaS bakes a literal predicate into initSQL (initSQL does not bind `:tenant_id`). Create/Update still warns because the view body does not mention a key variable:
+**Cross-tenant risk.** Tenant filters (`filters`, `:tenant_id`) are applied only by the rewriter to ordinary tables. Authorized views are **not** wrapped, and initSQL does **not** bind `:tenant_id` (it fails at warmup). **A view without its own row predicate returns every tenant's rows to every sandbox.** If the underlying table is shared between tenants, the SaaS **must** write a literal predicate for this sandbox's tenant into the view when it generates the spec (validate/quote the value; initSQL is trusted and unguarded). The "does not reference a key variable" warning fires for every such view, including correctly filtered ones, so it does not tell a safe view from an unsafe one.
 
 ```yaml
 tables:
@@ -198,7 +198,10 @@ init_sql: |
   CREATE TEMP VIEW deals AS
     SELECT id, "título" AS title
     FROM lake."negócios"
+    WHERE tenant_id = 21   -- literal written by the SaaS for this sandbox's tenant; REQUIRED on shared tables
 ```
+
+Omit the WHERE only when the underlying table already belongs to a single tenant.
 
 ### Metrics
 

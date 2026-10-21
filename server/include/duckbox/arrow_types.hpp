@@ -20,8 +20,8 @@ ddb::ClientProperties DefaultArrowClientProperties();
 
 // Parse a type name ("BIGINT", "DECIMAL(10,2)", …) the way pragma_table_info
 // and PreparedStatement::GetTypes().ToString() write them. Fail closed: the
-// parser must produce a valid LogicalType that round-trips (no VARCHAR
-// fallback, no leftover tokens, no control characters).
+// parser must produce a valid LogicalType (no VARCHAR fallback). Leftover
+// tokens must parse as a single CAST(NULL AS <type>) whose type matches.
 ddb::LogicalType LogicalTypeFromName(const std::string &logical_type);
 
 std::shared_ptr<arrow::DataType> MapLogicalType(const ddb::LogicalType &type,

@@ -33,9 +33,14 @@ void duckbox::test::RunInitSqlTests() {
 	auto r = con.Query("SELECT * FROM r ORDER BY i");
 	Expect(r && !r->HasError(), "trusted initSQL may use range() in a view");
 
-	// README unicode-alias example (verbatim). initSQL does not bind :tenant_id.
+	// README unicode-alias example (verbatim). SaaS writes a literal tenant id.
 	const char *kReadmeAliasInitSql =
 	    "CREATE TEMP VIEW deals AS\n"
+	    "    SELECT id, \"título\" AS title\n"
+	    "    FROM lake.\"negócios\"\n"
+	    "    WHERE tenant_id = 21   -- literal written by the SaaS for this sandbox's tenant; REQUIRED on shared tables\n";
+	const char *kUnfilteredAliasInitSql =
+	    "CREATE TEMP VIEW deals_all AS\n"
 	    "    SELECT id, \"título\" AS title\n"
 	    "    FROM lake.\"negócios\"\n";
 	{
@@ -44,14 +49,23 @@ void duckbox::test::RunInitSqlTests() {
 		auto attach = con_alias.Query("ATTACH ':memory:' AS lake");
 		Expect(attach && !attach->HasError(), "attach lake catalog for README alias example");
 		auto created = con_alias.Query(
-		    "CREATE TABLE lake.\"negócios\" (id INTEGER, \"título\" VARCHAR)");
+		    "CREATE TABLE lake.\"negócios\" (id INTEGER, \"título\" VARCHAR, tenant_id INTEGER)");
 		Expect(created && !created->HasError(), "create unicode lake table");
-		auto inserted = con_alias.Query("INSERT INTO lake.\"negócios\" VALUES (1, 'alpha')");
-		Expect(inserted && !inserted->HasError(), "insert unicode lake row");
+		auto inserted = con_alias.Query(
+		    "INSERT INTO lake.\"negócios\" VALUES (1, 'alpha', 21), (2, 'beta', 22)");
+		Expect(inserted && !inserted->HasError(), "insert two-tenant unicode lake rows");
+
+		RunInitSql(con_alias, kUnfilteredAliasInitSql, daemon, policy);
+		auto leaked = con_alias.Query("SELECT title FROM deals_all");
+		Expect(leaked && !leaked->HasError() && leaked->RowCount() == 2,
+		       "authorized view without a row predicate returns every tenant");
+
 		RunInitSql(con_alias, kReadmeAliasInitSql, daemon, policy);
 		auto aliased = con_alias.Query("SELECT title FROM deals");
-		Expect(aliased && !aliased->HasError() && aliased->ToString().find("alpha") != std::string::npos,
-		       "README init_sql creates an ASCII alias view over the unicode table");
+		Expect(aliased && !aliased->HasError() && aliased->RowCount() == 1 &&
+		           aliased->ToString().find("alpha") != std::string::npos,
+		       "README init_sql literal tenant predicate keeps one tenant");
+
 		ExpectThrowContains(
 		    [&] {
 			    RunInitSql(con_alias,
@@ -59,7 +73,7 @@ void duckbox::test::RunInitSqlTests() {
 			               "FROM lake.\"negócios\" WHERE tenant_id = :tenant_id",
 			               daemon, policy);
 		    },
-		    "", "initSQL does not bind :tenant_id in a view body");
+		    "Parser Error", "initSQL does not bind :tenant_id; DuckDB errors at ':'");
 	}
 
 	{
@@ -73,6 +87,6 @@ void duckbox::test::RunInitSqlTests() {
 		spec.init_sql = kReadmeAliasInitSql;
 		auto warns = AuthorizedViewWarnings(spec);
 		Expect(!warns.empty() && warns[0].find("key variable") != std::string::npos,
-		       "README alias view warns because initSQL cannot bind a tenant parameter");
+		       "literal-filtered README view still warns (no key variable in the body)");
 	}
 }
