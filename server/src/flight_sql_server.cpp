@@ -970,10 +970,17 @@ arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContex
 			if (action.type == "UpdateSandbox") {
 				auto current = defs_->Get(rec.id);
 				AuthorizeCaller(daemon_, caller, current.key);
-				if (rec.key.empty()) {
-					rec.key = current.key;
+				if (body.empty()) {
+					throw PolicyError("action body must be the sandbox spec YAML");
 				}
-				load_spec(rec);
+				auto spec = LoadSpecString(body, "<action>");
+				RejectSandboxKeyChange(current.key, spec.bound_key, rec.key);
+				if (!rec.id.empty()) {
+					spec.id = rec.id;
+				}
+				spec.bound_key = current.key;
+				rec = RecordFromSpec(spec, "");
+				rec.key = current.key;
 				AuthorizeCaller(daemon_, caller, rec.key);
 				auto out = defs_->Update(rec);
 				int keep = out.spec.handles.stale_version_grace_ms > 0 ? out.version - 1 : -1;

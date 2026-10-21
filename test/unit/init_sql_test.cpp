@@ -38,7 +38,7 @@ void duckbox::test::RunInitSqlTests() {
 	    "CREATE TEMP VIEW deals AS\n"
 	    "    SELECT id, \"título\" AS title\n"
 	    "    FROM lake.\"negócios\"\n"
-	    "    WHERE tenant_id = 21   -- literal written by the SaaS for this sandbox's tenant; REQUIRED on shared tables\n";
+	    "    WHERE tenant_id = 21   -- must equal this sandbox's tenant_id; REQUIRED on shared tables\n";
 	const char *kUnfilteredAliasInitSql =
 	    "CREATE TEMP VIEW deals_all AS\n"
 	    "    SELECT id, \"título\" AS title\n"
@@ -88,5 +88,37 @@ void duckbox::test::RunInitSqlTests() {
 		auto warns = AuthorizedViewWarnings(spec);
 		Expect(!warns.empty() && warns[0].find("key variable") != std::string::npos,
 		       "literal-filtered README view still warns (no key variable in the body)");
+	}
+
+	{
+		auto view_pol = policy;
+		view_pol.tables.clear();
+		TablePolicy alias;
+		alias.name = "deals_v";
+		alias.columns = {"id", "title"};
+		alias.authorized_view = true;
+		view_pol.tables.emplace("deals_v", alias);
+		auto key_21 = ParseTenantKey("tenant_21:user_sergio", policy.key);
+		auto key_22 = ParseTenantKey("tenant_22:user_kim", policy.key);
+		const char *init_21 =
+		    "CREATE TEMP VIEW deals_v AS SELECT id, title FROM deals WHERE tenant_id = 21 AND _deleted = false";
+		const char *init_22 =
+		    "CREATE TEMP VIEW deals_v AS SELECT id, title FROM deals WHERE tenant_id = 22 AND _deleted = false";
+		auto spec_dir = MemorySpecDir();
+		TenantSandbox box_21(daemon, view_pol, key_21, init_21, spec_dir);
+		TenantSandbox box_22(daemon, view_pol, key_22, init_22, spec_dir);
+		auto a = box_21.Execute("SELECT title FROM deals_v");
+		auto b = box_22.Execute("SELECT title FROM deals_v");
+		Expect(a.row_count == 1 && a.text_table.find("alpha") != std::string::npos &&
+		           a.text_table.find("bravo") == std::string::npos,
+		       "per-sandbox spec: tenant_21 sandbox sees only its literal rows");
+		Expect(b.row_count == 2 && b.text_table.find("bravo") != std::string::npos &&
+		           b.text_table.find("alpha") == std::string::npos,
+		       "per-sandbox spec: tenant_22 sandbox sees only its literal rows");
+
+		TenantSandbox leaked(daemon, view_pol, key_22, init_21, spec_dir);
+		auto leak = leaked.Execute("SELECT title FROM deals_v");
+		Expect(leak.text_table.find("alpha") != std::string::npos && leak.text_table.find("bravo") == std::string::npos,
+		       "known limitation (#15): same spec/initSQL reused for another key leaks tenant 21 rows to tenant 22");
 	}
 }

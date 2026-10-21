@@ -69,6 +69,25 @@ void duckbox::test::RunArrowTypeMapTests() {
     ExpectTypeId("NUMERIC(10,2)", arrow::Type::DECIMAL128, "NUMERIC(10,2) is decimal128");
     ExpectTypeId("VARCHAR(10)", arrow::Type::STRING, "VARCHAR(10) is utf8");
     ExpectTypeId("STRUCT(\"A\" INTEGER)", arrow::Type::STRUCT, "STRUCT(\"A\" INTEGER) is struct");
+    ExpectTypeId("ENUM('a--b', 'c')", arrow::Type::DICTIONARY,
+                 "ENUM('a--b') keeps -- inside quotes");
+    ExpectTypeId("ENUM('x/*y', 'z')", arrow::Type::DICTIONARY,
+                 "ENUM('x/*y') keeps /* inside quotes");
+    ExpectTypeId("ENUM('p$$q', 'r')", arrow::Type::DICTIONARY,
+                 "ENUM('p$$q') keeps $$ inside quotes");
+    ExpectTypeId("ENUM('a;b', 'c')", arrow::Type::DICTIONARY, "ENUM('a;b') keeps ; inside quotes");
+    ExpectTypeId("ENUM('a''--b', 'c')", arrow::Type::DICTIONARY,
+                 "ENUM doubled single-quote escape is accepted");
+    ExpectTypeId("STRUCT(\"a--b\" INTEGER)", arrow::Type::STRUCT,
+                 "STRUCT(\"a--b\" INTEGER) keeps -- inside quotes");
+    ExpectTypeId("STRUCT(\"c;d\" INTEGER)", arrow::Type::STRUCT,
+                 "STRUCT(\"c;d\" INTEGER) keeps ; inside quotes");
+    ExpectTypeId("STRUCT(\"x/*y\" INTEGER)", arrow::Type::STRUCT,
+                 "STRUCT(\"x/*y\" INTEGER) keeps /* inside quotes");
+    ExpectTypeId("STRUCT(\"p$$q\" INTEGER)", arrow::Type::STRUCT,
+                 "STRUCT(\"p$$q\" INTEGER) keeps $$ inside quotes");
+    ExpectTypeId("STRUCT(\"a\"\"--b\" INTEGER)", arrow::Type::STRUCT,
+                 "STRUCT doubled double-quote escape is accepted");
 
     Expect(LogicalTypeFromName("DOUBLE PRECISION") == LogicalTypeFromName("DOUBLE"),
            "DOUBLE PRECISION equals DOUBLE");

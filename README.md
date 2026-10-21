@@ -12,7 +12,7 @@ This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/inclu
 
 **initSQL** is trusted. It runs at warmup **before** `enable_external_access=false` and `lock_configuration`. The agent never executes in that phase. Views (and macros) created there are **authorized views** (BigQuery-style): if the spec exposes the view, the plan guard treats that view's expansion as opaque (no table-function/allowlist rejection *inside* it) and still checks everything the agent wrote around it. The same function or non-allowlisted table used directly by the agent is denied.
 
-**Authorized views bypass tenant filters.** The rewriter does not wrap them in the spec’s `filters` (it does not add `WHERE tenant_id = :tenant_id`). initSQL is executed as written and does not bind key variables, so a `:tenant_id` placeholder in the view body will not run. If the view needs a tenant predicate, the SaaS must bake it into initSQL as ordinary SQL (for example a literal written at CreateSandbox time). Create/Update return a `warnings` array and write the same text to the audit log when an authorized view’s body does not mention a key variable.
+**Authorized views bypass tenant filters.** The rewriter does not wrap them, and initSQL does not bind `:tenant_id` (a placeholder fails at warmup). On a shared table the SaaS must generate a separate spec/initSQL for each sandbox and write that sandbox's tenant id as a literal; Duckbox does not check the literal against the sandbox `key`. Reusing one spec across keys leaks rows. The Create/Update "does not reference a key variable" warning is not a safety signal (see Cross-tenant risk).
 
 Allowed external locations are derived from the spec — not parsed from initSQL: `lake.data_path`, each `attachments` entry, and rarely `extra_paths` for a prefix with no attachment. Those prefixes are applied to DuckDB `allowed_paths` / `allowed_directories` **before** external access is disabled. Authorized views may read anything under the declared lake/attachments using the sandbox's resolved credentials. Anything undeclared fails. initSQL is written to the audit log with secrets redacted.
 
@@ -98,6 +98,8 @@ In another terminal (the CLI does not need those env vars; they belong on the `s
 ./build/duckbox sandbox create --url grpc://127.0.0.1:4747 \
   --spec ./policies/ducklake/analyst.yaml \
   --id acme-analyst --key tenant_21:user_sergio
+# Specs with authorized views over shared tables are per-sandbox: do not reuse
+# --spec FILE across keys. See Cross-tenant risk.
 
 .venv/bin/python examples/python/quickstart.py
 # or open examples/python/quickstart.ipynb  (same walkthrough as quickstart.py)
@@ -143,9 +145,11 @@ Trusted-caller CRUD (Flight SQL `DoAction`, mirrored as CLI):
 duckbox sandbox create|get|update|delete|list --url grpc://127.0.0.1:4747 --spec FILE [--id ID] [--key KEY]
 ```
 
+Specs with authorized views over shared tables are per-sandbox and must not be reused across keys (see Cross-tenant risk).
+
 Create on an existing id with different content is rejected (409). `UpdateSandbox` explicitly bumps **version** (hash of policy+initSQL is the content identity; S3 keeps immutable `sandboxes/<id>/v<N>.json` plus `current.json` with If-None-Match / If-Match). Warm instances of versions older than N-1 drain/passivate; N-1 stays warm when `handles.stale_version_grace` is >0. Delete writes a tombstone. Any node can load a definition after failover.
 
-Queries send **id + SQL** (`x-duckbox-sandbox`). The bound key comes from the definition; send `x-duckbox-key` only when the spec’s `auth.key` extractor needs a per-query key. The caller must be authorized for the sandbox’s key (`auth.callers` maps identities to key globs). Empty `auth.callers` is allow-all only with `auth.allow_insecure_dev`; production YAML must list callers. Example daemons load `handle_secret` from `DUCKBOX_HANDLE_SECRET` (the well-known `duckbox-dev-secret` is refused unless that flag is set).
+Queries send **id + SQL** (`x-duckbox-sandbox`). The bound key comes from the sandbox definition. `x-duckbox-key`, if sent, must match that key exactly; a different value is rejected. There is no per-query key override. The caller must be authorized for the sandbox’s key (`auth.callers` maps identities to key globs). Empty `auth.callers` is allow-all only with `auth.allow_insecure_dev`; production YAML must list callers. Example daemons load `handle_secret` from `DUCKBOX_HANDLE_SECRET` (the well-known `duckbox-dev-secret` is refused unless that flag is set).
 
 Prepared-statement handles carry **id + version**. `handles.stale_version_grace` (default `0s`, cap `1h`) governs a non-current handle: `0s` rejects immediately with `re-prepare`. If >0, a handle for the **immediately previous** version is accepted until `updated_at + grace` and executes against that previous version’s rules. Older versions, and N-1 after the window, always `re-prepare`.
 
@@ -187,9 +191,12 @@ Runtime instances are keyed by **id@version**. Idle instances **passivate** (Duc
 
 Spec table and column names are ASCII-only. A DuckLake table or column whose real name is unicode or quoted can only be exposed through an ASCII alias created by a trusted initSQL authorized view.
 
-**Cross-tenant risk.** Tenant filters (`filters`, `:tenant_id`) are applied only by the rewriter to ordinary tables. Authorized views are **not** wrapped, and initSQL does **not** bind `:tenant_id` (it fails at warmup). **A view without its own row predicate returns every tenant's rows to every sandbox.** If the underlying table is shared between tenants, the SaaS **must** write a literal predicate for this sandbox's tenant into the view when it generates the spec (validate/quote the value; initSQL is trusted and unguarded). The "does not reference a key variable" warning fires for every such view, including correctly filtered ones, so it does not tell a safe view from an unsafe one.
+**Cross-tenant risk.** Tenant filters (`filters`, `:tenant_id`) are applied only by the rewriter to ordinary tables. Authorized views are **not** wrapped, and initSQL does **not** bind `:tenant_id` (it fails at warmup). **A view without its own row predicate returns every tenant's rows to every sandbox.**
+
+If the underlying table is shared between tenants, the SaaS **must generate a separate spec/initSQL for each sandbox** and write that sandbox's own tenant id as a literal in the view (validate it as an integer or quote it; initSQL is trusted and unguarded). **Duckbox does not check that the literal matches the sandbox `key`.** Reusing one spec file for several keys (for example `sandbox create --spec FILE --key tenant_22:...` with a view that says `tenant_id = 21`) exposes tenant 21's rows to tenant 22. The "does not reference a key variable" warning fires for every such view, filtered or not, so it is not a safety signal (see #15).
 
 ```yaml
+# Generated by the SaaS for sandbox key tenant_21:... - never reuse for another tenant
 tables:
   deals:
     authorized_view: true
@@ -198,7 +205,7 @@ init_sql: |
   CREATE TEMP VIEW deals AS
     SELECT id, "título" AS title
     FROM lake."negócios"
-    WHERE tenant_id = 21   -- literal written by the SaaS for this sandbox's tenant; REQUIRED on shared tables
+    WHERE tenant_id = 21   -- must equal this sandbox's tenant_id; REQUIRED on shared tables
 ```
 
 Omit the WHERE only when the underlying table already belongs to a single tenant.
@@ -212,7 +219,7 @@ Omit the WHERE only when the underlying table already belongs to a single tenant
 v1 wire protocol. JDBC and ADBC work. Headers:
 
 - `x-duckbox-sandbox` — named sandbox id (required for queries)
-- `x-duckbox-key` — optional; definition key is used otherwise
+- `x-duckbox-key` — optional; if present must match the sandbox definition key (no per-query override)
 - `x-duckbox-caller` — trusted caller identity; used only when `auth.allow_insecure_dev` is set and no bearer/JWT is configured
 - `Authorization: Bearer` — static `auth.bearer_secrets` or HS256 JWT (`auth.jwt_secret`). `alg` must be `"HS256"` exactly (not a substring); `exp` is required (`nbf` optional, 60s leeway). Unsigned tokens are rejected
 

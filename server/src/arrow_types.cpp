@@ -28,8 +28,47 @@ bool HasForbiddenTypeChars(const std::string &s) {
             return true;
         }
     }
-    return s.find(';') != std::string::npos || s.find("--") != std::string::npos ||
-           s.find("/*") != std::string::npos || s.find("$$") != std::string::npos;
+    // Scan `;` / `--` / `/*` / `$$` only outside quotes so ENUM('a--b') and
+    // STRUCT("c;d" INTEGER) stay valid. Doubled quotes are escapes.
+    enum class Quote { None, Single, Double };
+    Quote q = Quote::None;
+    for (size_t i = 0; i < s.size(); i++) {
+        char c = s[i];
+        if (q == Quote::Single) {
+            if (c == '\'') {
+                if (i + 1 < s.size() && s[i + 1] == '\'') {
+                    i++;
+                } else {
+                    q = Quote::None;
+                }
+            }
+            continue;
+        }
+        if (q == Quote::Double) {
+            if (c == '"') {
+                if (i + 1 < s.size() && s[i + 1] == '"') {
+                    i++;
+                } else {
+                    q = Quote::None;
+                }
+            }
+            continue;
+        }
+        if (c == '\'') {
+            q = Quote::Single;
+            continue;
+        }
+        if (c == '"') {
+            q = Quote::Double;
+            continue;
+        }
+        if (c == ';' || (c == '-' && i + 1 < s.size() && s[i + 1] == '-') ||
+            (c == '/' && i + 1 < s.size() && s[i + 1] == '*') ||
+            (c == '$' && i + 1 < s.size() && s[i + 1] == '$')) {
+            return true;
+        }
+    }
+    return false;
 }
 
 struct TypeParser {

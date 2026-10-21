@@ -161,6 +161,18 @@ SandboxRecord RecordFromSpec(SandboxSpec spec, std::string spec_dir) {
 	return r;
 }
 
+void RejectSandboxKeyChange(const std::string &current_key, const std::string &body_key,
+                            const std::string &header_key) {
+	auto mismatch = [&](const std::string &got) {
+		if (!got.empty() && got != current_key) {
+			throw PolicyError("UpdateSandbox cannot change the sandbox key (got '" + got +
+			                  "', bound key is '" + current_key + "')");
+		}
+	};
+	mismatch(body_key);
+	mismatch(header_key);
+}
+
 int64_t WallNowMs() {
 	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
 	    .count();
