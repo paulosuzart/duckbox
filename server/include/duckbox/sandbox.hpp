@@ -14,6 +14,7 @@
 #include "duckbox/tenant_key.hpp"
 #include "duckbox/duckdb_layer.hpp"
 
+#include <arrow/type.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -58,6 +59,8 @@ public:
 	QueryOutput Execute(const std::string &sql); // rewrite + plan guard; failures ROLLBACK so the next query can run
 	QueryOutput ExecuteRewritten(const std::string &sql, std::vector<ddb::Value> params); // re-rewrites handle SQL (projection + filters + AST)
 	std::vector<ColumnSchema> DescribeRewritten(const std::string &sql);
+	// Same converter + client properties as Execute / DoGet batches.
+	std::shared_ptr<arrow::Schema> DescribeRewrittenArrow(const std::string &sql);
 	ddb::unique_ptr<ddb::LogicalOperator> ExtractPlan(const std::string &sql); // tests: real bound plans
 
 	const Policy &GetPolicy() const {

@@ -1,5 +1,6 @@
 #include "duckbox/sandbox.hpp"
 #include "duckbox/arrow_ipc.hpp"
+#include "duckbox/arrow_types.hpp"
 #include "duckbox/error.hpp"
 #include "duckbox/init_sql.hpp"
 #include "duckbox/json.hpp"
@@ -532,6 +533,41 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
 			out.push_back(ColumnSchema{names[i], types[i].ToString()});
 		}
 		return out;
+	} catch (...) {
+		RecoverAfterFailure();
+		throw;
+	}
+}
+
+std::shared_ptr<arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std::string &sql) {
+	Warmup(false);
+	std::lock_guard<std::mutex> hold(mu_);
+	Touch();
+	if (con_ && con_->HasActiveTransaction()) {
+		RecoverAfterFailure();
+	}
+	try {
+		UserStatementScope user(*con_->context);
+		auto rewritten = RewriteUserSql(sql, policy_, key_);
+		if (plan_info_) {
+			NoteAuthorizedViews(*con_->context, *plan_info_, rewritten);
+		}
+		auto ps = con_->Prepare(rewritten);
+		if (ps->HasError()) {
+			throw Error(ps->GetError());
+		}
+		auto &names = ps->GetNames();
+		auto &types = ps->GetTypes();
+		std::vector<std::string> out_names;
+		std::vector<ddb::LogicalType> out_types;
+		out_names.reserve(names.size());
+		out_types.reserve(types.size());
+		for (idx_t i = 0; i < names.size(); i++) {
+			out_names.push_back(names[i]);
+			out_types.push_back(types[i]);
+		}
+		auto opts = con_->context->GetClientProperties();
+		return SchemaFromLogicalTypes(out_names, out_types, opts);
 	} catch (...) {
 		RecoverAfterFailure();
 		throw;

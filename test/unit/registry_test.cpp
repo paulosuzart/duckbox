@@ -37,6 +37,13 @@ void duckbox::test::RunRegistryTests() {
 	ExpectThrowContains([&] { defs.Create(other); }, "already exists", "create conflict on different content");
 	auto updated = defs.Update(other);
 	Expect(updated.version == 2, "update bumps version");
+	RejectSandboxKeyChange(key_a.raw, "", "");
+	RejectSandboxKeyChange(key_a.raw, key_a.raw, "");
+	RejectSandboxKeyChange(key_a.raw, "", key_a.raw);
+	ExpectThrowContains([&] { RejectSandboxKeyChange(key_a.raw, "tenant_22:user_kim", ""); },
+	                    "cannot change the sandbox key", "UpdateSandbox rejects a different key in the body");
+	ExpectThrowContains([&] { RejectSandboxKeyChange(key_a.raw, "", "tenant_22:user_kim"); },
+	                    "cannot change the sandbox key", "UpdateSandbox rejects a different key in the header");
 	ExpectThrowContains([&] { EnsureCurrentVersion(defs.Get("acme-analyst"), 1, "acme-analyst"); }, "re-prepare",
 	                    "stale handle version rejected");
 	EnsureCurrentVersion(defs.Get("acme-analyst"), 2, "acme-analyst");

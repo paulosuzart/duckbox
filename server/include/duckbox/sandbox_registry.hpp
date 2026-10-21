@@ -107,6 +107,10 @@ private:
 
 std::shared_ptr<SandboxRegistry> MakeSandboxRegistry(const DaemonConfig &daemon); // S3 if lease.bucket set, else memory
 SandboxRecord RecordFromSpec(SandboxSpec spec, std::string spec_dir = "");
+// UpdateSandbox cannot rebind an existing sandbox to another key. Empty
+// body or header keys are ignored; a different non-empty value is rejected.
+void RejectSandboxKeyChange(const std::string &current_key, const std::string &body_key,
+                            const std::string &header_key);
 int64_t WallNowMs();
 // Current version always wins. The immediately previous version is accepted
 // until current.updated_at_ms + current.spec.handles.stale_version_grace_ms

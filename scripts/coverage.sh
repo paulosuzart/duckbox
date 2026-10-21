@@ -7,7 +7,7 @@ export DUCKBOX_HANDLE_SECRET="${DUCKBOX_HANDLE_SECRET:-duckbox-dev-secret}"
 export PATH="${HOME}/.local/bin:${PATH}"
 
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Debug -DDUCKBOX_COVERAGE=ON -DCMAKE_CXX_COMPILER="${CXX:-g++}"
-cmake --build "$BUILD" --parallel --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests
+cmake --build "$BUILD" --parallel --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests duckbox_schema_tests
 export DUCKBOX_BIN="$BUILD/duckbox"
 ctest --test-dir "$BUILD" --output-on-failure
 

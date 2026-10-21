@@ -359,15 +359,61 @@ void duckbox::test::RunAuthFlightTests() {
 				g_failed++;
 				std::cerr << "FAIL: K1 Alice must not change a sandbox key to a tenant she cannot use\n";
 			} catch (const std::exception &e) {
-				Expect(std::string(e.what()).find("not authorized") != std::string::npos ||
-				           std::string(e.what()).find("Invalid") != std::string::npos,
-				       "K1 key change requires authorization for both old and new keys");
+				Expect(std::string(e.what()).find("cannot change the sandbox key") != std::string::npos,
+				       "UpdateSandbox rejects a key change");
+			}
+			{
+				auto same = opt;
+				same.headers.emplace_back("x-duckbox-sandbox", "warn-av");
+				same.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+				auto ok = ActionBody(*raw_client, same, "UpdateSandbox", body);
+				Expect(ok.find("warn-av") != std::string::npos,
+				       "UpdateSandbox with the existing sandbox key succeeds");
+				auto steal_key = body;
+				if (steal_key.find("key:") != std::string::npos) {
+					auto k = steal_key.find("key:");
+					auto eol = steal_key.find('\n', k);
+					steal_key.replace(k, eol == std::string::npos ? steal_key.size() - k : eol - k,
+					                  "key: tenant_22:user_kim");
+				} else {
+					steal_key = "key: tenant_22:user_kim\n" + steal_key;
+				}
+				auto keep = opt;
+				keep.headers.emplace_back("x-duckbox-sandbox", "warn-av");
+				keep.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+				try {
+					(void)ActionBody(*raw_client, keep, "UpdateSandbox", steal_key);
+					g_failed++;
+					std::cerr << "FAIL: UpdateSandbox must reject a different key in the body\n";
+				} catch (const std::exception &e) {
+					Expect(std::string(e.what()).find("cannot change the sandbox key") != std::string::npos,
+					       "UpdateSandbox rejects a different key in the YAML body");
+				}
+				try {
+					(void)ActionBody(*raw_client, keep, "UpdateSandbox", "");
+					g_failed++;
+					std::cerr << "FAIL: UpdateSandbox must reject an empty body\n";
+				} catch (const std::exception &e) {
+					Expect(std::string(e.what()).find("action body must be the sandbox spec YAML") !=
+					           std::string::npos,
+					       "UpdateSandbox rejects an empty spec body");
+				}
 			}
 		}
 
 		arrow::flight::sql::FlightSqlClient sql_client(raw_client);
 		auto qopt = opt;
 		qopt.headers.emplace_back("x-duckbox-sandbox", "flight-c");
+		{
+			auto mismatch = qopt;
+			mismatch.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+			auto bad = sql_client.Execute(mismatch, "SELECT id FROM deals");
+			Expect(!bad.ok(), "Flight SQL Execute rejects a mismatched x-duckbox-key");
+			if (!bad.ok()) {
+				Expect(bad.status().ToString().find("does not match the sandbox key") != std::string::npos,
+				       "mismatched x-duckbox-key is rejected with the sandbox-key error");
+			}
+		}
 		auto got = ActionBody(*raw_client, qopt, "GetSandbox", "flight-c");
 		Expect(got.find("flight-c") != std::string::npos, "GetSandbox returns the in-scope definition");
 		auto cats = sql_client.GetCatalogs(qopt);
