@@ -1,8 +1,7 @@
 # Table-driven SQL guardrails. Add a bypass as a new case; no C++ required.
 # expect: allow | deny
-# stage: rewrite | execute | both | plan | spec | initsql
+# stage: rewrite | execute | both | spec | initsql
 #   deny defaults to rewrite, allow to execute
-# scan_fn: CheckLogicalPlan(MakeScan(name)) — no DuckDB parse / rewrite (AST bypass)
 cases:
   - id: insert_denied
     sql: "INSERT INTO deals VALUES (21, 9, 'x', 1, false)"
@@ -58,7 +57,7 @@ cases:
     reason: not allowlisted
     stage: both
 
-  # initSQL is trusted SaaS SQL (no AST allowlist).
+  # initSQL is statement-type checked. CREATE VIEW is allowed; MACRO/ATTACH are not.
   - id: initsql_view_postgres_scan
     sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
     expect: allow
@@ -66,7 +65,26 @@ cases:
 
   - id: initsql_macro_postgres_scan
     sql: "CREATE TEMP MACRO sneak() AS TABLE SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
-    expect: allow
+    expect: deny
+    reason: CREATE MACRO
+    stage: initsql
+
+  - id: initsql_attach_denied
+    sql: "ATTACH 'evil.db' AS ext"
+    expect: deny
+    reason: ATTACH
+    stage: initsql
+
+  - id: initsql_create_type_denied
+    sql: "CREATE TYPE mood AS ENUM ('sad', 'ok')"
+    expect: deny
+    reason: CREATE TYPE
+    stage: initsql
+
+  - id: initsql_create_function_denied
+    sql: "CREATE FUNCTION add(a, b) AS a + b"
+    expect: deny
+    reason: CREATE
     stage: initsql
 
   - id: initsql_view_replacement_scan
@@ -102,51 +120,25 @@ cases:
     reason: table functions
     stage: both
 
-  - id: plan_postgres_query_ducklake_inlined
-    sql: "SELECT * FROM postgres_query('__ducklake_metadata_lake', 'SELECT * FROM ducklake_inlined_data_1_1')"
-    expect: deny
-    stage: plan
-
-  - id: plan_duckdb_tables
-    sql: "SELECT * FROM duckdb_tables()"
-    expect: deny
-    reason: denied in user SQL
-    stage: plan
-
-  - id: plan_duckdb_secrets
-    sql: "SELECT * FROM duckdb_secrets()"
-    expect: deny
-    reason: denied in user SQL
-    stage: plan
-
-  # CheckLogicalPlan on a constructed LogicalGet — no DuckDB parse / rewrite.
-  - id: plan_query_bypasses_ast
+  - id: rewrite_query
     sql: "SELECT * FROM query('SELECT 1')"
     expect: deny
-    reason: denied in user SQL
-    stage: plan
-    scan_fn: query
+    reason: table functions
 
-  - id: plan_query_table_bypasses_ast
+  - id: rewrite_query_table
     sql: "SELECT * FROM query_table('SELECT 1')"
     expect: deny
-    reason: denied in user SQL
-    stage: plan
-    scan_fn: query_table
+    reason: table functions
 
-  - id: plan_glob_bypasses_ast
+  - id: rewrite_glob
     sql: "SELECT * FROM glob('*')"
     expect: deny
-    reason: denied in user SQL
-    stage: plan
-    scan_fn: glob
+    reason: table functions
 
-  - id: plan_read_csv_bypasses_ast
+  - id: rewrite_read_csv
     sql: "SELECT * FROM read_csv('x.csv')"
     expect: deny
-    reason: denied in user SQL
-    stage: plan
-    scan_fn: read_csv
+    reason: table functions
 
   - id: spec_deny_table_functions_false
     sql: "SELECT 1"
@@ -193,31 +185,30 @@ cases:
 
   - id: authorized_view_query
     sql: "SELECT * FROM qv"
-    expect: allow
+    expect: deny
+    reason: authorized view
     stage: execute
     init_sql: "CREATE TEMP VIEW qv AS SELECT * FROM query('SELECT 1 AS x')"
     extra_tables:
       - name: qv
         columns:
           - x
-    contains:
-      - "1"
 
   - id: authorized_view_range
     sql: "SELECT i FROM ext_v ORDER BY i"
-    expect: allow
+    expect: deny
+    reason: authorized view
     stage: execute
     init_sql: "CREATE TEMP VIEW ext_v AS SELECT range AS i FROM range(1, 4)"
     extra_tables:
       - name: ext_v
         columns:
           - i
-    contains:
-      - "1"
 
   - id: authorized_view_opaque_mix
     sql: "SELECT leaked, i FROM mix ORDER BY i"
-    expect: allow
+    expect: deny
+    reason: authorized view
     stage: execute
     init_sql: "CREATE TEMP VIEW mix AS SELECT (SELECT max(note) FROM secrets) AS leaked, r.range AS i FROM range(1, 3) r"
     extra_tables:
@@ -225,8 +216,6 @@ cases:
         columns:
           - leaked
           - i
-    contains:
-      - "should never"
 
   - id: authorized_view_join_secrets
     sql: "SELECT * FROM mix, secrets"
@@ -241,15 +230,14 @@ cases:
 
   - id: authorized_view_deals_constants_from_secrets
     sql: "SELECT id, title, amount FROM deals"
-    expect: allow
+    expect: deny
+    reason: authorized view
     stage: execute
     init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
     extra_tables:
       - name: deals
         columns: [id, title, amount]
         authorized_view: true
-    contains:
-      - "should never"
 
   - id: authorized_view_deals_join_secrets
     sql: "SELECT * FROM deals, secrets"
@@ -273,15 +261,14 @@ cases:
 
   - id: authorized_view_deals_repeated_scan
     sql: "SELECT a.title, b.title FROM deals a, deals b"
-    expect: allow
+    expect: deny
+    reason: authorized view
     stage: execute
     init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
     extra_tables:
       - name: deals
         columns: [id, title, amount]
         authorized_view: true
-    contains:
-      - "should never"
 
   - id: duckdb_tables
     sql: "SELECT * FROM duckdb_tables()"
@@ -480,5 +467,58 @@ cases:
     sql: "SELECT id FROM deals UNION SELECT id FROM deals"
     expect: allow
     stage: execute
+    not_contains:
+      - bravo
+
+  - id: staging_deals_not_allowlisted
+    sql: "SELECT * FROM staging.deals"
+    expect: deny
+    reason: not allowlisted
+    stage: both
+
+  - id: other_catalog_deals_not_allowlisted
+    sql: "SELECT * FROM other.main.deals"
+    expect: deny
+    reason: not allowlisted
+
+  - id: spec_pg_get_viewdef_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: "macro is not allowlisted: pg_get_viewdef"
+    stage: spec
+    extra_functions:
+      - pg_get_viewdef
+
+  - id: spec_format_type_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: "macro is not allowlisted: format_type"
+    stage: spec
+    extra_functions:
+      - format_type
+
+  - id: spec_pg_get_constraintdef_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: "macro is not allowlisted: pg_get_constraintdef"
+    stage: spec
+    extra_functions:
+      - pg_get_constraintdef
+
+  - id: spec_get_block_size_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: "macro is not allowlisted: get_block_size"
+    stage: spec
+    extra_functions:
+      - get_block_size
+
+  - id: parenthesized_setop_with
+    sql: "(WITH d AS (SELECT id, title FROM deals) SELECT id, title FROM d) UNION (WITH e AS (SELECT id, title FROM deals) SELECT id, title FROM e)"
+    expect: allow
+    stage: both
+    rewrite_contains:
+      - "21"
+      - tenant_id
     not_contains:
       - bravo

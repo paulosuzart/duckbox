@@ -362,13 +362,20 @@ void duckbox::test::RunFlightSchemaTests() {
         auto fn_at = body.find("functions:");
         Expect(fn_at != std::string::npos, "memory analyst spec has functions");
         if (fn_at != std::string::npos) {
-            body.insert(fn_at,
-                        "  qv:\n    authorized_view: true\n    columns: [x]\n"
-                        "  nested_v:\n    authorized_view: true\n    columns: [lst, st, mp]\n");
+            body.insert(fn_at, "  qv:\n    authorized_view: true\n    columns: [x]\n"
+                               "  nested_t:\n    columns: [tenant_id, lst, st, mp]\n"
+                               "    filters: [\"tenant_id = :tenant_id\"]\n");
         }
-        body += "\ninit_sql: \"CREATE TEMP VIEW qv AS SELECT 1 AS x; "
-                "CREATE TEMP VIEW nested_v AS SELECT [1, 2, 3] AS lst, "
-                "{'a': 1, 'b': 2} AS st, MAP(['k'], [1]) AS mp\"\n";
+        body += "\ninit_sql: |\n"
+                "  CREATE TEMP VIEW qv AS SELECT 1 AS x;\n"
+                "  CREATE TABLE nested_t (\n"
+                "    tenant_id INTEGER,\n"
+                "    lst INTEGER[],\n"
+                "    st STRUCT(a INTEGER, b INTEGER),\n"
+                "    mp MAP(VARCHAR, INTEGER)\n"
+                "  );\n"
+                "  INSERT INTO nested_t VALUES (21, [1, 2, 3], {'a': 1, 'b': 2}, "
+                "MAP(['k'], [1]));\n";
         auto view_opt = opt;
         view_opt.headers.clear();
         view_opt.headers.emplace_back("x-duckbox-caller", "analyst-svc");
@@ -376,10 +383,16 @@ void duckbox::test::RunFlightSchemaTests() {
         view_opt.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
         auto created = ActionBody(*raw_client, view_opt, "CreateSandbox", body);
         Expect(created.find("schema-views") != std::string::npos,
-               "CreateSandbox authorized/nested views");
+               "CreateSandbox authorized view + nested table");
 
-        ExpectFlightMatch(sql_client, *raw_client, view_opt, "SELECT x FROM qv",
-                          "authorized view qv");
+        auto qv_info = sql_client.Execute(view_opt, "SELECT x FROM qv");
+        Expect(!qv_info.ok(), "authorized view qv is rejected fail-closed");
+        if (!qv_info.ok()) {
+            auto w = qv_info.status().ToString();
+            Expect(w.find("authorized view") != std::string::npos ||
+                       w.find("rejected") != std::string::npos,
+                   "authorized view qv error names the view");
+        }
         auto qv_included = IncludedTableSchema(sql_client, *raw_client, view_opt, "qv");
         if (qv_included) {
             Expect(qv_included->num_fields() == 1 &&
@@ -387,39 +400,34 @@ void duckbox::test::RunFlightSchemaTests() {
                    "GetTables include_schema for authorized view qv is int32");
         }
 
-        ExpectFlightMatch(sql_client, *raw_client, view_opt, "SELECT lst, st, mp FROM nested_v",
+        ExpectFlightMatch(sql_client, *raw_client, view_opt, "SELECT lst, st, mp FROM nested_t",
                           "nested LIST/STRUCT/MAP");
-        auto nested_included = IncludedTableSchema(sql_client, *raw_client, view_opt, "nested_v");
-        auto nested_info = sql_client.Execute(view_opt, "SELECT lst, st, mp FROM nested_v");
+        auto nested_included = IncludedTableSchema(sql_client, *raw_client, view_opt, "nested_t");
+        if (nested_included) {
+            auto lst = nested_included->GetFieldByName("lst");
+            auto st = nested_included->GetFieldByName("st");
+            auto mp = nested_included->GetFieldByName("mp");
+            Expect(lst && lst->type()->id() == arrow::Type::LIST,
+                   "GetTables include_schema lst is LIST, not utf8");
+            Expect(st && st->type()->id() == arrow::Type::STRUCT,
+                   "GetTables include_schema st is STRUCT, not utf8");
+            Expect(mp && mp->type()->id() == arrow::Type::MAP,
+                   "GetTables include_schema mp is MAP, not utf8");
+        }
+        auto nested_info = sql_client.Execute(view_opt, "SELECT lst, st, mp FROM nested_t");
         Expect(nested_info.ok(), "nested DoGet info: " + nested_info.status().ToString());
-        if (nested_info.ok() && nested_included) {
+        if (nested_info.ok()) {
             auto info = std::move(nested_info).ValueOrDie();
             auto advertised = InfoSchema(*info);
-            Expect(advertised && advertised->Equals(*nested_included),
-                   "GetTables include_schema matches GetFlightInfo for nested types "
-                   "included=" +
-                       nested_included->ToString() +
-                       " advertised=" + (advertised ? advertised->ToString() : "null"));
-            Expect(!info->endpoints().empty(), "nested Execute has a ticket");
-            if (!info->endpoints().empty()) {
-                auto stream_res = raw_client->DoGet(view_opt, info->endpoints()[0].ticket);
-                Expect(stream_res.ok(), "nested DoGet: " + stream_res.status().ToString());
-                if (stream_res.ok()) {
-                    auto tbl = stream_res.ValueOrDie()->ToTable();
-                    Expect(tbl.ok() && (*tbl)->schema()->Equals(*nested_included),
-                           "GetTables include_schema matches DoGet for LIST/STRUCT/MAP");
-                    if (tbl.ok()) {
-                        Expect((*tbl)->schema()->num_fields() == 3, "nested view has 3 columns");
-                        if ((*tbl)->schema()->num_fields() == 3) {
-                            Expect((*tbl)->schema()->field(0)->type()->id() == arrow::Type::LIST,
-                                   "lst is LIST, not utf8");
-                            Expect((*tbl)->schema()->field(1)->type()->id() == arrow::Type::STRUCT,
-                                   "st is STRUCT, not utf8");
-                            Expect((*tbl)->schema()->field(2)->type()->id() == arrow::Type::MAP,
-                                   "mp is MAP, not utf8");
-                        }
-                    }
-                }
+            Expect(advertised && advertised->num_fields() == 3,
+                   "nested query advertises 3 columns");
+            if (advertised && advertised->num_fields() == 3) {
+                Expect(advertised->field(0)->type()->id() == arrow::Type::LIST,
+                       "lst is LIST, not utf8");
+                Expect(advertised->field(1)->type()->id() == arrow::Type::STRUCT,
+                       "st is STRUCT, not utf8");
+                Expect(advertised->field(2)->type()->id() == arrow::Type::MAP,
+                       "mp is MAP, not utf8");
             }
         }
     }
