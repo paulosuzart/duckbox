@@ -22,125 +22,31 @@ ddb::string TrimSpaces(const std::string &s) {
     return ddb::string(s.substr(a, b - a));
 }
 
-bool IsDollarTagChar(char c) {
-    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
-}
-
-// Scan `;` / `--` / `/*` only outside quotes. Understands doubled quotes,
-// E-strings (`E'…'` / backslash escapes), and `$tag$…$tag$` dollar quotes
-// (including empty `$$`) so leftover `) --` after those closers is visible.
-bool HasForbiddenTypeChars(const std::string &s) {
+bool HasControlChars(const std::string &s) {
     for (unsigned char c : s) {
         if (c < 0x20 || c == 0x7f) {
             return true;
         }
     }
-    enum class Quote { None, Single, Double, EString, Dollar };
-    Quote q = Quote::None;
-    std::string dollar_tag;
-    for (size_t i = 0; i < s.size(); i++) {
-        char c = s[i];
-        if (q == Quote::Single) {
-            if (c == '\'') {
-                if (i + 1 < s.size() && s[i + 1] == '\'') {
-                    i++;
-                } else {
-                    q = Quote::None;
-                }
-            }
-            continue;
-        }
-        if (q == Quote::Double) {
-            if (c == '"') {
-                if (i + 1 < s.size() && s[i + 1] == '"') {
-                    i++;
-                } else {
-                    q = Quote::None;
-                }
-            }
-            continue;
-        }
-        if (q == Quote::EString) {
-            if (c == '\\' && i + 1 < s.size()) {
-                i++;
-                continue;
-            }
-            if (c == '\'') {
-                q = Quote::None;
-            }
-            continue;
-        }
-        if (q == Quote::Dollar) {
-            if (c == '$' && i + 1 + dollar_tag.size() < s.size() &&
-                s.compare(i + 1, dollar_tag.size(), dollar_tag) == 0 &&
-                s[i + 1 + dollar_tag.size()] == '$') {
-                i += 1 + dollar_tag.size();
-                q = Quote::None;
-            }
-            continue;
-        }
-        if ((c == 'E' || c == 'e') && i + 1 < s.size() && s[i + 1] == '\'') {
-            q = Quote::EString;
-            i++;
-            continue;
-        }
-        if (c == '\'') {
-            q = Quote::Single;
-            continue;
-        }
-        if (c == '"') {
-            q = Quote::Double;
-            continue;
-        }
-        if (c == '$') {
-            size_t j = i + 1;
-            while (j < s.size() && IsDollarTagChar(s[j])) {
-                j++;
-            }
-            if (j < s.size() && s[j] == '$') {
-                dollar_tag.assign(s, i + 1, j - (i + 1));
-                q = Quote::Dollar;
-                i = j;
-                continue;
-            }
-        }
-        if (c == ';' || (c == '-' && i + 1 < s.size() && s[i + 1] == '-') ||
-            (c == '/' && i + 1 < s.size() && s[i + 1] == '*')) {
-            return true;
-        }
-    }
-    return q != Quote::None;
+    return false;
 }
 
-// Tokenize the name alone. Comments and extra `)` after a quoted closer
-// (E-string / $tag$) are leftover tokens even when CAST wrapping hides them.
-bool HasLeftoverTypeTokens(const std::string &s) {
-    ddb::vector<ddb::SimplifiedToken> toks;
-    try {
-        toks = ddb::Parser::Tokenize(s);
-    } catch (...) {
-        return true;
-    }
+// DuckDB 1.5.6 Tokenize does not emit COMMENT tokens. Only `(` / `)` balance.
+bool UnbalancedParens(const std::string &s) {
+    auto toks = ddb::Parser::Tokenize(s);
     int depth = 0;
     for (auto &tok : toks) {
-        if (tok.start >= s.size()) {
-            return true;
+        if (tok.type != ddb::SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR) {
+            continue;
         }
-        if (tok.type == ddb::SimplifiedTokenType::SIMPLIFIED_TOKEN_COMMENT ||
-            tok.type == ddb::SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR ||
-            tok.type == ddb::SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR_EMPHASIS) {
-            return true;
-        }
-        if (tok.type == ddb::SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR) {
-            char c = s[tok.start];
-            if (c == '(') {
-                depth++;
-            } else if (c == ')') {
-                if (depth == 0) {
-                    return true;
-                }
-                depth--;
+        char c = s[tok.start];
+        if (c == '(') {
+            depth++;
+        } else if (c == ')') {
+            if (depth == 0) {
+                return true;
             }
+            depth--;
         }
     }
     return depth != 0;
@@ -198,9 +104,8 @@ ddb::ClientProperties DefaultArrowClientProperties() {
 
 ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     auto name = TrimSpaces(logical_type);
-    bool forbidden = HasForbiddenTypeChars(logical_type);
-    bool leftover = HasLeftoverTypeTokens(std::string(name));
-    if (logical_type.empty() || name.empty() || forbidden || leftover) {
+    if (logical_type.empty() || name.empty() || HasControlChars(logical_type) ||
+        UnbalancedParens(std::string(name))) {
         throw Error("invalid logical type name");
     }
     // Leftover / injection via the parser (not Query). Require a single

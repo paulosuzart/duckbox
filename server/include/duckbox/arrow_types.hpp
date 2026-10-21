@@ -19,10 +19,10 @@ namespace duckbox {
 ddb::ClientProperties DefaultArrowClientProperties();
 
 // Parse a type name ("BIGINT", "DECIMAL(10,2)", …) the way pragma_table_info
-// and PreparedStatement::GetTypes().ToString() write them. Fail closed: the
-// parser must produce a valid LogicalType (no VARCHAR fallback). Leftover
-// tokens are rejected: comments, unbalanced parentheses, and anything that
-// is not a single CAST(NULL AS <type>) whose type matches the parsed type.
+// and PreparedStatement::GetTypes().ToString() write them. Fail closed: no
+// control characters, parentheses balanced via DuckDB Parser::Tokenize, a
+// single CAST(NULL AS <type>) with a constant NULL child, and that CAST's
+// type equals the parsed LogicalType.
 ddb::LogicalType LogicalTypeFromName(const std::string &logical_type);
 
 std::shared_ptr<arrow::DataType> MapLogicalType(const ddb::LogicalType &type,

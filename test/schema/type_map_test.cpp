@@ -26,6 +26,36 @@ void ExpectTypeId(const std::string &logical, arrow::Type::type want, const std:
     }
 }
 
+void ExpectEnumValues(const std::string &logical, const std::vector<std::string> &want,
+                      const std::string &msg) {
+    try {
+        auto lt = duckbox::LogicalTypeFromName(logical);
+        duckbox::test::Expect(lt.id() == duckbox::ddb::LogicalTypeId::ENUM, msg + " is ENUM");
+        duckbox::test::Expect(duckbox::ddb::EnumType::GetSize(lt) == want.size(),
+                              msg + " enum size " +
+                                  std::to_string(duckbox::ddb::EnumType::GetSize(lt)));
+        for (duckbox::ddb::idx_t i = 0; i < want.size(); i++) {
+            auto got = duckbox::ddb::EnumType::GetString(lt, i).GetString();
+            duckbox::test::Expect(got == want[i], msg + " value[" + std::to_string(i) + "]=" + got);
+        }
+        auto mapped = duckbox::MapTypeName(logical);
+        duckbox::test::Expect(mapped && mapped->id() == arrow::Type::DICTIONARY,
+                              msg + " maps to dictionary");
+    } catch (const std::exception &e) {
+        duckbox::test::Expect(false, msg + " threw " + e.what());
+    }
+}
+
+void ExpectInvalidTypeName(const std::string &logical, const std::string &msg) {
+    try {
+        (void)duckbox::LogicalTypeFromName(logical);
+        duckbox::test::Expect(false, msg + " (no throw)");
+    } catch (const std::exception &e) {
+        duckbox::test::Expect(std::string(e.what()) == "invalid logical type name",
+                              msg + " threw '" + std::string(e.what()) + "'");
+    }
+}
+
 void ExpectSchemaMatch(const std::shared_ptr<arrow::Schema> &advertised,
                        const std::vector<uint8_t> &ipc, const std::string &msg) {
     auto batch = duckbox::SchemaFromArrowIpc(ipc);
@@ -69,15 +99,12 @@ void duckbox::test::RunArrowTypeMapTests() {
     ExpectTypeId("NUMERIC(10,2)", arrow::Type::DECIMAL128, "NUMERIC(10,2) is decimal128");
     ExpectTypeId("VARCHAR(10)", arrow::Type::STRING, "VARCHAR(10) is utf8");
     ExpectTypeId("STRUCT(\"A\" INTEGER)", arrow::Type::STRUCT, "STRUCT(\"A\" INTEGER) is struct");
-    ExpectTypeId("ENUM('a--b', 'c')", arrow::Type::DICTIONARY,
-                 "ENUM('a--b') keeps -- inside quotes");
-    ExpectTypeId("ENUM('x/*y', 'z')", arrow::Type::DICTIONARY,
-                 "ENUM('x/*y') keeps /* inside quotes");
-    ExpectTypeId("ENUM('p$$q', 'r')", arrow::Type::DICTIONARY,
-                 "ENUM('p$$q') keeps $$ inside quotes");
-    ExpectTypeId("ENUM('a;b', 'c')", arrow::Type::DICTIONARY, "ENUM('a;b') keeps ; inside quotes");
-    ExpectTypeId("ENUM('a''--b', 'c')", arrow::Type::DICTIONARY,
-                 "ENUM doubled single-quote escape is accepted");
+    ExpectEnumValues("ENUM('a--b', 'c')", {"a--b", "c"}, "ENUM('a--b') keeps -- inside quotes");
+    ExpectEnumValues("ENUM('x/*y', 'z')", {"x/*y", "z"}, "ENUM('x/*y') keeps /* inside quotes");
+    ExpectEnumValues("ENUM('p$$q', 'r')", {"p$$q", "r"}, "ENUM('p$$q') keeps $$ inside quotes");
+    ExpectEnumValues("ENUM('a;b', 'c')", {"a;b", "c"}, "ENUM('a;b') keeps ; inside quotes");
+    ExpectEnumValues("ENUM('a''--b', 'c')", {"a'--b", "c"},
+                     "ENUM doubled single-quote escape is accepted");
     ExpectTypeId("STRUCT(\"a--b\" INTEGER)", arrow::Type::STRUCT,
                  "STRUCT(\"a--b\" INTEGER) keeps -- inside quotes");
     ExpectTypeId("STRUCT(\"c;d\" INTEGER)", arrow::Type::STRUCT,
@@ -88,24 +115,32 @@ void duckbox::test::RunArrowTypeMapTests() {
                  "STRUCT(\"p$$q\" INTEGER) keeps $$ inside quotes");
     ExpectTypeId("STRUCT(\"a\"\"--b\" INTEGER)", arrow::Type::STRUCT,
                  "STRUCT doubled double-quote escape is accepted");
-    ExpectTypeId("ENUM(E'a--b', 'c')", arrow::Type::DICTIONARY,
-                 "ENUM(E'a--b') keeps -- inside an E-string");
-    ExpectTypeId("ENUM(e'x/*y', 'z')", arrow::Type::DICTIONARY,
-                 "ENUM lowercase e-string may contain /*");
-    ExpectTypeId("ENUM(E'a\\'--b', 'c')", arrow::Type::DICTIONARY,
-                 "ENUM E-string backslash-escaped quote is accepted");
-    ExpectTypeId("ENUM($t$a--b$t$, 'c')", arrow::Type::DICTIONARY,
-                 "ENUM dollar-quoted value may contain --");
-    ExpectTypeId("ENUM($$x/*y$$, 'z')", arrow::Type::DICTIONARY,
-                 "ENUM empty-tag dollar quote may contain /*");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("ENUM(E'x\\'')) -- '"); }, "invalid",
-                        "E-string leftover ) -- is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("ENUM($t$'$t$)) -- '"); }, "invalid",
-                        "dollar-quote leftover ) -- is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("ENUM(E'unclosed"); }, "invalid",
-                        "unclosed E-string type name is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("ENUM($t$unclosed"); }, "invalid",
-                        "unclosed dollar-quote type name is rejected");
+    ExpectEnumValues("ENUM(E'a--b', 'c')", {"a--b", "c"},
+                     "ENUM(E'a--b') keeps -- inside an E-string");
+    ExpectEnumValues("ENUM(e'x/*y', 'z')", {"x/*y", "z"},
+                     "ENUM lowercase e-string may contain /*");
+    ExpectEnumValues("ENUM(E'a\\'--b', 'c')", {"a'--b", "c"},
+                     "ENUM E-string backslash-escaped quote is accepted");
+    ExpectEnumValues("ENUM($t$a--b$t$, 'c')", {"a--b", "c"},
+                     "ENUM dollar-quoted value may contain --");
+    ExpectEnumValues("ENUM($$x/*y$$, 'z')", {"x/*y", "z"},
+                     "ENUM empty-tag dollar quote may contain /*");
+    ExpectEnumValues("ENUM($ç$ok$ç$)", {"ok"}, "ENUM unicode dollar-quote tag is accepted");
+    ExpectTypeId("STRUCT(x$t$ /* */ INTEGER, y$t$ VARCHAR)", arrow::Type::STRUCT,
+                 "STRUCT x$t$ /* */ keeps $ in the identifier and a closed comment");
+    {
+        auto st = LogicalTypeFromName("STRUCT(x$t$ /* hidden */ INTEGER, y$t$ VARCHAR)");
+        Expect(st.id() == ddb::LogicalTypeId::STRUCT && ddb::StructType::GetChildCount(st) == 2 &&
+                   ddb::StructType::GetChildName(st, 0) == "x$t$" &&
+                   ddb::StructType::GetChildName(st, 1) == "y$t$",
+               "closed comment does not rename STRUCT x$t$ / y$t$ fields");
+    }
+    ExpectInvalidTypeName("ENUM(E'x\\'')) -- '", "E-string leftover ) -- is rejected");
+    ExpectInvalidTypeName("ENUM($t$'$t$)) -- '", "dollar-quote leftover ) -- is rejected");
+    ExpectInvalidTypeName("ENUM(E'unclosed", "unclosed E-string type name is rejected");
+    ExpectInvalidTypeName("ENUM($t$unclosed", "unclosed dollar-quote type name is rejected");
+    ExpectInvalidTypeName("ENUM($1$)", "$1$ is a parameter, not a dollar-quote tag");
+    ExpectInvalidTypeName("ENUM(NOE'x')", "E' only starts an E-string at a token boundary");
 
     Expect(LogicalTypeFromName("DOUBLE PRECISION") == LogicalTypeFromName("DOUBLE"),
            "DOUBLE PRECISION equals DOUBLE");
@@ -156,8 +191,7 @@ void duckbox::test::RunArrowTypeMapTests() {
                         "CAST leftover OR-injection is rejected");
     ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER), 1"); }, "invalid",
                         "extra expression after a type name is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER/*x*/"); }, "invalid",
-                        "block comment in a type name is rejected");
+    ExpectTypeId("INTEGER/*x*/", arrow::Type::INT32, "closed comment does not change INTEGER");
     ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER$$x"); }, "invalid",
                         "dollar-quote in a type name is rejected");
     ExpectThrowContains([] { (void)LogicalTypeFromName("ANY"); }, "invalid",
