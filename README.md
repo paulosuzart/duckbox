@@ -220,12 +220,12 @@ Omit the WHERE only when the underlying table already belongs to a single tenant
 
 ## Arrow Flight SQL
 
-v1 wire protocol. JDBC and ADBC work. Headers:
+v1 wire protocol. With production auth, JDBC/ADBC cannot authenticate until https://github.com/paulosuzart/duckbox/issues/16 is fixed (they do not send `auth-token-bin`); they work with `auth.allow_insecure_dev`. Headers:
 
 - `x-duckbox-sandbox` — named sandbox id (required for queries)
 - `x-duckbox-key` — optional; if present must match the sandbox definition key (no per-query override)
 - `x-duckbox-caller` — trusted caller identity; used only when `auth.allow_insecure_dev` is set and no bearer/JWT is configured
-- `Authorization: Bearer` — static `auth.bearer_secrets` or HS256 JWT (`auth.jwt_secret`). `alg` must be `"HS256"` exactly (not a substring); `exp` is required (`nbf` optional, 60s leeway). Unsigned tokens are rejected. The Arrow Flight `auth-token-bin` handshake is currently also required (see https://github.com/paulosuzart/duckbox/issues/16).
+- `Authorization: Bearer` — static `auth.bearer_secrets` or HS256 JWT (`auth.jwt_secret`). `alg` must be `"HS256"` exactly (not a substring); `exp` is required (`nbf` optional, 60s leeway). Unsigned tokens are rejected. JDBC/ADBC send this header but not `auth-token-bin`, so production auth still rejects them (same issue).
 
 Public CRUD actions: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes`, `ExpireSandbox`. Create/Update body is spec YAML; ListSandboxes YAML body filters `id_prefix`, `key_prefix`, `policy_class`, `state` (`warm`|`passive`|`defined`) plus `limit`/`offset`. Each list item is a summary (`id`, `key`, `version`, `policy_class`, `state`, `owner`, `created_at`, `updated_at`, `last_used_at`, `expires_at`) — not the full spec. `owner` is the live lease holder. `ExpireSandbox` passivates the instance and invalidates prepared handles; the definition stays. Operator actions `DrainNode` / `NodeStatus` (`duckbox node drain`) are served only on the **internal** listener, restricted to `auth.operators` (deny by default; sandbox CRUD callers are not operators). Peer proxy calls use `auth.peer_secret_ref` (`env:` / `file:`). Never expose `internal_listen` publicly.
 

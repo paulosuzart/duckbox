@@ -31,7 +31,10 @@ bool HasControlChars(const std::string &s) {
     return false;
 }
 
-// DuckDB 1.5.6 Tokenize does not emit COMMENT tokens. Only `(` / `)` balance.
+// DuckDB Tokenize truncates on lexical errors instead of throwing, so this
+// check alone must not be relied on. ParseExpressionList is what fails closed
+// (unclosed comments, leftover after a closer, catalog-qualified names, …).
+// Tokenize also does not emit COMMENT tokens in 1.5.6. Only `(` / `)` balance.
 bool UnbalancedParens(const std::string &s) {
     auto toks = ddb::Parser::Tokenize(s);
     int depth = 0;
@@ -81,6 +84,17 @@ ddb::LogicalType ParseWithContext(const std::string &name) {
     return ddb::TransformStringToLogicalType(name, *con.context);
 }
 
+// DuckDB throws (and echoes the input) for catalog-qualified or unknown names.
+// Always map that to the same fail-closed message — including the re-parse of
+// cast_type.ToString(), which is not operator== with the first parse.
+ddb::LogicalType ParseOrReject(const std::string &name) {
+    try {
+        return ParseWithContext(name);
+    } catch (...) {
+        throw Error("invalid logical type name");
+    }
+}
+
 // Shape-only: leftover / injection is rejected before TransformStringToLogicalType,
 // which is otherwise lenient (`INTEGER) OR (1=1` parses as INTEGER).
 const ddb::CastExpression *
@@ -103,9 +117,10 @@ ddb::ClientProperties DefaultArrowClientProperties() {
 }
 
 ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
+    constexpr size_t kMaxTypeNameBytes = 64 * 1024;
     auto name = TrimSpaces(logical_type);
-    if (logical_type.empty() || name.empty() || HasControlChars(logical_type) ||
-        UnbalancedParens(std::string(name))) {
+    if (logical_type.empty() || name.empty() || logical_type.size() > kMaxTypeNameBytes ||
+        HasControlChars(logical_type) || UnbalancedParens(std::string(name))) {
         throw Error("invalid logical type name");
     }
     // Leftover / injection via the parser (not Query). Require a single
@@ -121,19 +136,16 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     if (!cast) {
         throw Error("invalid logical type name");
     }
-    ddb::LogicalType parsed;
-    try {
-        parsed = ParseWithContext(name);
-    } catch (...) {
-        throw Error("invalid logical type name");
-    }
+    ddb::LogicalType parsed = ParseOrReject(name);
     auto id = parsed.id();
     if (id == ddb::LogicalTypeId::INVALID || id == ddb::LogicalTypeId::UNBOUND ||
         id == ddb::LogicalTypeId::UNKNOWN || id == ddb::LogicalTypeId::ANY) {
         throw Error("invalid logical type name");
     }
     // Parser CAST types are not operator== with TransformStringToLogicalType.
-    if (ParseWithContext(cast->cast_type.ToString()) != parsed) {
+    // Re-parse ToString() through the same wrapper so a catalog-qualified
+    // cast_type cannot leak DuckDB's raw exception.
+    if (ParseOrReject(cast->cast_type.ToString()) != parsed) {
         throw Error("invalid logical type name");
     }
     return parsed;

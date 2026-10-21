@@ -117,8 +117,7 @@ void duckbox::test::RunArrowTypeMapTests() {
                  "STRUCT doubled double-quote escape is accepted");
     ExpectEnumValues("ENUM(E'a--b', 'c')", {"a--b", "c"},
                      "ENUM(E'a--b') keeps -- inside an E-string");
-    ExpectEnumValues("ENUM(e'x/*y', 'z')", {"x/*y", "z"},
-                     "ENUM lowercase e-string may contain /*");
+    ExpectEnumValues("ENUM(e'x/*y', 'z')", {"x/*y", "z"}, "ENUM lowercase e-string may contain /*");
     ExpectEnumValues("ENUM(E'a\\'--b', 'c')", {"a'--b", "c"},
                      "ENUM E-string backslash-escaped quote is accepted");
     ExpectEnumValues("ENUM($t$a--b$t$, 'c')", {"a--b", "c"},
@@ -169,37 +168,52 @@ void duckbox::test::RunArrowTypeMapTests() {
     auto bigint = MapTypeName("BIGINT");
     Expect(bigint && !bigint->Equals(*arrow::int32()), "BIGINT must not collapse to int32");
 
-    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER; CREATE TABLE pwned(i INT)"); },
-                        "invalid", "injection-style type name is rejected");
-    ExpectThrowContains([] { (void)MapTypeName("INTEGER; CREATE TABLE pwned(i INT)"); }, "invalid",
-                        "MapTypeName rejects stacked statements in a type name");
-    ExpectThrowContains([] { (void)LogicalTypeFromName(std::string("INTEGER") + '\n'); }, "invalid",
-                        "newline in a type name is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName(std::string("INTEGER") + '\t'); }, "invalid",
-                        "tab in a type name is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER leftover"); }, "invalid",
-                        "trailing garbage after a type name is rejected");
-    ExpectThrowContains([] { (void)MapTypeName("INTEGER[] extra"); }, "invalid",
-                        "trailing garbage after a nested type name is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("NOTATYPE"); }, "invalid",
-                        "unknown type name is not VARCHAR");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER--x"); }, "invalid",
-                        "SQL comment in a type name is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER -- comment"); }, "invalid",
-                        "spaced SQL comment in a type name is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER) OR (1=1"); }, "invalid",
-                        "CAST leftover OR-injection is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER), 1"); }, "invalid",
-                        "extra expression after a type name is rejected");
+    ExpectInvalidTypeName("INTEGER; CREATE TABLE pwned(i INT)",
+                          "injection-style type name is rejected");
+    try {
+        (void)MapTypeName("INTEGER; CREATE TABLE pwned(i INT)");
+        Expect(false, "MapTypeName stacked statements (no throw)");
+    } catch (const std::exception &e) {
+        Expect(std::string(e.what()) == "invalid logical type name",
+               "MapTypeName rejects stacked statements with the exact message");
+    }
+    ExpectInvalidTypeName(std::string("INTEGER") + '\n', "newline in a type name is rejected");
+    ExpectInvalidTypeName(std::string("INTEGER") + '\t', "tab in a type name is rejected");
+    ExpectInvalidTypeName("INTEGER leftover", "trailing garbage after a type name is rejected");
+    ExpectInvalidTypeName("INTEGER[] extra",
+                          "trailing garbage after a nested type name is rejected");
+    ExpectInvalidTypeName("NOTATYPE", "unknown type name is not VARCHAR");
+    ExpectInvalidTypeName("INTEGER--x", "SQL comment in a type name is rejected");
+    ExpectInvalidTypeName("INTEGER -- comment", "spaced SQL comment in a type name is rejected");
+    ExpectInvalidTypeName("INTEGER) OR (1=1", "CAST leftover OR-injection is rejected");
+    ExpectInvalidTypeName("INTEGER), 1", "extra expression after a type name is rejected");
     ExpectTypeId("INTEGER/*x*/", arrow::Type::INT32, "closed comment does not change INTEGER");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER$$x"); }, "invalid",
-                        "dollar-quote in a type name is rejected");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("ANY"); }, "invalid",
-                        "ANY is not a concrete column type");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("UNKNOWN"); }, "invalid",
-                        "UNKNOWN is not a concrete column type");
-    ExpectThrowContains([] { (void)LogicalTypeFromName("   "); }, "invalid",
-                        "whitespace-only type name is rejected");
+    ExpectInvalidTypeName("INTEGER$$x", "dollar-quote in a type name is rejected");
+    ExpectInvalidTypeName("ANY", "ANY is not a concrete column type");
+    ExpectInvalidTypeName("UNKNOWN", "UNKNOWN is not a concrete column type");
+    ExpectInvalidTypeName("   ", "whitespace-only type name is rejected");
+    ExpectInvalidTypeName("INTEGER /*", "unclosed block comment is rejected");
+    ExpectInvalidTypeName("INTEGER /* )", "comment hiding ) is rejected");
+    ExpectInvalidTypeName("memory.main.INTEGER",
+                          "catalog-qualified type name uses the exact invalid message");
+    ExpectInvalidTypeName(std::string(64 * 1024 + 1, 'X'),
+                          "type names longer than 64 KiB are rejected");
+    {
+        std::string big = "ENUM(";
+        std::vector<std::string> labels;
+        labels.reserve(256);
+        for (int i = 0; i < 256; i++) {
+            if (i) {
+                big += ", ";
+            }
+            auto lab = "v" + std::to_string(i);
+            big += "'" + lab + "'";
+            labels.push_back(lab);
+        }
+        big += ")";
+        Expect(big.size() <= 64 * 1024, "large ENUM fixture stays under the 64 KiB cap");
+        ExpectEnumValues(big, labels, "large ENUM under 64 KiB is accepted");
+    }
     ExpectTypeId("INTEGER  ", arrow::Type::INT32, "trailing spaces are trimmed");
 
     {
