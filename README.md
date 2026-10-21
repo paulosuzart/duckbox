@@ -12,7 +12,7 @@ This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/inclu
 
 **initSQL** is trusted. It runs at warmup **before** `enable_external_access=false` and `lock_configuration`. The agent never executes in that phase. Views (and macros) created there are **authorized views** (BigQuery-style): if the spec exposes the view, the plan guard treats that view's expansion as opaque (no table-function/allowlist rejection *inside* it) and still checks everything the agent wrote around it. The same function or non-allowlisted table used directly by the agent is denied.
 
-**Authorized views bypass tenant filters.** The rewriter does not wrap them, and initSQL does not bind `:tenant_id` (a placeholder fails at warmup). On a shared table the SaaS must generate a separate spec/initSQL for each sandbox and write that sandbox's tenant id as a literal; Duckbox does not check the literal against the sandbox `key`. Reusing one spec across keys leaks rows. The Create/Update "does not reference a key variable" warning is not a safety signal (see Cross-tenant risk).
+**Authorized views bypass tenant filters.** The rewriter does not wrap them, and initSQL does not bind `:tenant_id` (a placeholder fails at warmup). On a shared table the SaaS must generate a separate spec/initSQL for each sandbox and write that sandbox's tenant id as a literal; Duckbox does not check the literal against the sandbox `key`. Reusing one spec across keys leaks rows. The Create/Update "does not reference a key variable" warning is not a safety signal (see [Cross-tenant risk](#cross-tenant-risk)).
 
 Allowed external locations are derived from the spec — not parsed from initSQL: `lake.data_path`, each `attachments` entry, and rarely `extra_paths` for a prefix with no attachment. Those prefixes are applied to DuckDB `allowed_paths` / `allowed_directories` **before** external access is disabled. Authorized views may read anything under the declared lake/attachments using the sandbox's resolved credentials. Anything undeclared fails. initSQL is written to the audit log with secrets redacted.
 
@@ -98,9 +98,11 @@ In another terminal (the CLI does not need those env vars; they belong on the `s
 ./build/duckbox sandbox create --url grpc://127.0.0.1:4747 \
   --spec ./policies/ducklake/analyst.yaml \
   --id acme-analyst --key tenant_21:user_sergio
-# Specs with authorized views over shared tables are per-sandbox: do not reuse
-# --spec FILE across keys. See Cross-tenant risk.
+```
 
+Specs with authorized views over shared tables are per-sandbox: do not reuse `--spec FILE` across keys. See [Cross-tenant risk](#cross-tenant-risk).
+
+```bash
 .venv/bin/python examples/python/quickstart.py
 # or open examples/python/quickstart.ipynb  (same walkthrough as quickstart.py)
 .venv/bin/python examples/python/authorized_views_e2e.py
@@ -145,9 +147,9 @@ Trusted-caller CRUD (Flight SQL `DoAction`, mirrored as CLI):
 duckbox sandbox create|get|update|delete|list --url grpc://127.0.0.1:4747 --spec FILE [--id ID] [--key KEY]
 ```
 
-Specs with authorized views over shared tables are per-sandbox and must not be reused across keys (see Cross-tenant risk).
+Specs with authorized views over shared tables are per-sandbox and must not be reused across keys (see [Cross-tenant risk](#cross-tenant-risk)).
 
-Create on an existing id with different content is rejected (409). `UpdateSandbox` explicitly bumps **version** (hash of policy+initSQL is the content identity; S3 keeps immutable `sandboxes/<id>/v<N>.json` plus `current.json` with If-None-Match / If-Match). Warm instances of versions older than N-1 drain/passivate; N-1 stays warm when `handles.stale_version_grace` is >0. Delete writes a tombstone. Any node can load a definition after failover.
+Create on an existing id with different content is rejected (409). `UpdateSandbox` cannot change the sandbox key (a different key in the spec body or `x-duckbox-key` is rejected). `UpdateSandbox` explicitly bumps **version** (hash of policy+initSQL is the content identity; S3 keeps immutable `sandboxes/<id>/v<N>.json` plus `current.json` with If-None-Match / If-Match). Warm instances of versions older than N-1 drain/passivate; N-1 stays warm when `handles.stale_version_grace` is >0. Delete writes a tombstone. Any node can load a definition after failover.
 
 Queries send **id + SQL** (`x-duckbox-sandbox`). The bound key comes from the sandbox definition. `x-duckbox-key`, if sent, must match that key exactly; a different value is rejected. There is no per-query key override. The caller must be authorized for the sandbox’s key (`auth.callers` maps identities to key globs). Empty `auth.callers` is allow-all only with `auth.allow_insecure_dev`; production YAML must list callers. Example daemons load `handle_secret` from `DUCKBOX_HANDLE_SECRET` (the well-known `duckbox-dev-secret` is refused unless that flag is set).
 
@@ -191,9 +193,11 @@ Runtime instances are keyed by **id@version**. Idle instances **passivate** (Duc
 
 Spec table and column names are ASCII-only. A DuckLake table or column whose real name is unicode or quoted can only be exposed through an ASCII alias created by a trusted initSQL authorized view.
 
-**Cross-tenant risk.** Tenant filters (`filters`, `:tenant_id`) are applied only by the rewriter to ordinary tables. Authorized views are **not** wrapped, and initSQL does **not** bind `:tenant_id` (it fails at warmup). **A view without its own row predicate returns every tenant's rows to every sandbox.**
+### Cross-tenant risk
 
-If the underlying table is shared between tenants, the SaaS **must generate a separate spec/initSQL for each sandbox** and write that sandbox's own tenant id as a literal in the view (validate it as an integer or quote it; initSQL is trusted and unguarded). **Duckbox does not check that the literal matches the sandbox `key`.** Reusing one spec file for several keys (for example `sandbox create --spec FILE --key tenant_22:...` with a view that says `tenant_id = 21`) exposes tenant 21's rows to tenant 22. The "does not reference a key variable" warning fires for every such view, filtered or not, so it is not a safety signal (see #15).
+Tenant filters (`filters`, `:tenant_id`) are applied only by the rewriter to ordinary tables. Authorized views are **not** wrapped, and initSQL does **not** bind `:tenant_id` (it fails at warmup). **A view without its own row predicate returns every tenant's rows to every sandbox.**
+
+If the underlying table is shared between tenants, the SaaS **must generate a separate spec/initSQL for each sandbox** and write that sandbox's own tenant id as a literal in the view (validate it as an integer or quote it; initSQL is trusted and unguarded). **Duckbox does not check that the literal matches the sandbox `key`.** `UpdateSandbox` cannot change the sandbox key. Reusing one spec file for several keys (for example `sandbox create --spec FILE --key tenant_22:...` with a view that says `tenant_id = 21`) exposes tenant 21's rows to tenant 22. The "does not reference a key variable" warning fires for every such view, filtered or not, so it is not a safety signal (see https://github.com/paulosuzart/duckbox/issues/15).
 
 ```yaml
 # Generated by the SaaS for sandbox key tenant_21:... - never reuse for another tenant

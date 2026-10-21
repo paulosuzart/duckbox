@@ -359,9 +359,7 @@ void duckbox::test::RunAuthFlightTests() {
 				g_failed++;
 				std::cerr << "FAIL: K1 Alice must not change a sandbox key to a tenant she cannot use\n";
 			} catch (const std::exception &e) {
-				Expect(std::string(e.what()).find("cannot change the sandbox key") != std::string::npos ||
-				           std::string(e.what()).find("not authorized") != std::string::npos ||
-				           std::string(e.what()).find("Invalid") != std::string::npos,
+				Expect(std::string(e.what()).find("cannot change the sandbox key") != std::string::npos,
 				       "UpdateSandbox rejects a key change");
 			}
 			{
@@ -406,6 +404,16 @@ void duckbox::test::RunAuthFlightTests() {
 		arrow::flight::sql::FlightSqlClient sql_client(raw_client);
 		auto qopt = opt;
 		qopt.headers.emplace_back("x-duckbox-sandbox", "flight-c");
+		{
+			auto mismatch = qopt;
+			mismatch.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+			auto bad = sql_client.Execute(mismatch, "SELECT id FROM deals");
+			Expect(!bad.ok(), "Flight SQL Execute rejects a mismatched x-duckbox-key");
+			if (!bad.ok()) {
+				Expect(bad.status().ToString().find("does not match the sandbox key") != std::string::npos,
+				       "mismatched x-duckbox-key is rejected with the sandbox-key error");
+			}
+		}
 		auto got = ActionBody(*raw_client, qopt, "GetSandbox", "flight-c");
 		Expect(got.find("flight-c") != std::string::npos, "GetSandbox returns the in-scope definition");
 		auto cats = sql_client.GetCatalogs(qopt);

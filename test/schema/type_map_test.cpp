@@ -88,6 +88,24 @@ void duckbox::test::RunArrowTypeMapTests() {
                  "STRUCT(\"p$$q\" INTEGER) keeps $$ inside quotes");
     ExpectTypeId("STRUCT(\"a\"\"--b\" INTEGER)", arrow::Type::STRUCT,
                  "STRUCT doubled double-quote escape is accepted");
+    ExpectTypeId("ENUM(E'a--b', 'c')", arrow::Type::DICTIONARY,
+                 "ENUM(E'a--b') keeps -- inside an E-string");
+    ExpectTypeId("ENUM(e'x/*y', 'z')", arrow::Type::DICTIONARY,
+                 "ENUM lowercase e-string may contain /*");
+    ExpectTypeId("ENUM(E'a\\'--b', 'c')", arrow::Type::DICTIONARY,
+                 "ENUM E-string backslash-escaped quote is accepted");
+    ExpectTypeId("ENUM($t$a--b$t$, 'c')", arrow::Type::DICTIONARY,
+                 "ENUM dollar-quoted value may contain --");
+    ExpectTypeId("ENUM($$x/*y$$, 'z')", arrow::Type::DICTIONARY,
+                 "ENUM empty-tag dollar quote may contain /*");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("ENUM(E'x\\'')) -- '"); }, "invalid",
+                        "E-string leftover ) -- is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("ENUM($t$'$t$)) -- '"); }, "invalid",
+                        "dollar-quote leftover ) -- is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("ENUM(E'unclosed"); }, "invalid",
+                        "unclosed E-string type name is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("ENUM($t$unclosed"); }, "invalid",
+                        "unclosed dollar-quote type name is rejected");
 
     Expect(LogicalTypeFromName("DOUBLE PRECISION") == LogicalTypeFromName("DOUBLE"),
            "DOUBLE PRECISION equals DOUBLE");

@@ -118,7 +118,8 @@ void duckbox::test::RunInitSqlTests() {
 
 		TenantSandbox leaked(daemon, view_pol, key_22, init_21, spec_dir);
 		auto leak = leaked.Execute("SELECT title FROM deals_v");
-		Expect(leak.text_table.find("alpha") != std::string::npos && leak.text_table.find("bravo") == std::string::npos,
+		Expect(leak.row_count == 1 && leak.text_table.find("alpha") != std::string::npos &&
+		           leak.text_table.find("bravo") == std::string::npos,
 		       "known limitation (#15): same spec/initSQL reused for another key leaks tenant 21 rows to tenant 22");
 	}
 }

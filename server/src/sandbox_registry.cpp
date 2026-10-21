@@ -165,8 +165,7 @@ void RejectSandboxKeyChange(const std::string &current_key, const std::string &b
                             const std::string &header_key) {
 	auto mismatch = [&](const std::string &got) {
 		if (!got.empty() && got != current_key) {
-			throw PolicyError("UpdateSandbox cannot change the sandbox key (got '" + got +
-			                  "', bound key is '" + current_key + "')");
+			throw PolicyError("cannot change the sandbox key");
 		}
 	};
 	mismatch(body_key);
