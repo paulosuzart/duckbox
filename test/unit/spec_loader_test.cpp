@@ -191,8 +191,9 @@ void duckbox::test::RunSpecLoaderTests() {
            "catalog via env name, not inline");
     Expect(ducklake_spec.lake.s3.access_key.Spec() == "env:DUCKBOX_S3_KEY",
            "s3 key is a reference");
-    ExpectThrowContains([&] { LoadSpecString(std::string(mini) + "init_sql: SELECT 1\n", "<init>"); },
-                        "unknown key", "spec-level init_sql is rejected");
+    ExpectThrowContains(
+        [&] { LoadSpecString(std::string(mini) + "init_sql: SELECT 1\n", "<init>"); },
+        "unknown key", "spec-level init_sql is rejected");
     {
         std::string s = mini;
         auto pos = s.find("columns: [tenant_id, id]");

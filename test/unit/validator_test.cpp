@@ -241,8 +241,9 @@ void duckbox::test::RunValidatorTests() {
         mac.lake.bootstrap_sql +=
             ";\nCREATE TEMP MACRO total_all() AS (SELECT sum(amount) FROM memory.main.deals)";
         auto iss = validator.ValidateStatic(mac);
-        Expect(has_path(iss, "functions", "macro is not allowlisted: total_all"),
-               "ValidateStatic rejects bootstrap CREATE TEMP MACRO total_all with the exact message");
+        Expect(
+            has_path(iss, "functions", "macro is not allowlisted: total_all"),
+            "ValidateStatic rejects bootstrap CREATE TEMP MACRO total_all with the exact message");
         Expect(has_path(iss, "lake.bootstrap_sql", "CREATE MACRO"),
                "ValidateStatic also reports CheckBootstrapSql on CREATE TEMP MACRO");
         Expect(MacroNotAllowlistedMessage("total_all") == "macro is not allowlisted: total_all",

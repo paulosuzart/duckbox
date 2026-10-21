@@ -88,7 +88,8 @@ void CheckBootstrapSql(const std::string &sql, const SandboxSpec &spec) {
                 "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not CREATE " + kind);
         }
         if (st->type == ddb::StatementType::ATTACH_STATEMENT) {
-            throw SqlRejected("lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not ATTACH");
+            throw SqlRejected(
+                "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not ATTACH");
         }
         if (st->type == ddb::StatementType::SET_STATEMENT) {
             throw SqlRejected("lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not SET");

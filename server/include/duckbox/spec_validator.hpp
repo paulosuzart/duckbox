@@ -51,5 +51,4 @@ void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string
 // Does not run SQL through search_path (so a duckdb_functions() shadow cannot hide macros).
 void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con);
 
-
 } // namespace duckbox

@@ -109,11 +109,11 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
     if (!root.IsMap()) {
         throw PolicyError("sandbox spec root must be a mapping: " + path);
     }
-    YamlRejectUnknownKeys(root, {"id", "key", "name", "policy_class", "metrics_class", "auth",
-                                 "resources", "lake", "tables", "functions", "deny_table_functions",
-                                 "require_prepared_statements", "extra_paths",
-                                 "bootstrap_sql_inline", "handles", "attachments", "metrics",
-                                 "lifecycle"});
+    YamlRejectUnknownKeys(root,
+                          {"id", "key", "name", "policy_class", "metrics_class", "auth",
+                           "resources", "lake", "tables", "functions", "deny_table_functions",
+                           "require_prepared_statements", "extra_paths", "bootstrap_sql_inline",
+                           "handles", "attachments", "metrics", "lifecycle"});
     SandboxSpec p;
     p.source_path = path;
     p.yaml_body = body;
@@ -228,8 +228,8 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
             if (!kv.second.IsMap()) {
                 throw PolicyError("tables." + kv.first + ": expected mapping");
             }
-            YamlRejectUnknownKeys(kv.second, {"columns", "filters", "tenant_column", "catalog",
-                                              "schema"});
+            YamlRejectUnknownKeys(kv.second,
+                                  {"columns", "filters", "tenant_column", "catalog", "schema"});
             TablePolicy t;
             std::string key_catalog, key_schema, key_name;
             ParseTableKey(kv.first, key_catalog, key_schema, key_name);
