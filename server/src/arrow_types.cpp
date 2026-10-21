@@ -4,7 +4,6 @@
 #include <arrow/c/bridge.h>
 
 #include <algorithm>
-#include <cctype>
 #include <memory>
 #include <mutex>
 
@@ -30,54 +29,6 @@ bool HasForbiddenTypeChars(const std::string &s) {
         }
     }
     return s.find(';') != std::string::npos || s.find("--") != std::string::npos;
-}
-
-std::string FoldSpacesUpper(const std::string &s) {
-    std::string out;
-    out.reserve(s.size());
-    bool pending_space = false;
-    for (unsigned char c : s) {
-        if (c == ' ') {
-            pending_space = !out.empty();
-            continue;
-        }
-        if (pending_space) {
-            out.push_back(' ');
-            pending_space = false;
-        }
-        out.push_back(static_cast<char>(std::toupper(c)));
-    }
-    return out;
-}
-
-bool IsSingleIdent(const std::string &s) {
-    if (s.empty() || !(std::isalpha(static_cast<unsigned char>(s[0])) || s[0] == '_')) {
-        return false;
-    }
-    for (unsigned char c : s) {
-        if (!(std::isalnum(c) || c == '_')) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool IsNestedLogicalId(ddb::LogicalTypeId id) {
-    return id == ddb::LogicalTypeId::LIST || id == ddb::LogicalTypeId::STRUCT ||
-           id == ddb::LogicalTypeId::MAP || id == ddb::LogicalTypeId::UNION ||
-           id == ddb::LogicalTypeId::ENUM || id == ddb::LogicalTypeId::ARRAY;
-}
-
-bool IsExactTypeSpelling(const std::string &name, const ddb::LogicalType &type) {
-    auto canon = type.ToString();
-    if (FoldSpacesUpper(name) == FoldSpacesUpper(canon)) {
-        return true;
-    }
-    if (IsSingleIdent(name) && !IsNestedLogicalId(type.id())) {
-        auto id = ddb::TransformStringToLogicalTypeId(name);
-        return id == type.id() && id != ddb::LogicalTypeId::INVALID;
-    }
-    return false;
 }
 
 struct TypeParser {
@@ -126,6 +77,14 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     ddb::LogicalType parsed;
     try {
         parsed = ParseWithContext(name);
+        // Leftover tokens via the parser (not Query). CAST(NULL AS INTEGER leftover)
+        // fails; DOUBLE PRECISION / DECIMAL(10, 2) remain one type.
+        auto exprs = ddb::Parser::ParseExpressionList("CAST(NULL AS " + std::string(name) + ")");
+        if (exprs.size() != 1) {
+            throw Error("invalid logical type name");
+        }
+    } catch (const Error &) {
+        throw;
     } catch (...) {
         throw Error("invalid logical type name");
     }
@@ -134,6 +93,8 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
         id == ddb::LogicalTypeId::UNKNOWN || id == ddb::LogicalTypeId::ANY) {
         throw Error("invalid logical type name");
     }
+    // Compare LogicalType, not the input spelling, so aliases and spacing
+    // (DOUBLE PRECISION, DECIMAL(10, 2), NUMERIC, VARCHAR(n)) are accepted.
     try {
         auto again = ParseWithContext(parsed.ToString());
         if (again != parsed) {
@@ -142,9 +103,6 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     } catch (const Error &) {
         throw;
     } catch (...) {
-        throw Error("invalid logical type name");
-    }
-    if (!IsExactTypeSpelling(name, parsed)) {
         throw Error("invalid logical type name");
     }
     return parsed;

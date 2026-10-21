@@ -64,6 +64,28 @@ void duckbox::test::RunArrowTypeMapTests() {
     ExpectTypeId("STRUCT(a INTEGER, b INTEGER)", arrow::Type::STRUCT,
                  "STRUCT(...) is struct, not varchar");
     ExpectTypeId("MAP(VARCHAR, INTEGER)", arrow::Type::MAP, "MAP(...) is map, not varchar");
+    ExpectTypeId("DOUBLE PRECISION", arrow::Type::DOUBLE, "DOUBLE PRECISION is float64");
+    ExpectTypeId("DECIMAL(10, 2)", arrow::Type::DECIMAL128, "DECIMAL(10, 2) keeps the space");
+    ExpectTypeId("NUMERIC(10,2)", arrow::Type::DECIMAL128, "NUMERIC(10,2) is decimal128");
+    ExpectTypeId("VARCHAR(10)", arrow::Type::STRING, "VARCHAR(10) is utf8");
+    ExpectTypeId("STRUCT(\"A\" INTEGER)", arrow::Type::STRUCT, "STRUCT(\"A\" INTEGER) is struct");
+
+    Expect(LogicalTypeFromName("DOUBLE PRECISION") == LogicalTypeFromName("DOUBLE"),
+           "DOUBLE PRECISION equals DOUBLE");
+    Expect(LogicalTypeFromName("DECIMAL(10, 2)") == LogicalTypeFromName("DECIMAL(10,2)"),
+           "DECIMAL(10, 2) equals DECIMAL(10,2)");
+    Expect(LogicalTypeFromName("NUMERIC(10,2)") == LogicalTypeFromName("DECIMAL(10,2)"),
+           "NUMERIC(10,2) equals DECIMAL(10,2)");
+
+    auto dec_space = MapTypeName("DECIMAL(10, 2)");
+    Expect(dec_space && dec_space->id() == arrow::Type::DECIMAL128,
+           "DECIMAL(10, 2) maps to decimal128");
+    if (dec_space && dec_space->id() == arrow::Type::DECIMAL128) {
+        auto *d = static_cast<arrow::Decimal128Type *>(dec_space.get());
+        Expect(d->precision() == 10 && d->scale() == 2, "DECIMAL(10, 2) keeps precision and scale");
+    }
+    auto numeric = MapTypeName("NUMERIC(10,2)");
+    Expect(numeric && numeric->Equals(*dec_space), "NUMERIC(10,2) matches DECIMAL(10, 2)");
 
     auto dec = MapTypeName("DECIMAL(10,2)");
     Expect(dec && dec->id() == arrow::Type::DECIMAL128, "DECIMAL maps to decimal128");
@@ -89,6 +111,10 @@ void duckbox::test::RunArrowTypeMapTests() {
                         "trailing garbage after a nested type name is rejected");
     ExpectThrowContains([] { (void)LogicalTypeFromName("NOTATYPE"); }, "invalid",
                         "unknown type name is not VARCHAR");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER--x"); }, "invalid",
+                        "SQL comment in a type name is rejected");
+    ExpectThrowContains([] { (void)LogicalTypeFromName("INTEGER -- comment"); }, "invalid",
+                        "spaced SQL comment in a type name is rejected");
 
     {
         std::vector<ColumnSchema> cols{

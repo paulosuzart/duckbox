@@ -12,7 +12,7 @@ This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/inclu
 
 **initSQL** is trusted. It runs at warmup **before** `enable_external_access=false` and `lock_configuration`. The agent never executes in that phase. Views (and macros) created there are **authorized views** (BigQuery-style): if the spec exposes the view, the plan guard treats that view's expansion as opaque (no table-function/allowlist rejection *inside* it) and still checks everything the agent wrote around it. The same function or non-allowlisted table used directly by the agent is denied.
 
-**Authorized views bypass tenant filters.** The rewriter does not wrap them in `WHERE tenant_id = :tenant_id`. The SaaS must embed the tenant predicate (a key variable such as `:tenant_id`) in the view body. Create/Update return a `warnings` array and write the same text to the audit log when an authorized view's body does not reference a key variable.
+**Authorized views bypass tenant filters.** The rewriter does not wrap them in the spec’s `filters` (it does not add `WHERE tenant_id = :tenant_id`). initSQL is executed as written and does not bind key variables, so a `:tenant_id` placeholder in the view body will not run. If the view needs a tenant predicate, the SaaS must bake it into initSQL as ordinary SQL (for example a literal written at CreateSandbox time). Create/Update return a `warnings` array and write the same text to the audit log when an authorized view’s body does not mention a key variable.
 
 Allowed external locations are derived from the spec — not parsed from initSQL: `lake.data_path`, each `attachments` entry, and rarely `extra_paths` for a prefix with no attachment. Those prefixes are applied to DuckDB `allowed_paths` / `allowed_directories` **before** external access is disabled. Authorized views may read anything under the declared lake/attachments using the sandbox's resolved credentials. Anything undeclared fails. initSQL is written to the audit log with secrets redacted.
 
@@ -183,9 +183,11 @@ Daemon startup validates **only** daemon config (listen, limits, optional lease 
 
 Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, **reruns initSQL**, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap. Spec `lifecycle.idle_timeout` overrides the daemon default (capped by `limits.max_idle_timeout`). Spec `lifecycle.ttl` / `expires_at` tombstone the named definition when due.
 
-**initSQL**: trusted SaaS SQL, rerun on every warmup, then `enable_external_access=false` and `lock_configuration`. Objects it creates are visible to agent SQL **only if the spec lists them**. Exposed views are authorized (expansion opaque in the plan guard by catalog-entry oid / table-function operator; agent-written SQL around them is still checked). Authorized views are **not** wrapped with spec tenant filters — put `:tenant_id` (or another key variable) in the view itself. DuckDB `allowed_directories`/`allowed_paths` are derived from `lake.data_path`, path-like `attachments`, and optional `extra_paths` before external access is disabled (prefixes are canonicalized: no `..`, no extra `//`, no query string, trailing slash). Agent SQL cannot `COPY`/`read_*` except through those views, and only for prefixes the spec already declared.
+**initSQL**: trusted SaaS SQL, rerun on every warmup, then `enable_external_access=false` and `lock_configuration`. Objects it creates are visible to agent SQL **only if the spec lists them**. Exposed views are authorized (expansion opaque in the plan guard by catalog-entry oid / table-function operator; agent-written SQL around them is still checked). Authorized views are **not** wrapped with spec tenant filters, and initSQL does not bind `:tenant_id`. DuckDB `allowed_directories`/`allowed_paths` are derived from `lake.data_path`, path-like `attachments`, and optional `extra_paths` before external access is disabled (prefixes are canonicalized: no `..`, no extra `//`, no query string, trailing slash). Agent SQL cannot `COPY`/`read_*` except through those views, and only for prefixes the spec already declared.
 
-Spec table and column names are ASCII-only (see validation above). A DuckLake table or column whose real name is unicode, quoted, or otherwise not a safe unquoted identifier cannot appear in `tables:` / `columns:`. Give it an ASCII alias with a trusted initSQL authorized view, and list that alias in the spec:
+Spec table and column names are ASCII-only (see validation above). A DuckLake table or column whose real name is unicode, quoted, or otherwise not a safe unquoted identifier cannot appear in `tables:` / `columns:`. Give it an ASCII alias with a trusted initSQL authorized view, and list that alias in the spec.
+
+Tenant isolation on ordinary tables comes from the rewriter: it wraps the table in a subquery that applies the spec’s `filters` and binds `:tenant_id` from the sandbox key. Authorized views skip that wrap, so this alias is not tenant-filtered unless the SaaS bakes a literal predicate into initSQL (initSQL does not bind `:tenant_id`). Create/Update still warns because the view body does not mention a key variable:
 
 ```yaml
 tables:
@@ -196,7 +198,6 @@ init_sql: |
   CREATE TEMP VIEW deals AS
     SELECT id, "título" AS title
     FROM lake."negócios"
-    WHERE tenant_id = :tenant_id
 ```
 
 ### Metrics
