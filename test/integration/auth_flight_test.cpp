@@ -266,11 +266,13 @@ void duckbox::test::RunAuthFlightTests() {
 		Expect(created_c.find("flight-c") != std::string::npos, "CreateSandbox second in-scope id");
 		ExpectNoAuthorizedViewResidue(created_c, "CreateSandbox second");
 		{
+			// Body still carries policies/memory/analyst.yaml `key: tenant_21:user_sergio`.
+			// Update flight-a so RejectSandboxKeyChange sees the same bound key.
 			auto up = opt;
-			up.headers.emplace_back("x-duckbox-sandbox", "flight-c");
-			up.headers.emplace_back("x-duckbox-key", "tenant_21:user_other");
+			up.headers.emplace_back("x-duckbox-sandbox", "flight-a");
+			up.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
 			auto updated = ActionBody(*raw_client, up, "UpdateSandbox", body);
-			Expect(updated.find("flight-c") != std::string::npos, "UpdateSandbox returns id");
+			Expect(updated.find("flight-a") != std::string::npos, "UpdateSandbox returns id");
 			ExpectNoAuthorizedViewResidue(updated, "UpdateSandbox");
 		}
 		{
@@ -413,10 +415,10 @@ void duckbox::test::RunAuthFlightTests() {
 			}
 			{
 				auto same = opt;
-				same.headers.emplace_back("x-duckbox-sandbox", "warn-av");
+				same.headers.emplace_back("x-duckbox-sandbox", "flight-a");
 				same.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
 				auto ok = ActionBody(*raw_client, same, "UpdateSandbox", body);
-				Expect(ok.find("warn-av") != std::string::npos,
+				Expect(ok.find("flight-a") != std::string::npos,
 				       "UpdateSandbox with the existing sandbox key succeeds");
 				auto steal_key = body;
 				if (steal_key.find("key:") != std::string::npos) {
@@ -428,7 +430,7 @@ void duckbox::test::RunAuthFlightTests() {
 					steal_key = "key: tenant_22:user_kim\n" + steal_key;
 				}
 				auto keep = opt;
-				keep.headers.emplace_back("x-duckbox-sandbox", "warn-av");
+				keep.headers.emplace_back("x-duckbox-sandbox", "flight-a");
 				keep.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
 				try {
 					(void)ActionBody(*raw_client, keep, "UpdateSandbox", steal_key);

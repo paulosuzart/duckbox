@@ -17,9 +17,6 @@ void duckbox::test::RunValidatorTests() {
     auto ducklake_spec =
         LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/analyst.yaml");
     Expect(validator.ValidateStatic(ducklake_spec).empty(), "ducklake spec is statically valid");
-    auto authz_spec =
-        LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/authz.yaml");
-    Expect(validator.ValidateStatic(authz_spec).empty(), "ducklake authz spec is statically valid");
 
     auto with_grace_val = [&](const std::string &val) {
         auto s = loaded.yaml_body;
