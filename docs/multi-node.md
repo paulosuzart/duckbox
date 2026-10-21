@@ -173,7 +173,7 @@ The proxy validates `lease.flight` against the live node directory before dialin
 
 ## Crash / partition
 
-If a process dies, heartbeats and leases expire after `ttl`. Another node acquires the sandbox, loads the definition from the S3 registry, and warms DuckDB (initSQL reruns). Clients keep talking to whatever public node they already use; that node proxies to the new owner after expiry.
+If a process dies, heartbeats and leases expire after `ttl`. Another node acquires the sandbox, loads the definition from the S3 registry, and warms DuckDB (attach lake, then lock_configuration). Clients keep talking to whatever public node they already use; that node proxies to the new owner after expiry.
 
 A renew failure on a sandbox (412, epoch mismatch, or transport error) interrupts then passivates **that** sandbox only, before its TTL expires. Epoch is a CAS fencing token on the S3 lease object only; it is not written into the lake.
 

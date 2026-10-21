@@ -160,13 +160,8 @@ arrow::Status ResultJson(const std::string &json,
 }
 
 std::string CreateUpdateResultJson(const SandboxRecord &rec, const char *action) {
-    auto warnings = AuthorizedViewWarnings(rec.spec);
-    WriteSandboxAudit(action, rec.id, rec.key, warnings);
-    auto j = Json::parse(rec.ToJson());
-    if (!warnings.empty()) {
-        j["warnings"] = warnings;
-    }
-    return j.dump();
+    WriteSandboxAudit(action, rec.id, rec.key);
+    return rec.ToJson();
 }
 
 arrow::Result<std::unique_ptr<FlightInfo>> MakeInfo(const FlightDescriptor &desc,
@@ -426,7 +421,6 @@ DuckboxFlightSqlServer::Auth(const ServerCallContext &context) const {
         req.caller = c.caller;
         req.sandbox_id = sandbox_id;
         c.key = AuthenticateSandbox(c.spec, c.rec.key, req);
-        c.init_sql = c.spec.init_sql;
         c.spec_dir = c.rec.spec_dir;
         return c;
     } catch (const std::exception &e) {
@@ -905,16 +899,7 @@ DuckboxFlightSqlServer::DoGetTables(const ServerCallContext &context,
             ARROW_RETURN_NOT_OK(name.Append(kv.second.name));
             ARROW_RETURN_NOT_OK(typ.Append("TABLE"));
             if (command.include_schema) {
-                std::shared_ptr<arrow::Schema> ts;
-                try {
-                    ts = box->DescribeRewrittenArrow(CatalogTableSelectSql(kv.second));
-                } catch (const std::exception &e) {
-                    std::string w = e.what();
-                    if (w.find("authorized view") == std::string::npos) {
-                        throw;
-                    }
-                    ts = box->DescribeCatalogArrow(CatalogTableSelectSql(kv.second));
-                }
+                auto ts = box->DescribeRewrittenArrow(CatalogTableSelectSql(kv.second));
                 ARROW_ASSIGN_OR_RAISE(auto serialized, arrow::ipc::SerializeSchema(*ts));
                 ARROW_RETURN_NOT_OK(
                     schb.Append(serialized->data(), static_cast<int32_t>(serialized->size())));
@@ -1623,13 +1608,13 @@ int RunNodeDrain(const NodeCliRequest &req) {
 }
 
 int RunLocalQuery(const DaemonConfig &daemon, const std::string &spec_path, const std::string &key,
-                  const std::string &sql, const std::string &init_sql) {
+                  const std::string &sql) {
     auto spec = LoadSpecFile(spec_path);
     SpecValidator v;
     v.ThrowIf(v.ValidateStatic(spec));
     auto tk = ParseTenantKey(key, spec.key);
     auto dir = std::filesystem::path(spec_path).parent_path().string();
-    TenantSandbox box(daemon, spec, tk, init_sql.empty() ? spec.init_sql : init_sql, dir);
+    TenantSandbox box(daemon, spec, tk, dir);
     box.Warmup(true);
     auto out = box.Execute(sql);
     std::cout << out.text_table << std::endl;

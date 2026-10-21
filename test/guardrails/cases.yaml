@@ -1,6 +1,6 @@
 # Table-driven SQL guardrails. Add a bypass as a new case; no C++ required.
 # expect: allow | deny
-# stage: rewrite | execute | both | spec | initsql
+# stage: rewrite | execute | both | spec
 #   deny defaults to rewrite, allow to execute
 cases:
   - id: insert_denied
@@ -56,41 +56,6 @@ cases:
     expect: deny
     reason: not allowlisted
     stage: both
-
-  # initSQL is statement-type checked. CREATE VIEW is allowed; MACRO/ATTACH are not.
-  - id: initsql_view_postgres_scan
-    sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
-    expect: allow
-    stage: initsql
-
-  - id: initsql_macro_postgres_scan
-    sql: "CREATE TEMP MACRO sneak() AS TABLE SELECT * FROM postgres_scan('dbname=x', 'public', 'deals')"
-    expect: deny
-    reason: CREATE MACRO
-    stage: initsql
-
-  - id: initsql_attach_denied
-    sql: "ATTACH 'evil.db' AS ext"
-    expect: deny
-    reason: ATTACH
-    stage: initsql
-
-  - id: initsql_create_type_denied
-    sql: "CREATE TYPE mood AS ENUM ('sad', 'ok')"
-    expect: deny
-    reason: CREATE TYPE
-    stage: initsql
-
-  - id: initsql_create_function_denied
-    sql: "CREATE FUNCTION add(a, b) AS a + b"
-    expect: deny
-    reason: CREATE
-    stage: initsql
-
-  - id: initsql_view_replacement_scan
-    sql: "CREATE TEMP VIEW v AS SELECT * FROM 's3://duckbox-lake/data/secret.parquet'"
-    expect: allow
-    stage: initsql
 
   - id: parquet_scan
     sql: "SELECT * FROM parquet_scan('x.parquet')"
@@ -163,16 +128,6 @@ cases:
     extra_functions:
       - duckdb_tables
 
-  - id: initsql_view_postgres_scan_pushdown
-    sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_scan_pushdown('dbname=x', 'public', 'deals')"
-    expect: allow
-    stage: initsql
-
-  - id: initsql_view_postgres_query
-    sql: "CREATE TEMP VIEW v AS SELECT * FROM postgres_query('SELECT 1')"
-    expect: allow
-    stage: initsql
-
   - id: agent_create_view
     sql: "CREATE TEMP VIEW x AS SELECT 1 AS x"
     expect: deny
@@ -183,92 +138,72 @@ cases:
     expect: deny
     reason: table functions
 
-  - id: authorized_view_query
+  - id: unknown_view
     sql: "SELECT * FROM qv"
     expect: deny
-    reason: authorized view
-    stage: execute
-    init_sql: "CREATE TEMP VIEW qv AS SELECT * FROM query('SELECT 1 AS x')"
-    extra_tables:
-      - name: qv
-        columns:
-          - x
+    reason: not allowlisted
 
-  - id: authorized_view_range
-    sql: "SELECT i FROM ext_v ORDER BY i"
-    expect: deny
-    reason: authorized view
-    stage: execute
-    init_sql: "CREATE TEMP VIEW ext_v AS SELECT range AS i FROM range(1, 4)"
-    extra_tables:
-      - name: ext_v
-        columns:
-          - i
-
-  - id: authorized_view_opaque_mix
-    sql: "SELECT leaked, i FROM mix ORDER BY i"
-    expect: deny
-    reason: authorized view
-    stage: execute
-    init_sql: "CREATE TEMP VIEW mix AS SELECT (SELECT max(note) FROM secrets) AS leaked, r.range AS i FROM range(1, 3) r"
-    extra_tables:
-      - name: mix
-        columns:
-          - leaked
-          - i
-
-  - id: authorized_view_join_secrets
-    sql: "SELECT * FROM mix, secrets"
+  - id: unknown_lake_view
+    sql: "SELECT * FROM deal_summaries"
     expect: deny
     reason: not allowlisted
-    init_sql: "CREATE TEMP VIEW mix AS SELECT (SELECT max(note) FROM secrets) AS leaked, r.range AS i FROM range(1, 3) r"
-    extra_tables:
-      - name: mix
-        columns:
-          - leaked
-          - i
+    stage: both
 
-  - id: authorized_view_deals_constants_from_secrets
-    sql: "SELECT id, title, amount FROM deals"
-    expect: deny
-    reason: authorized view
+  - id: lake_view_allowlisted
+    sql: "SELECT id, title, amount FROM deal_summaries ORDER BY id"
+    expect: allow
     stage: execute
-    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
     extra_tables:
-      - name: deals
-        columns: [id, title, amount]
-        authorized_view: true
+      - name: deal_summaries
+        columns: [tenant_id, id, title, amount]
+        filters: ["tenant_id = :tenant_id"]
+    contains:
+      - alpha deal
+    not_contains:
+      - bravo
+      - alpha deleted
 
-  - id: authorized_view_deals_join_secrets
-    sql: "SELECT * FROM deals, secrets"
+  - id: spec_rejects_init_sql
+    sql: "SELECT 1"
     expect: deny
-    reason: not allowlisted
-    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
-    extra_tables:
-      - name: deals
-        columns: [id, title, amount]
-        authorized_view: true
+    reason: unknown key
+    stage: spec
+    spec_yaml: |
+      id: mini
+      key: tenant_21:user_sergio
+      name: analyst
+      policy_class: analyst
+      auth:
+        key:
+          patterns:
+            - "tenant_{tenant_id}:{user}"
+      tables:
+        deals:
+          columns: [tenant_id, id]
+          filters: ["tenant_id = :tenant_id"]
+      functions: [count]
+      init_sql: SELECT 1
 
-  - id: authorized_view_deals_union_secrets
-    sql: "SELECT title FROM deals UNION SELECT note FROM secrets"
+  - id: spec_rejects_authorized_view
+    sql: "SELECT 1"
     expect: deny
-    reason: not allowlisted
-    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
-    extra_tables:
-      - name: deals
-        columns: [id, title, amount]
-        authorized_view: true
-
-  - id: authorized_view_deals_repeated_scan
-    sql: "SELECT a.title, b.title FROM deals a, deals b"
-    expect: deny
-    reason: authorized view
-    stage: execute
-    init_sql: "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets"
-    extra_tables:
-      - name: deals
-        columns: [id, title, amount]
-        authorized_view: true
+    reason: unknown key
+    stage: spec
+    spec_yaml: |
+      id: mini
+      key: tenant_21:user_sergio
+      name: analyst
+      policy_class: analyst
+      auth:
+        key:
+          patterns:
+            - "tenant_{tenant_id}:{user}"
+      tables:
+        deals:
+          authorized_view: true
+          columns: [id]
+          filters: ["tenant_id = :tenant_id"]
+      functions: [count]
 
   - id: duckdb_tables
     sql: "SELECT * FROM duckdb_tables()"

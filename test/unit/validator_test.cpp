@@ -2,7 +2,6 @@
 #include "suite.hpp"
 
 #include "duckbox/error.hpp"
-#include "duckbox/init_sql.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/spec_validator.hpp"
@@ -122,30 +121,13 @@ void duckbox::test::RunValidatorTests() {
 
     {
         auto av = loaded;
-        TablePolicy qv;
-        qv.name = "qv";
-        qv.columns = {"x"};
-        qv.authorized_view = true;
-        av.PutTable(qv);
+        TablePolicy summaries;
+        summaries.name = "deal_summaries";
+        summaries.columns = {"tenant_id", "id", "title", "amount"};
+        summaries.filters = {"tenant_id = :tenant_id"};
+        av.PutTable(summaries);
         Expect(validator.ValidateStatic(av).empty(),
-               "authorized_view with no tenant filters is statically valid");
-        av.init_sql = "CREATE TEMP VIEW qv AS SELECT 1 AS x";
-        auto warns = AuthorizedViewWarnings(av);
-        Expect(!warns.empty() && warns[0].find("qv") != std::string::npos &&
-                   warns[0].find("key variable") != std::string::npos,
-               "authorized view without a key variable emits a warning");
-        av.init_sql =
-            "CREATE TEMP VIEW qv AS SELECT 1 AS x FROM deals WHERE tenant_id = :tenant_id";
-        Expect(AuthorizedViewWarnings(av).empty(),
-               "authorized view that binds :tenant_id does not warn");
-        av.init_sql = "CREATE TEMP VIEW qv AS SELECT 1 AS x FROM deals -- tenant_id = :tenant_id";
-        auto comment_warns = AuthorizedViewWarnings(av);
-        Expect(!comment_warns.empty() && comment_warns[0].find("key variable") != std::string::npos,
-               "authorized view with a key var only in a SQL comment still warns");
-        av.init_sql =
-            "CREATE TEMP VIEW qv AS SELECT 1 AS x FROM deals WHERE tenant_id = $tenant_id";
-        Expect(AuthorizedViewWarnings(av).empty(),
-               "authorized view that binds $tenant_id does not warn");
+               "lake view allowlisted like a table is statically valid");
         av.extra_paths = {""};
         Expect(has_path(validator.ValidateStatic(av), "extra_paths[0]", "non-empty"),
                "empty extra_paths entry is a field-path error");
@@ -165,6 +147,26 @@ void duckbox::test::RunValidatorTests() {
         av.attachments["feed"] = missing;
         Expect(has_path(validator.ValidateStatic(av), "attachments.feed.location", "required"),
                "attachment without location is a field-path error");
+    }
+    {
+        auto boot = loaded;
+        boot.lake.bootstrap_sql += ";\nCREATE VIEW sneak AS SELECT 1 AS x";
+        Expect(has_path(validator.ValidateStatic(boot), "lake.bootstrap_sql", "CREATE VIEW"),
+               "ValidateStatic rejects bootstrap CREATE VIEW");
+        boot = loaded;
+        boot.lake.bootstrap_sql += ";\nCREATE MACRO sneak_m(x) AS x + 1";
+        Expect(has_path(validator.ValidateStatic(boot), "lake.bootstrap_sql", "CREATE MACRO"),
+               "ValidateStatic rejects bootstrap CREATE MACRO");
+    }
+    {
+        auto dl = ducklake_spec;
+        dl.lake.bootstrap_sql = "CREATE TABLE t(i INT)";
+        Expect(has_path(validator.ValidateStatic(dl), "lake.bootstrap_sql", "lake.kind=memory"),
+               "ValidateStatic rejects lake.bootstrap_sql on DuckLake");
+        dl = ducklake_spec;
+        dl.lake.bootstrap_sql_path = "seed.sql";
+        Expect(has_path(validator.ValidateStatic(dl), "lake.bootstrap_sql", "lake.kind=memory"),
+               "ValidateStatic rejects lake.bootstrap_sql_path on DuckLake");
     }
 
     {
@@ -196,31 +198,31 @@ void duckbox::test::RunValidatorTests() {
         auto ident_bad = loaded;
         ident_bad.tables["t--x"].name = "t--x";
         ident_bad.tables["t--x"].columns = {"id"};
-        ident_bad.tables["t--x"].authorized_view = true;
+        ident_bad.tables["t--x"].filters = {"tenant_id = :tenant_id"};
         Expect(has_path(validator.ValidateStatic(ident_bad), "tables.t--x", "identifier"),
                "ValidateStatic rejects table name t--x");
         ident_bad = loaded;
         ident_bad.tables["t space"].name = "t space";
         ident_bad.tables["t space"].columns = {"id"};
-        ident_bad.tables["t space"].authorized_view = true;
+        ident_bad.tables["t space"].filters = {"tenant_id = :tenant_id"};
         Expect(has_path(validator.ValidateStatic(ident_bad), "tables.t space", "identifier"),
                "ValidateStatic rejects table name with a space");
         ident_bad = loaded;
         ident_bad.tables["t;drop"].name = "t;drop";
         ident_bad.tables["t;drop"].columns = {"id"};
-        ident_bad.tables["t;drop"].authorized_view = true;
+        ident_bad.tables["t;drop"].filters = {"tenant_id = :tenant_id"};
         Expect(has_path(validator.ValidateStatic(ident_bad), "tables.t;drop", "identifier"),
                "ValidateStatic rejects table name t;drop");
         ident_bad = loaded;
         ident_bad.tables["t\"q"].name = "t\"q";
         ident_bad.tables["t\"q"].columns = {"id"};
-        ident_bad.tables["t\"q"].authorized_view = true;
+        ident_bad.tables["t\"q"].filters = {"tenant_id = :tenant_id"};
         Expect(has_path(validator.ValidateStatic(ident_bad), "tables.t\"q", "identifier"),
                "ValidateStatic rejects table name with a quote");
         ident_bad = loaded;
         ident_bad.tables["select"].name = "select";
         ident_bad.tables["select"].columns = {"id"};
-        ident_bad.tables["select"].authorized_view = true;
+        ident_bad.tables["select"].filters = {"tenant_id = :tenant_id"};
         Expect(has_path(validator.ValidateStatic(ident_bad), "tables.select", "identifier"),
                "ValidateStatic rejects keyword table name select");
         ident_bad = loaded;
@@ -236,15 +238,17 @@ void duckbox::test::RunValidatorTests() {
     {
         auto mac = loaded;
         mac.functions.insert("total_all");
-        mac.init_sql =
-            "CREATE TEMP MACRO total_all() AS (SELECT sum(amount) FROM memory.main.deals)";
+        mac.lake.bootstrap_sql +=
+            ";\nCREATE TEMP MACRO total_all() AS (SELECT sum(amount) FROM memory.main.deals)";
         auto iss = validator.ValidateStatic(mac);
         Expect(has_path(iss, "functions", "macro is not allowlisted: total_all"),
-               "ValidateStatic rejects initSQL CREATE TEMP MACRO total_all with the exact message");
+               "ValidateStatic rejects bootstrap CREATE TEMP MACRO total_all with the exact message");
+        Expect(has_path(iss, "lake.bootstrap_sql", "CREATE MACRO"),
+               "ValidateStatic also reports CheckBootstrapSql on CREATE TEMP MACRO");
         Expect(MacroNotAllowlistedMessage("total_all") == "macro is not allowlisted: total_all",
                "MacroNotAllowlistedMessage is the documented exact string");
         std::unordered_set<std::string> created;
-        CollectCreatedMacros(mac.init_sql, created);
+        CollectCreatedMacros(mac.lake.bootstrap_sql, created);
         Expect(created.count("total_all") == 1, "CollectCreatedMacros finds total_all");
         std::unordered_set<std::string> none;
         CollectCreatedMacros("", none);
@@ -263,7 +267,8 @@ void duckbox::test::RunValidatorTests() {
     {
         auto mac = loaded;
         mac.functions.insert("all_deals");
-        mac.init_sql = "CREATE TEMP MACRO all_deals() AS TABLE SELECT * FROM memory.main.deals";
+        mac.lake.bootstrap_sql +=
+            ";\nCREATE TEMP MACRO all_deals() AS TABLE SELECT * FROM memory.main.deals";
         auto iss = validator.ValidateStatic(mac);
         Expect(has_path(iss, "functions", "macro is not allowlisted: all_deals"),
                "ValidateStatic rejects an allowlisted table macro");
@@ -300,21 +305,22 @@ void duckbox::test::RunValidatorTests() {
     {
         auto att = loaded;
         att.functions.insert("total_all");
-        att.init_sql =
-            "ATTACH 'evil.db' AS ext;\n"
+        att.lake.bootstrap_sql +=
+            ";\nATTACH 'evil.db' AS ext;\n"
             "CREATE TEMP MACRO duckdb_functions() AS TABLE SELECT 'count' AS function_name;";
         auto iss = validator.ValidateStatic(att);
-        Expect(has_path(iss, "init_sql", "ATTACH"),
-               "ValidateStatic rejects initSQL ATTACH of a non-lake database");
-        Expect(has_path(iss, "init_sql", "CREATE MACRO") ||
-                   has_path(iss, "functions", "total_all") || has_path(iss, "init_sql", "ATTACH"),
+        Expect(has_path(iss, "lake.bootstrap_sql", "ATTACH"),
+               "ValidateStatic rejects bootstrap ATTACH of a non-lake database");
+        Expect(has_path(iss, "lake.bootstrap_sql", "CREATE MACRO") ||
+                   has_path(iss, "functions", "total_all") ||
+                   has_path(iss, "lake.bootstrap_sql", "ATTACH"),
                "ValidateStatic fail-closes the ATTACH + duckdb_functions shadow repro");
     }
     {
         auto type_sql = loaded;
-        type_sql.init_sql = "CREATE TYPE mood AS ENUM ('sad', 'ok')";
-        Expect(has_path(validator.ValidateStatic(type_sql), "init_sql", "CREATE TYPE"),
-               "ValidateStatic rejects initSQL CREATE TYPE");
+        type_sql.lake.bootstrap_sql += ";\nCREATE TYPE mood AS ENUM ('sad', 'ok')";
+        Expect(has_path(validator.ValidateStatic(type_sql), "lake.bootstrap_sql", "CREATE TYPE"),
+               "ValidateStatic rejects bootstrap CREATE TYPE");
     }
     {
         // Catalog API: ATTACH a .db that contains total_all, then shadow duckdb_functions().
@@ -349,6 +355,41 @@ void duckbox::test::RunValidatorTests() {
         auto shadowed = con.Query(
             "SELECT function_name FROM duckdb_functions() WHERE function_name='total_all'");
         (void)shadowed;
+    }
+    {
+        ddb::DuckDB db(nullptr);
+        ddb::Connection con(db);
+        auto spec = loaded;
+        RejectAllowlistedMacros(spec, con);
+        ExecOrThrow(con, "CREATE SCHEMA shadow");
+        ExecOrThrow(con, "CREATE MACRO shadow.count() AS (42)");
+        try {
+            RejectAllowlistedMacros(spec, con);
+            Expect(false, "user MACRO shadow.count is not an internal system exception");
+        } catch (const PolicyError &e) {
+            Expect(std::string(e.what()) == MacroNotAllowlistedMessage("count"),
+                   "exception-name user macro is rejected unless internal and system");
+        }
+    }
+    {
+        auto evil = std::string("/tmp/duckbox-shadow-count.db");
+        std::filesystem::remove(evil);
+        {
+            ddb::DuckDB db(evil.c_str());
+            ddb::Connection con(db);
+            ExecOrThrow(con, "CREATE MACRO count() AS (99)");
+        }
+        ddb::DuckDB db(nullptr);
+        ddb::Connection con(db);
+        ExecOrThrow(con, "ATTACH '" + evil + "' AS ext");
+        auto spec = loaded;
+        try {
+            RejectAllowlistedMacros(spec, con);
+            Expect(false, "ATTACH-imported count is not an internal system exception");
+        } catch (const PolicyError &e) {
+            Expect(std::string(e.what()) == MacroNotAllowlistedMessage("count"),
+                   "lake/extension MACRO_ENTRY named count is rejected");
+        }
     }
     {
         auto two = loaded;

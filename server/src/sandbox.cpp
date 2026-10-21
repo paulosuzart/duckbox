@@ -2,7 +2,6 @@
 #include "duckbox/arrow_ipc.hpp"
 #include "duckbox/arrow_types.hpp"
 #include "duckbox/error.hpp"
-#include "duckbox/init_sql.hpp"
 #include "duckbox/json.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/metrics.hpp"
@@ -21,11 +20,10 @@
 namespace duckbox {
 
 TenantSandbox::TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key,
-                             std::string init_sql, std::string spec_dir, std::string sandbox_id,
-                             int version, std::shared_ptr<SecretResolver> secrets)
+                             std::string spec_dir, std::string sandbox_id, int version,
+                             std::shared_ptr<SecretResolver> secrets)
     : daemon_(std::move(daemon)), policy_(std::move(policy)), key_(std::move(key)),
-      init_sql_(std::move(init_sql)), spec_dir_(std::move(spec_dir)),
-      sandbox_id_(std::move(sandbox_id)), version_(version),
+      spec_dir_(std::move(spec_dir)), sandbox_id_(std::move(sandbox_id)), version_(version),
       secrets_(secrets ? std::move(secrets) : std::make_shared<EnvFileSecretResolver>()) {}
 
 void TenantSandbox::Touch() {
@@ -151,17 +149,6 @@ void TenantSandbox::Warmup(bool validate_lake) {
                 }
             }
         }
-        auto i0 = std::chrono::steady_clock::now();
-        try {
-            RunInitSql(*con_, init_sql_, daemon_, policy_, &key_);
-            WriteInitSqlAudit(key_, policy_, init_sql_, "ok");
-        } catch (...) {
-            WriteInitSqlAudit(key_, policy_, init_sql_, "error");
-            throw;
-        }
-        Metrics().ObserveInitSql(
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - i0).count());
-        SnapshotAuthorizedViews();
         RejectAllowlistedMacros(policy_, *con_);
         if (validate_lake) {
             auto v0 = std::chrono::steady_clock::now();
@@ -180,7 +167,7 @@ void TenantSandbox::Warmup(bool validate_lake) {
             }
         }
         try {
-            // Agent SQL runs after this. initSQL already ran with external access on.
+            // Agent SQL runs after this. Memory bootstrap already ran with external access on.
             ExecOrThrow(*con_, "SET enable_external_access=false");
         } catch (const std::exception &) {
             // lock_configuration / older builds; still refuse COPY via validator
@@ -199,56 +186,6 @@ void TenantSandbox::Warmup(bool validate_lake) {
         con_.reset();
         db_.reset();
         throw;
-    }
-}
-
-void TenantSandbox::SnapshotAuthorizedViews() {
-    if (!con_) {
-        return;
-    }
-    for (auto &kv : policy_.tables) {
-        auto qt = QualifyTable(kv.second.catalog, kv.second.schema, kv.second.name, policy_.lake);
-        auto lower = qt.name;
-        bool has_base = false;
-        {
-            auto bt =
-                con_->Query("SELECT 1 FROM information_schema.tables WHERE lower(table_name)='" +
-                            EscapeSqlString(lower) + "' AND lower(table_schema)='" +
-                            EscapeSqlString(qt.schema) + "' AND lower(table_catalog)='" +
-                            EscapeSqlString(qt.catalog) + "' AND table_type='BASE TABLE' LIMIT 1");
-            if (bt && !bt->HasError()) {
-                auto chunk = bt->Fetch();
-                has_base = chunk && chunk->size() > 0;
-            }
-        }
-        auto q = con_->Query("SELECT sql FROM duckdb_views() WHERE lower(view_name)='" +
-                             EscapeSqlString(lower) + "' AND lower(schema_name)='" +
-                             EscapeSqlString(qt.schema) +
-                             "' AND (database_name IS NULL OR temporary OR lower(database_name)='" +
-                             EscapeSqlString(qt.catalog) +
-                             "' OR lower(database_name)='temp') ORDER BY CASE WHEN temporary THEN "
-                             "0 ELSE 1 END LIMIT 1");
-        std::string view_sql;
-        if (q && !q->HasError()) {
-            auto chunk = q->Fetch();
-            if (chunk && chunk->size() > 0 && !chunk->data[0].GetValue(0).IsNull()) {
-                view_sql = chunk->data[0].GetValue(0).ToString();
-            }
-        }
-        // YAML authorized_view=true overrides a shadowing base table. Without
-        // that flag, a temp view that shadows a lake table is not authorized;
-        // the rewriter keeps wrapping the base table. Marked authorized views
-        // are rejected fail-closed by the rewriter (they skip the wrap).
-        bool yaml_av = kv.second.authorized_view;
-        if (view_sql.empty() || (has_base && !yaml_av)) {
-            kv.second.authorized_view = false;
-            if (kv.second.filters.empty()) {
-                throw Error("tables." + kv.second.name +
-                            " is not an authorized view; filters are required");
-            }
-            continue;
-        }
-        kv.second.authorized_view = true;
     }
 }
 
@@ -526,36 +463,6 @@ std::shared_ptr<arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std::
     }
 }
 
-std::shared_ptr<arrow::Schema> TenantSandbox::DescribeCatalogArrow(const std::string &sql) {
-    Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
-    Touch();
-    if (con_ && con_->HasActiveTransaction()) {
-        RecoverAfterFailure();
-    }
-    try {
-        auto ps = con_->Prepare(sql);
-        if (ps->HasError()) {
-            throw Error(ps->GetError());
-        }
-        auto &names = ps->GetNames();
-        auto &types = ps->GetTypes();
-        std::vector<std::string> out_names;
-        std::vector<ddb::LogicalType> out_types;
-        out_names.reserve(names.size());
-        out_types.reserve(types.size());
-        for (idx_t i = 0; i < names.size(); i++) {
-            out_names.push_back(names[i]);
-            out_types.push_back(types[i]);
-        }
-        auto opts = con_->context->GetClientProperties();
-        return SchemaFromLogicalTypes(out_names, out_types, opts);
-    } catch (...) {
-        RecoverAfterFailure();
-        throw;
-    }
-}
-
 SandboxRuntime::SandboxRuntime(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases,
                                std::shared_ptr<SandboxRegistry> defs,
                                std::shared_ptr<IRouter> router,
@@ -677,9 +584,8 @@ std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
         boxes_.erase(oldest);
     }
     auto t0 = std::chrono::steady_clock::now();
-    auto init_sql = rec.spec.init_sql;
-    auto box = std::make_shared<TenantSandbox>(daemon_, rec.spec, key, init_sql, rec.spec_dir,
-                                               rec.id, rec.version, secrets_);
+    auto box = std::make_shared<TenantSandbox>(daemon_, rec.spec, key, rec.spec_dir, rec.id,
+                                               rec.version, secrets_);
     box->Warmup(!lake_ok);
     if (!lake_ok && defs_) {
         defs_->RememberLakeValidation(rec.id, rec.version, box->GetPolicy());

@@ -3,7 +3,7 @@
 // Warm DuckDB instance for a named sandbox. Runtime key is id@version so a
 // previous version can stay warm during handles.stale_version_grace.
 // Passivate frees DuckDB; warmup recreates it, resolves credential refs,
-// attaches the spec's lake, reruns initSQL, then lock_configuration.
+// attaches the spec's lake, then lock_configuration.
 
 #include "duckbox/daemon_config.hpp"
 #include "duckbox/duckdb_layer.hpp"
@@ -44,12 +44,12 @@ struct ColumnSchema {
 // Execute on the same instance cannot interleave.
 class TenantSandbox {
   public:
-    TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key, std::string init_sql,
-                  std::string spec_dir, std::string sandbox_id = "", int version = 0,
+    TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key, std::string spec_dir,
+                  std::string sandbox_id = "", int version = 0,
                   std::shared_ptr<SecretResolver> secrets = {});
     ~TenantSandbox();
 
-    void Warmup(bool validate_lake); // attach lake, trusted initSQL, then disable external access +
+    void Warmup(bool validate_lake); // attach lake, then disable external access +
                                      // lock_configuration
     void
     Passivate(const char *reason = "shutdown"); // frees DuckDB; definition stays in the registry
@@ -64,16 +64,12 @@ class TenantSandbox {
     std::vector<ColumnSchema> DescribeRewritten(const std::string &sql);
     // Same converter + client properties as Execute / DoGet batches.
     std::shared_ptr<arrow::Schema> DescribeRewrittenArrow(const std::string &sql);
-    // Prepare trusted catalog SQL without the rewriter (GetTables include_schema
-    // for authorized views, which agent queries reject fail-closed).
-    std::shared_ptr<arrow::Schema> DescribeCatalogArrow(const std::string &sql);
     ddb::unique_ptr<ddb::LogicalOperator>
     ExtractPlan(const std::string &sql); // tests: real bound plans
 
     const Policy &GetPolicy() const { return policy_; }
     Policy &GetPolicyMut() { return policy_; }
     const TenantKey &GetKey() const { return key_; }
-    const std::string &InitSql() const { return init_sql_; }
     const std::string &SandboxId() const { return sandbox_id_; }
     int Version() const { return version_; }
     int warmup_count() const { return warmup_count_; }
@@ -84,7 +80,6 @@ class TenantSandbox {
 
   private:
     QueryOutput RunTimed(const std::string &sql, std::vector<ddb::Value> params);
-    void SnapshotAuthorizedViews();
     // ROLLBACK so a rewrite / binder / timeout failure cannot leave DuckLake's
     // catalog transaction aborted (next query would be a cheap DoS).
     void RecoverAfterFailure();
@@ -92,7 +87,6 @@ class TenantSandbox {
     DaemonConfig daemon_;
     Policy policy_;
     TenantKey key_;
-    std::string init_sql_;
     std::string spec_dir_;
     std::string sandbox_id_;
     int version_ = 0;

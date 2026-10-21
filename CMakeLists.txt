@@ -229,7 +229,6 @@ set(DUCKBOX_SOURCES
   server/src/lease.cpp
   server/src/metrics.cpp
   server/src/lake.cpp
-  server/src/init_sql.cpp
   server/src/spec_validator.cpp
   server/src/sandbox.cpp
   server/src/s3.cpp
@@ -352,9 +351,9 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/tenant_key_test.cpp
   test/unit/spec_loader_test.cpp
   test/unit/validator_test.cpp
+  test/unit/init_sql_test.cpp
   test/unit/rewriter_test.cpp
   test/unit/cte_scope_test.cpp
-  test/unit/init_sql_test.cpp
   test/unit/handle_test.cpp
   test/unit/crypto_test.cpp
   test/unit/registry_test.cpp

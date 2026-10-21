@@ -92,10 +92,9 @@ struct ColumnMeta {
     std::string lake_type;
 };
 
-// External store the sandbox may use from trusted initSQL (authorized views
-// are still listed until a follow-up removes them; agent queries that name
-// those views are rejected fail-closed). location is an S3 prefix, file URI,
-// or Postgres DSN. credential is a ref (env:/file:), never a value.
+// External store the sandbox may use from trusted memory-lake bootstrap
+// (CREATE TABLE AS SELECT / INSERT … SELECT). location is an S3 prefix, file
+// URI, or Postgres DSN. credential is a ref (env:/file:), never a value.
 // Path-like locations feed DuckDB allowed_paths.
 struct Attachment {
     std::string name;
@@ -106,10 +105,8 @@ struct Attachment {
 // Allowlisted table. filters are typed equalities (tenant_id, _deleted, …)
 // applied by the rewriter wrap — the only tenant-isolation mechanism.
 // catalog/schema default to the lake alias and `main`; a query must match
-// catalog.schema.table exactly after those defaults. authorized_view may be
-// set in YAML; agent queries that name the view are rejected fail-closed
-// (the rewriter does not wrap views). Do not embed a tenant predicate in a
-// view as a substitute for the wrap.
+// catalog.schema.table exactly after those defaults. Lake views (dbt/Bruin)
+// are listed like tables and wrapped the same way.
 struct TablePolicy {
     std::string name;
     std::string catalog; // empty → DefaultTableCatalog(lake)
@@ -118,7 +115,6 @@ struct TablePolicy {
     std::vector<std::string> filters;
     std::string tenant_column = "tenant_id";
     std::vector<ColumnMeta> lake_columns;
-    bool authorized_view = false;
 };
 
 // Resolved catalog.schema.table after applying lake defaults.
@@ -155,11 +151,10 @@ struct SandboxSpec {
     std::unordered_set<std::string> functions;
     bool deny_table_functions = true;
     bool require_prepared_statements = false;
-    std::string init_sql;
     // Escape hatch: path prefixes with no attachment (rarely needed).
     // lake.data_path and path-like attachment locations are derived automatically.
     std::vector<std::string> extra_paths;
-    std::string version; // hash(policy + initSQL); monotonic registry version is separate
+    std::string version; // hash(policy); monotonic registry version is separate
     std::string yaml_body;
     // Bounded Prometheus `policy` label. Never the sandbox id.
     std::string policy_class;

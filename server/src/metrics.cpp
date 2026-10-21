@@ -91,10 +91,7 @@ const char *Help(const std::string &name) {
         return "Time to create a new sandbox including first warmup.";
     }
     if (name == "duckbox_sandbox_warmup_seconds") {
-        return "Time to attach the lake, validate, and run initSQL.";
-    }
-    if (name == "duckbox_init_sql_seconds") {
-        return "initSQL execution time during warmup.";
+        return "Time to attach the lake, validate, and warm the sandbox.";
     }
     if (name == "duckbox_sandbox_cold_starts_total") {
         return "Warmups that created a new DuckDB instance.";
@@ -191,9 +188,6 @@ const char *ClassifyRejection(const std::exception &e) {
         return "plan";
     }
     auto msg = Lower(e.what());
-    if (msg.find("initsql") != std::string::npos) {
-        return "init_sql";
-    }
     if (msg.find("table function") != std::string::npos) {
         return "table_function";
     }
@@ -353,11 +347,6 @@ void MetricsRegistry::ObserveInstantiate(double seconds) {
 void MetricsRegistry::ObserveWarmup(double seconds) {
     std::lock_guard<std::mutex> hold(mu_);
     ObserveHistLocked("duckbox_sandbox_warmup_seconds", NodeLabels(""), kLifeBuckets, seconds);
-}
-
-void MetricsRegistry::ObserveInitSql(double seconds) {
-    std::lock_guard<std::mutex> hold(mu_);
-    ObserveHistLocked("duckbox_init_sql_seconds", NodeLabels(""), kLifeBuckets, seconds);
 }
 
 void MetricsRegistry::IncColdStart() {
@@ -612,30 +601,12 @@ std::string RedactSecretsForAudit(const std::string &sql) {
     return s;
 }
 
-void WriteInitSqlAudit(const TenantKey &key, const Policy &policy, const std::string &sql,
-                       const char *outcome) {
-    if (sql.empty()) {
-        return;
-    }
-    Json j;
-    j["event"] = "init_sql";
-    j["tenant"] = key.tenant_id;
-    j["user"] = key.user;
-    j["key"] = key.raw;
-    j["policy"] = policy.name;
-    j["sql"] = RedactSecretsForAudit(sql);
-    j["outcome"] = outcome ? outcome : "ok";
-    std::clog << j.dump() << "\n";
-}
-
-void WriteSandboxAudit(const char *action, const std::string &id, const std::string &key,
-                       const std::vector<std::string> &warnings) {
+void WriteSandboxAudit(const char *action, const std::string &id, const std::string &key) {
     Json j;
     j["event"] = "sandbox";
     j["action"] = action ? action : "";
     j["id"] = id;
     j["key"] = key;
-    j["warnings"] = warnings;
     std::clog << j.dump() << "\n";
 }
 

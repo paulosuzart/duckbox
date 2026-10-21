@@ -36,10 +36,10 @@ void duckbox::test::RunCteExecTests() {
     auto spec_dir = MemorySpecDir();
     auto key_a = ParseTenantKey("tenant_21:user_sergio", policy.key);
     auto key_b = ParseTenantKey("tenant_22:user_kim", policy.key);
-    TenantSandbox box_a(daemon, policy, key_a, "", spec_dir);
-    TenantSandbox box_b(daemon, policy, key_b, "", spec_dir);
-    TenantSandbox hide_a(daemon, hidden, key_a, "", spec_dir);
-    TenantSandbox hide_b(daemon, hidden, key_b, "", spec_dir);
+    TenantSandbox box_a(daemon, policy, key_a, spec_dir);
+    TenantSandbox box_b(daemon, policy, key_b, spec_dir);
+    TenantSandbox hide_a(daemon, hidden, key_a, spec_dir);
+    TenantSandbox hide_b(daemon, hidden, key_b, spec_dir);
 
     const char *chained = "WITH a AS (SELECT id, title FROM deals), b AS (SELECT id, title FROM a) "
                           "SELECT * FROM b ORDER BY id";
