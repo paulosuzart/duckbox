@@ -20,135 +20,166 @@ enum class LakeKind { Memory, Ducklake };
 
 // Endpoint and credential refs only. Values are resolved at sandbox warmup.
 struct S3Settings {
-	std::string endpoint;
-	std::string endpoint_env;
-	std::string url_style = "path";
-	bool use_ssl = false;
-	SecretRef access_key;
-	SecretRef secret_key;
-	std::string region = "us-east-1";
-	std::string region_env;
+    std::string endpoint;
+    std::string endpoint_env;
+    std::string url_style = "path";
+    bool use_ssl = false;
+    SecretRef access_key;
+    SecretRef secret_key;
+    std::string region = "us-east-1";
+    std::string region_env;
 };
 
-// Attach target for one sandbox DuckDB. bootstrap_sql is inlined; the daemon never reads host files at warmup.
+// Attach target for one sandbox DuckDB. bootstrap_sql is inlined; the daemon never reads host files
+// at warmup.
 struct LakeSettings {
-	LakeKind kind = LakeKind::Memory;
-	std::string alias = "lake";
-	std::string catalog;
-	SecretRef catalog_ref; // env:/file: for catalog DSN; never a value in the registry
-	std::string catalog_env; // shorthand env name
-	std::string data_path;
-	bool read_only = true;
-	std::string bootstrap_sql_path;
-	std::string bootstrap_sql; // inlined SQL; daemon never reads host files at warmup
-	S3Settings s3;
-	std::vector<std::string> extensions;
+    LakeKind kind = LakeKind::Memory;
+    std::string alias = "lake";
+    std::string catalog;
+    SecretRef catalog_ref;   // env:/file: for catalog DSN; never a value in the registry
+    std::string catalog_env; // shorthand env name
+    std::string data_path;
+    bool read_only = true;
+    std::string bootstrap_sql_path;
+    std::string bootstrap_sql; // inlined SQL; daemon never reads host files at warmup
+    S3Settings s3;
+    std::vector<std::string> extensions;
 };
 
 // Per-sandbox DuckDB resource caps. max_result_rows is always enforced (min with user LIMIT).
 struct Resources {
-	std::string memory_limit = "256MB";
-	int64_t threads = 2;
-	int64_t query_timeout_ms = 8000;
-	int64_t max_result_rows = 1000;
+    std::string memory_limit = "256MB";
+    int64_t threads = 2;
+    int64_t query_timeout_ms = 8000;
+    int64_t max_result_rows = 1000;
 };
 
 // Prepared-handle stale-version window. Default 0 = reject immediately.
 constexpr int64_t kMaxStaleVersionGraceMs = 3600 * 1000;
 
 struct HandleSettings {
-	int64_t stale_version_grace_ms = 0;
-	std::string stale_version_grace_raw; // original YAML, for validation errors
+    int64_t stale_version_grace_ms = 0;
+    std::string stale_version_grace_raw; // original YAML, for validation errors
 };
 
 // Optional definition lifetime. idle_timeout passivates the instance; ttl /
 // expires_at tombstone the definition. Missing idle_timeout uses the daemon default.
 struct LifecycleSettings {
-	int64_t idle_timeout_ms = -1; // -1 = daemon default; 0 = never idle-passivate
-	std::string idle_timeout_raw;
-	int64_t ttl_ms = 0; // 0 = none
-	std::string ttl_raw;
-	int64_t expires_at_ms = 0; // 0 = none; absolute unix ms
-	std::string expires_at_raw;
+    int64_t idle_timeout_ms = -1; // -1 = daemon default; 0 = never idle-passivate
+    std::string idle_timeout_raw;
+    int64_t ttl_ms = 0; // 0 = none
+    std::string ttl_raw;
+    int64_t expires_at_ms = 0; // 0 = none; absolute unix ms
+    std::string expires_at_raw;
 };
 
 // How a sandbox key string is split into bind variables (tenant_id, user, …).
 struct KeySpec {
-	std::vector<std::string> patterns;
-	std::string regex;
-	std::vector<std::string> regex_names;
-	std::string split;
-	std::vector<std::string> split_names;
-	std::vector<std::string> strip_prefixes;
+    std::vector<std::string> patterns;
+    std::string regex;
+    std::vector<std::string> regex_names;
+    std::string split;
+    std::vector<std::string> split_names;
+    std::vector<std::string> strip_prefixes;
 
-	bool Empty() const {
-		return patterns.empty() && regex.empty() && split.empty();
-	}
-	std::vector<std::string> VariableNames() const; // names referenced by patterns/regex/split
+    bool Empty() const { return patterns.empty() && regex.empty() && split.empty(); }
+    std::vector<std::string> VariableNames() const; // names referenced by patterns/regex/split
 };
 
 // Filled by lake validation (pragma_table_info), not by YAML.
 struct ColumnMeta {
-	std::string name;
-	std::string lake_type;
+    std::string name;
+    std::string lake_type;
 };
 
-// External store the sandbox may use from trusted initSQL (authorized views).
-// location is an S3 prefix, file URI, or Postgres DSN. credential is a ref
-// (env:/file:), never a value. Path-like locations feed DuckDB allowed_paths.
+// External store the sandbox may use from trusted memory-lake bootstrap
+// (CREATE TABLE AS SELECT / INSERT … SELECT). location is an S3 prefix, file
+// URI, or Postgres DSN. credential is a ref (env:/file:), never a value.
+// Path-like locations feed DuckDB allowed_paths.
 struct Attachment {
-	std::string name;
-	std::string location;
-	SecretRef credential;
+    std::string name;
+    std::string location;
+    SecretRef credential;
 };
 
-// Allowlisted table or authorized view. filters are typed equalities (tenant_id,
-// _deleted, …) verified on the bound plan for direct table access. authorized_view
-// may be set in YAML (skips mandatory tenant filters and WrapFilteredTable) and
-// is confirmed at warmup when the spec name is an initSQL view. Authorized views
-// bypass tenant filters — the SaaS must embed the key-variable predicate in the
-// view body. YAML authorized_view=true overrides a temp view that shadows a
-// lake table; without it, the rewriter still wraps the base table.
+// Allowlisted table. filters are typed equalities (tenant_id, _deleted, …)
+// applied by the rewriter wrap — the only tenant-isolation mechanism.
+// catalog/schema default to the lake alias and `main`; a query must match
+// catalog.schema.table exactly after those defaults. Lake views (dbt/Bruin)
+// are listed like tables and wrapped the same way.
 struct TablePolicy {
-	std::string name;
-	std::vector<std::string> columns;
-	std::vector<std::string> filters;
-	std::string tenant_column = "tenant_id";
-	std::vector<ColumnMeta> lake_columns;
-	bool authorized_view = false;
+    std::string name;
+    std::string catalog; // empty → DefaultTableCatalog(lake)
+    std::string schema;  // empty → DefaultTableSchema() ("main")
+    std::vector<std::string> columns;
+    std::vector<std::string> filters;
+    std::string tenant_column = "tenant_id";
+    std::vector<ColumnMeta> lake_columns;
 };
+
+// Resolved catalog.schema.table after applying lake defaults.
+struct QualifiedTable {
+    std::string catalog;
+    std::string schema;
+    std::string name;
+    std::string Display() const; // catalog.schema.name, omitting empty parts
+};
+
+// Lake alias, or "memory" / "lake" when the alias is empty.
+std::string DefaultTableCatalog(const LakeSettings &lake);
+inline std::string DefaultTableSchema() {
+    return "main";
+}
+// Empty catalog/schema on the query or the spec entry become the lake defaults.
+QualifiedTable QualifyTable(const std::string &catalog, const std::string &schema,
+                            const std::string &name, const LakeSettings &lake);
+void ApplyTableDefaults(TablePolicy &table, const LakeSettings &lake);
+// Map key: catalog.schema.name after lake defaults.
+std::string TableMapKey(const LakeSettings &lake, const std::string &catalog,
+                        const std::string &schema, const std::string &name);
+std::string TableMapKey(const LakeSettings &lake, const TablePolicy &table);
 
 struct SandboxSpec {
-	std::string id;        // stable name, e.g. acme-analyst
-	std::string bound_key; // tenant key stored on the definition
-	std::string name;
-	std::string source_path;
-	KeySpec key;
-	Resources resources;
-	LakeSettings lake;
-	std::map<std::string, TablePolicy> tables;
-	std::unordered_set<std::string> functions;
-	bool deny_table_functions = true;
-	bool require_prepared_statements = false;
-	std::string init_sql;
-	// Escape hatch: path prefixes with no attachment (rarely needed).
-	// lake.data_path and path-like attachment locations are derived automatically.
-	std::vector<std::string> extra_paths;
-	std::string version; // hash(policy + initSQL); monotonic registry version is separate
-	std::string yaml_body;
-	// Bounded Prometheus `policy` label. Never the sandbox id.
-	std::string policy_class;
-	std::string metrics_class; // YAML alias of policy_class
-	std::map<std::string, Attachment> attachments;
-	HandleSettings handles;
-	LifecycleSettings lifecycle;
+    std::string id;        // stable name, e.g. acme-analyst
+    std::string bound_key; // tenant key stored on the definition
+    std::string name;
+    std::string source_path;
+    KeySpec key;
+    Resources resources;
+    LakeSettings lake;
+    std::map<std::string, TablePolicy> tables;
+    std::unordered_set<std::string> functions;
+    bool deny_table_functions = true;
+    bool require_prepared_statements = false;
+    // Escape hatch: path prefixes with no attachment (rarely needed).
+    // lake.data_path and path-like attachment locations are derived automatically.
+    std::vector<std::string> extra_paths;
+    std::string version; // hash(policy); monotonic registry version is separate
+    std::string yaml_body;
+    // Bounded Prometheus `policy` label. Never the sandbox id.
+    std::string policy_class;
+    std::string metrics_class; // YAML alias of policy_class
+    std::map<std::string, Attachment> attachments;
+    HandleSettings handles;
+    LifecycleSettings lifecycle;
 
-	// Bounded Prometheus `policy` label. Never the sandbox id.
-	const std::string &PolicyClass() const {
-		return !policy_class.empty() ? policy_class : metrics_class;
-	}
-	const TablePolicy *FindTable(const std::string &name) const; // case-insensitive; nullptr if not allowlisted
-	bool FunctionAllowed(const std::string &name) const;
+    // Bounded Prometheus `policy` label. Never the sandbox id.
+    const std::string &PolicyClass() const {
+        return !policy_class.empty() ? policy_class : metrics_class;
+    }
+    const TablePolicy *FindTable(const std::string &name) const; // default catalog.schema + name
+    TablePolicy *FindTable(const std::string &name);
+    // catalog.schema.table after lake defaults. nullptr if missing or not exact.
+    const TablePolicy *FindTable(const std::string &catalog, const std::string &schema,
+                                 const std::string &name) const;
+    TablePolicy *FindTable(const std::string &catalog, const std::string &schema,
+                           const std::string &name);
+    // Default-qualified entry. Throws PolicyError if missing.
+    TablePolicy &Table(const std::string &name);
+    const TablePolicy &Table(const std::string &name) const;
+    // Apply lake defaults and insert/replace under catalog.schema.name.
+    void PutTable(TablePolicy table);
+    bool FunctionAllowed(const std::string &name) const;
 };
 
 // True for s3://, file paths, http(s)://. False for postgres/mysql DSNs (not DuckDB file paths).
@@ -160,10 +191,10 @@ std::string CanonicalAllowedPrefix(const std::string &raw);
 // through CanonicalAllowedPrefix. Never parsed from initSQL.
 std::vector<std::string> DeclaredAllowedPaths(const SandboxSpec &spec);
 
-// Shared denylist for spec `functions` (load + ValidateStatic) and the user-plan
-// guard. postgres_*/duckdb_*/ducklake_*/read_*/ *_scan, query, query_table, glob,
-// and other table-function names. Bound seq_scan / ducklake_scan of a spec table
-// are plan operators, not spec `functions` entries.
+// Shared denylist for spec `functions` (load + ValidateStatic).
+// postgres_*/duckdb_*/ducklake_*/read_*/ *_scan, query, query_table, glob,
+// and other table-function names. The rewriter does not expand macros;
+// allowlisted macros are rejected separately at spec validation and warmup.
 bool IsAlwaysDeniedTableFunction(const std::string &name);
 
 using Policy = SandboxSpec;
@@ -174,7 +205,7 @@ SandboxSpec LoadSpecString(const std::string &yaml, const std::string &source = 
 // gRPC metadata cannot carry newlines; clients send base64url(YAML). Raw YAML is still accepted.
 std::string DecodeSpecPayload(const std::string &raw);
 inline Policy LoadPolicyFile(const std::string &path) {
-	return LoadSpecFile(path);
+    return LoadSpecFile(path);
 }
 
 // Canonical hash of the deny-by-default contract (tables, filters, functions, lake, resources, …).

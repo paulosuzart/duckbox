@@ -12,6 +12,7 @@
 #include "duckbox/sandbox.hpp"
 #include "duckbox/sandbox_registry.hpp"
 
+#include <arrow/array.h>
 #include <arrow/buffer.h>
 #include <arrow/flight/client.h>
 #include <arrow/flight/client_auth.h>
@@ -83,6 +84,15 @@ std::string ActionBody(arrow::flight::FlightClient &client, const arrow::flight:
 		}
 	}
 	return out;
+}
+
+void ExpectNoAuthorizedViewResidue(const std::string &json, const char *what) {
+	duckbox::test::Expect(json.find("\"warnings\"") == std::string::npos,
+	                      std::string(what) + " has no warnings field");
+	duckbox::test::Expect(json.find("authorized_view") == std::string::npos,
+	                      std::string(what) + " has no authorized_view");
+	duckbox::test::Expect(json.find("init_sql:") == std::string::npos && json.find("\ninit_sql") == std::string::npos,
+	                      std::string(what) + " has no spec-level init_sql");
 }
 
 } // namespace
@@ -251,27 +261,68 @@ void duckbox::test::RunAuthFlightTests() {
 		};
 		auto created_a = create_one("flight-a", "tenant_21:user_sergio");
 		Expect(created_a.find("flight-a") != std::string::npos, "CreateSandbox returns id");
-		Expect(created_a.find("\"warnings\"") == std::string::npos,
-		       "CreateSandbox without an authorized-view caveat has no warnings field");
+		ExpectNoAuthorizedViewResidue(created_a, "CreateSandbox");
 		auto created_c = create_one("flight-c", "tenant_21:user_other");
 		Expect(created_c.find("flight-c") != std::string::npos, "CreateSandbox second in-scope id");
+		ExpectNoAuthorizedViewResidue(created_c, "CreateSandbox second");
+		{
+			// Body still carries policies/memory/analyst.yaml `key: tenant_21:user_sergio`.
+			// Update flight-a so RejectSandboxKeyChange sees the same bound key.
+			auto up = opt;
+			up.headers.emplace_back("x-duckbox-sandbox", "flight-a");
+			up.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+			auto updated = ActionBody(*raw_client, up, "UpdateSandbox", body);
+			Expect(updated.find("flight-a") != std::string::npos, "UpdateSandbox returns id");
+			ExpectNoAuthorizedViewResidue(updated, "UpdateSandbox");
+		}
 		{
 			auto av_body = body;
-			auto fn_at = av_body.find("functions:");
-			if (fn_at != std::string::npos) {
-				av_body.insert(fn_at, "  qv:\n    authorized_view: true\n    columns: [x]\n");
-			}
 			av_body += "\ninit_sql: CREATE TEMP VIEW qv AS SELECT 1 AS x\n";
 			auto o = opt;
-			o.headers.emplace_back("x-duckbox-sandbox", "warn-av");
+			o.headers.emplace_back("x-duckbox-sandbox", "reject-init");
 			o.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
-			auto created_av = ActionBody(*raw_client, o, "CreateSandbox", av_body);
-			Expect(created_av.find("warn-av") != std::string::npos, "CreateSandbox authorized-view sandbox returns id");
-			Expect(created_av.find("warnings") != std::string::npos &&
-			           created_av.find("key variable") != std::string::npos,
-			       "CreateSandbox response warns when an authorized view lacks a key variable");
-			Expect(created_av.find("spec_yaml") != std::string::npos,
-			       "warnings are on the response; spec_yaml is still present");
+			try {
+				(void)ActionBody(*raw_client, o, "CreateSandbox", av_body);
+				g_failed++;
+				std::cerr << "FAIL: CreateSandbox with spec-level init_sql must be rejected\n";
+			} catch (const std::exception &e) {
+				std::string w = e.what();
+				Expect(w.find("unknown key") != std::string::npos || w.find("init_sql") != std::string::npos,
+				       "CreateSandbox rejects spec-level init_sql");
+			}
+		}
+		{
+			// Stay inside bootstrap_sql_inline's `|` block (same indent as seed lines).
+			auto view_body = body;
+			view_body += "  CREATE VIEW sneak AS SELECT 1 AS x\n";
+			auto o = opt;
+			o.headers.emplace_back("x-duckbox-sandbox", "reject-boot-view");
+			o.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+			try {
+				(void)ActionBody(*raw_client, o, "CreateSandbox", view_body);
+				g_failed++;
+				std::cerr << "FAIL: CreateSandbox with bootstrap CREATE VIEW must be rejected\n";
+			} catch (const std::exception &e) {
+				std::string w = e.what();
+				Expect(w.find("CREATE VIEW") != std::string::npos || w.find("bootstrap") != std::string::npos,
+				       "CreateSandbox rejects bootstrap CREATE VIEW at static validation");
+			}
+		}
+		{
+			auto av_body = body;
+			av_body += "\nauthorized_view: true\n";
+			auto o = opt;
+			o.headers.emplace_back("x-duckbox-sandbox", "reject-av");
+			o.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+			try {
+				(void)ActionBody(*raw_client, o, "CreateSandbox", av_body);
+				g_failed++;
+				std::cerr << "FAIL: CreateSandbox with authorized_view must be rejected\n";
+			} catch (const std::exception &e) {
+				std::string w = e.what();
+				Expect(w.find("unknown key") != std::string::npos || w.find("authorized_view") != std::string::npos,
+				       "CreateSandbox rejects authorized_view");
+			}
 		}
 		try {
 			(void)create_one("flight-b", "tenant_22:user_kim");
@@ -364,10 +415,10 @@ void duckbox::test::RunAuthFlightTests() {
 			}
 			{
 				auto same = opt;
-				same.headers.emplace_back("x-duckbox-sandbox", "warn-av");
+				same.headers.emplace_back("x-duckbox-sandbox", "flight-a");
 				same.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
 				auto ok = ActionBody(*raw_client, same, "UpdateSandbox", body);
-				Expect(ok.find("warn-av") != std::string::npos,
+				Expect(ok.find("flight-a") != std::string::npos,
 				       "UpdateSandbox with the existing sandbox key succeeds");
 				auto steal_key = body;
 				if (steal_key.find("key:") != std::string::npos) {
@@ -379,7 +430,7 @@ void duckbox::test::RunAuthFlightTests() {
 					steal_key = "key: tenant_22:user_kim\n" + steal_key;
 				}
 				auto keep = opt;
-				keep.headers.emplace_back("x-duckbox-sandbox", "warn-av");
+				keep.headers.emplace_back("x-duckbox-sandbox", "flight-a");
 				keep.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
 				try {
 					(void)ActionBody(*raw_client, keep, "UpdateSandbox", steal_key);
@@ -416,6 +467,7 @@ void duckbox::test::RunAuthFlightTests() {
 		}
 		auto got = ActionBody(*raw_client, qopt, "GetSandbox", "flight-c");
 		Expect(got.find("flight-c") != std::string::npos, "GetSandbox returns the in-scope definition");
+		ExpectNoAuthorizedViewResidue(got, "GetSandbox");
 		auto cats = sql_client.GetCatalogs(qopt);
 		Expect(cats.ok(), "Flight SQL GetCatalogs");
 		if (cats.ok()) {
@@ -440,6 +492,18 @@ void duckbox::test::RunAuthFlightTests() {
 			if (!info->endpoints().empty()) {
 				auto stream_res = raw_client->DoGet(qopt, info->endpoints()[0].ticket);
 				Expect(stream_res.ok(), "DoGet tables ticket");
+				if (stream_res.ok()) {
+					auto stream = std::move(stream_res).ValueOrDie();
+					auto tbl = stream->ToTable();
+					Expect(tbl.ok() && (*tbl)->num_columns() >= 4, "GetTables ToTable");
+					if (tbl.ok() && (*tbl)->num_rows() > 0 && (*tbl)->column(2)->num_chunks() > 0) {
+						auto names = std::static_pointer_cast<arrow::StringArray>((*tbl)->column(2)->chunk(0));
+						auto types = std::static_pointer_cast<arrow::StringArray>((*tbl)->column(3)->chunk(0));
+						Expect((*tbl)->num_rows() == 1 && names->GetString(0) == "deals",
+						       "GetTables lists only the allowlisted table");
+						Expect(types->GetString(0) == "TABLE", "GetTables type is TABLE, not VIEW");
+					}
+				}
 			}
 		}
 		auto ttypes = sql_client.GetTableTypes(qopt);
@@ -537,7 +601,7 @@ void duckbox::test::RunAuthFlightTests() {
 			Expect(ps->Close(qopt).ok(), "ClosePreparedStatement");
 		}
 		Expect(RunLocalQuery(daemon, MemoryAnalystPath(), "tenant_21:user_sergio",
-		                     "SELECT id, title FROM deals ORDER BY id", "") == 0,
+		                     "SELECT id, title FROM deals ORDER BY id") == 0,
 		       "RunLocalQuery executes a rewritten SELECT");
 
 		try {

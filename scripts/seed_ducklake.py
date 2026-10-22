@@ -110,16 +110,6 @@ def seed(args: argparse.Namespace) -> None:
     else:
         print(f"deals already has {count} rows; leaving as-is")
     print(con.execute("SELECT tenant_id, id, title, amount, _deleted FROM deals ORDER BY id").fetchall())
-    # Prefixes for authorized-view e2e: SaaS declares s3://…/authorized/, not forbidden/.
-    con.execute(
-        "COPY (SELECT 21 AS id, 'authorized parquet' AS title) "
-        f"TO 's3://{args.bucket}/authorized/ok.parquet' (FORMAT PARQUET)"
-    )
-    con.execute(
-        "COPY (SELECT 99 AS id, 'forbidden parquet' AS title) "
-        f"TO 's3://{args.bucket}/forbidden/no.parquet' (FORMAT PARQUET)"
-    )
-    print(f"wrote s3://{args.bucket}/authorized/ok.parquet and s3://{args.bucket}/forbidden/no.parquet")
 
 
 def main() -> None:

@@ -35,7 +35,6 @@ public:
 	virtual void IncLimit(const std::string &policy, const char *limit) = 0;
 	virtual void ObserveInstantiate(double seconds) = 0;
 	virtual void ObserveWarmup(double seconds) = 0;
-	virtual void ObserveInitSql(double seconds) = 0;
 	virtual void IncColdStart() = 0;
 	virtual void IncPassivation(const char *reason) = 0;
 	virtual void IncExpiration(const char *reason) = 0; // ttl | expires_at | expire
@@ -72,7 +71,6 @@ public:
 	void IncLimit(const std::string &policy, const char *limit) override;
 	void ObserveInstantiate(double seconds) override;
 	void ObserveWarmup(double seconds) override;
-	void ObserveInitSql(double seconds) override;
 	void IncColdStart() override;
 	void IncPassivation(const char *reason) override;
 	void IncExpiration(const char *reason) override;
@@ -138,8 +136,6 @@ public:
 	}
 	void ObserveWarmup(double) override {
 	}
-	void ObserveInitSql(double) override {
-	}
 	void IncColdStart() override {
 	}
 	void IncPassivation(const char *) override {
@@ -193,11 +189,8 @@ void SetMetrics(std::shared_ptr<IMetrics> m);
 // stderr JSON. Includes tenant/user/key — those must not appear on /metrics.
 void WriteAuditLog(const TenantKey &key, const Policy &policy, double seconds, int64_t rows, int64_t bytes,
                    const char *outcome, const char *reason);
-// Warmup audit of trusted initSQL. Secrets (password=, SECRET ', URI userinfo) are redacted.
-void WriteInitSqlAudit(const TenantKey &key, const Policy &policy, const std::string &sql, const char *outcome);
-// Create/Update audit. warnings are authorized-view tenant-filter caveats (not stored on vN.json).
-void WriteSandboxAudit(const char *action, const std::string &id, const std::string &key,
-                       const std::vector<std::string> &warnings);
+// Create/Update audit (stderr JSON). No warnings field — authorized views are gone.
+void WriteSandboxAudit(const char *action, const std::string &id, const std::string &key);
 
 void ObserveFailure(IMetrics &m, const Policy *policy, const TenantKey *key, const std::exception &e, bool cold,
                     double seconds);

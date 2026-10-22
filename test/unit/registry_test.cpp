@@ -31,8 +31,8 @@ void duckbox::test::RunRegistryTests() {
 	auto got = defs.Get("acme-analyst");
 	Expect(got.key == key_a.raw, "get returns bound key");
 	auto other = rec;
-	other.spec.init_sql = "CREATE TEMP VIEW v AS SELECT 1 AS x";
-	other.spec.yaml_body += "\ninit_sql: CREATE TEMP VIEW v AS SELECT 1 AS x\n";
+	other.spec.resources.max_result_rows = 42;
+	other.spec.yaml_body += "\n# v2\n";
 	other.content_hash = ContentHash(other.spec);
 	ExpectThrowContains([&] { defs.Create(other); }, "already exists", "create conflict on different content");
 	auto updated = defs.Update(other);
@@ -106,7 +106,7 @@ void duckbox::test::RunRegistryTests() {
 	auto g1 = grace_defs.Create(grace_rec);
 	(void)g1;
 	auto g2spec = grace_rec;
-	g2spec.spec.init_sql = "CREATE TEMP VIEW v AS SELECT 1 AS x";
+	g2spec.spec.resources.max_result_rows = 77;
 	g2spec.spec.yaml_body += "\nhandles:\n  stale_version_grace: 30s\n";
 	g2spec.spec.handles.stale_version_grace_ms = 30000;
 	g2spec.spec.handles.stale_version_grace_raw = "30s";
@@ -115,7 +115,7 @@ void duckbox::test::RunRegistryTests() {
 	Expect(g2.version == 2, "grace sandbox at v2");
 	auto prev = ResolveHandleVersion(grace_defs, grace_defs.Get("grace-analyst"), 1, g2.updated_at_ms);
 	Expect(prev.version == 1, "grace window accepts immediately previous version");
-	Expect(prev.spec.init_sql.empty(), "N-1 handle executes previous version's spec");
+	Expect(prev.spec.resources.max_result_rows != 77, "N-1 handle executes previous version's spec");
 	ExpectThrowContains(
 	    [&] { ResolveHandleVersion(grace_defs, grace_defs.Get("grace-analyst"), 1, g2.updated_at_ms + 30001); },
 	    "re-prepare", "N-1 rejected after grace window");

@@ -4,6 +4,8 @@ namespace duckbox {
 namespace test {
 
 void RunSandboxExecTests();
+void RunCteExecTests();
+void RunCteFlightTests();
 void RunRuntimeTests();
 void RunS3RegistryTests();
 void RunAuthFlightTests();

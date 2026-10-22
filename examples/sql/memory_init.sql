@@ -17,3 +17,10 @@ CREATE TABLE secrets (
     note VARCHAR
 );
 INSERT INTO secrets VALUES (21, 'should never be visible through duckbox');
+
+-- Materialized lake relation (dbt/Bruin would typically emit a view or table
+-- in DuckLake). Memory bootstrap may only CREATE TABLE / CREATE SCHEMA / INSERT
+-- — never VIEW or MACRO — so tenants cannot query unwrapped wrappers created
+-- at seed time.
+CREATE TABLE deal_summaries AS
+SELECT tenant_id, id, title, amount FROM deals WHERE _deleted = false;

@@ -73,8 +73,6 @@ struct DaemonConfig {
 	int64_t idle_evict_ms = 300000;     // default instance idle timeout (ms)
 	int64_t max_idle_evict_ms = 0;      // 0 = no cap; spec idle_timeout is clamped to this
 	size_t max_sandboxes = 600;
-	int64_t init_sql_timeout_ms = 5000;
-	std::unordered_set<std::string> allowed_init_settings;
 	LeaseSettings lease;
 	std::vector<CallerRule> callers;
 	std::vector<std::string> operators; // DrainNode / node-admin; empty = deny all

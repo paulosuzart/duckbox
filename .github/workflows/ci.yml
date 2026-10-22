@@ -174,7 +174,6 @@ jobs:
             --spec ./policies/ducklake/analyst.yaml \
             --id acme-analyst --key tenant_21:user_sergio
           .venv/bin/python examples/python/quickstart.py
-          .venv/bin/python examples/python/authorized_views_e2e.py
           curl -sf http://127.0.0.1:9477/metrics > /tmp/duckbox-metrics.txt
           grep -q 'duckbox_query_duration_seconds' /tmp/duckbox-metrics.txt
           grep -q 'duckbox_queries_active' /tmp/duckbox-metrics.txt

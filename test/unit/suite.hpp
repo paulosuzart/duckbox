@@ -6,9 +6,12 @@ namespace test {
 void RunTenantKeyTests();
 void RunSpecLoaderTests();
 void RunValidatorTests();
-void RunRewriterTests();
-void RunPlanGuardTests();
 void RunInitSqlTests();
+void RunRewriterTests();
+void RunCteChainedTests();
+void RunCteRecursiveTests();
+void RunCteShadowTests();
+void RunCteRewriteTests();
 void RunHandleTests();
 void RunCryptoTests();
 void RunRegistryTests();

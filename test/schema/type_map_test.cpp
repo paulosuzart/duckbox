@@ -233,7 +233,7 @@ void duckbox::test::RunArrowTypeMapTests() {
         auto daemon = TestDaemon();
         auto policy = TestPolicy();
         auto key = ParseTenantKey("tenant_21:user_sergio", policy.key);
-        TenantSandbox box(daemon, policy, key, "", MemorySpecDir());
+        TenantSandbox box(daemon, policy, key, MemorySpecDir());
 
         const std::vector<std::pair<std::string, std::string>> queries = {
             {"SELECT count(*) FROM deals", "count(*)"},

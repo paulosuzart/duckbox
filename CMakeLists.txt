@@ -226,11 +226,9 @@ set(DUCKBOX_SOURCES
   server/src/tenant_key.cpp
   server/src/validator.cpp
   server/src/rewriter.cpp
-  server/src/plan_check.cpp
   server/src/lease.cpp
   server/src/metrics.cpp
   server/src/lake.cpp
-  server/src/init_sql.cpp
   server/src/spec_validator.cpp
   server/src/sandbox.cpp
   server/src/s3.cpp
@@ -353,9 +351,9 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/tenant_key_test.cpp
   test/unit/spec_loader_test.cpp
   test/unit/validator_test.cpp
-  test/unit/rewriter_test.cpp
-  test/unit/plan_guard_test.cpp
   test/unit/init_sql_test.cpp
+  test/unit/rewriter_test.cpp
+  test/unit/cte_scope_test.cpp
   test/unit/handle_test.cpp
   test/unit/crypto_test.cpp
   test/unit/registry_test.cpp
@@ -372,6 +370,8 @@ duckbox_add_test(duckbox_integration_tests
   test/support/check.cpp
   test/integration/main.cpp
   test/integration/sandbox_exec_test.cpp
+  test/integration/cte_exec_test.cpp
+  test/integration/cte_flight_test.cpp
   test/integration/runtime_test.cpp
   test/integration/s3_registry_test.cpp
   test/integration/auth_flight_test.cpp
