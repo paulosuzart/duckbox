@@ -1,6 +1,5 @@
 #include "check.hpp"
 
-#include "duckbox/init_sql.hpp"
 #include "duckbox/policy.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/sandbox.hpp"
@@ -49,18 +48,20 @@ int main() {
     }
 
     std::map<std::string, std::unique_ptr<TenantSandbox>> boxes;
-    auto box_for = [&](const std::string &raw, const std::string &init_sql,
-                       const Policy &pol) -> TenantSandbox & {
-        auto cache_key = raw + "\n" + init_sql;
+    auto box_for = [&](const std::string &raw, const Policy &pol) -> TenantSandbox & {
+        auto cache_key = raw;
         for (auto &kv : pol.tables) {
             cache_key += "\n" + kv.first;
+            for (auto &f : kv.second.filters) {
+                cache_key += "|" + f;
+            }
         }
         auto it = boxes.find(cache_key);
         if (it != boxes.end()) {
             return *it->second;
         }
         auto key = ParseTenantKey(raw, pol.key);
-        auto box = std::make_unique<TenantSandbox>(daemon, pol, key, init_sql, spec_dir);
+        auto box = std::make_unique<TenantSandbox>(daemon, pol, key, spec_dir);
         auto *ptr = box.get();
         boxes.emplace(cache_key, std::move(box));
         return *ptr;
@@ -72,10 +73,10 @@ int main() {
             std::cerr << "FAIL: case is not a mapping\n";
             continue;
         }
-        YamlRejectUnknownKeys(node, {"id", "sql", "expect", "reason", "stage", "contains",
-                                     "not_contains", "key", "init_sql", "rewrite_contains",
-                                     "rewrite_not_contains", "extra_functions",
-                                     "deny_table_functions", "spec_yaml", "extra_tables"});
+        YamlRejectUnknownKeys(node,
+                              {"id", "sql", "expect", "reason", "stage", "contains", "not_contains",
+                               "key", "rewrite_contains", "rewrite_not_contains", "extra_functions",
+                               "deny_table_functions", "spec_yaml", "extra_tables"});
         auto id = node.GetString("id");
         auto sql = Trim(node.GetString("sql"));
         auto expect = node.GetString("expect");
@@ -94,11 +95,14 @@ int main() {
             std::cerr << "FAIL: case '" << id << "' needs id, sql, expect allow|deny\n";
             continue;
         }
-        bool do_initsql = stage == "initsql";
+        if (stage == "initsql") {
+            g_failed++;
+            std::cerr << "FAIL: " << id << " stage initsql was removed with spec-level init_sql\n";
+            continue;
+        }
         bool do_rewrite = stage == "rewrite" || stage == "both";
         bool do_execute = stage == "execute" || stage == "both";
         bool do_spec = stage == "spec";
-        auto init_sql = Trim(node.GetString("init_sql"));
         auto case_policy = policy;
         if (auto *extra_tbl = node.Get("extra_tables")) {
             if (!extra_tbl->IsSeq()) {
@@ -107,8 +111,8 @@ int main() {
                 continue;
             }
             for (auto &tn : extra_tbl->seq) {
-                YamlRejectUnknownKeys(tn, {"name", "columns", "filters", "tenant_column",
-                                           "authorized_view", "catalog", "schema"});
+                YamlRejectUnknownKeys(
+                    tn, {"name", "columns", "filters", "tenant_column", "catalog", "schema"});
                 TablePolicy tp;
                 tp.name = tn.GetString("name");
                 tp.catalog = tn.GetString("catalog");
@@ -119,7 +123,6 @@ int main() {
                 if (!tc.empty()) {
                     tp.tenant_column = tc;
                 }
-                tp.authorized_view = tn.GetBool("authorized_view", false);
                 ApplyTableDefaults(tp, case_policy.lake);
                 if (tp.name.empty()) {
                     g_failed++;
@@ -158,20 +161,6 @@ int main() {
                 g_passed++;
             }
         };
-
-        if (do_initsql) {
-            try {
-                InitSqlGuard{}.Check(sql, daemon, policy);
-                if (expect == "deny") {
-                    g_failed++;
-                    std::cerr << "FAIL: " << id << " expected initSQL deny of " << sql << "\n";
-                } else {
-                    g_passed++;
-                }
-            } catch (const std::exception &e) {
-                record_deny(e, "initSQL");
-            }
-        }
 
         if (do_spec) {
             try {
@@ -256,7 +245,7 @@ int main() {
 
         if (do_execute) {
             try {
-                auto out = box_for(key_raw, init_sql, case_policy).Execute(sql);
+                auto out = box_for(key_raw, case_policy).Execute(sql);
                 if (expect == "deny") {
                     g_failed++;
                     std::cerr << "FAIL: " << id << " expected execute deny of " << sql << "\n";

@@ -1,6 +1,5 @@
 #include "duckbox/lake.hpp"
 #include "duckbox/error.hpp"
-#include "duckbox/init_sql.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -39,12 +38,69 @@ void ExecOrThrow(ddb::Connection &con, const std::string &sql) {
 }
 
 void CheckBootstrapSql(const std::string &sql) {
-    SandboxSpec empty;
-    CheckTrustedSql(sql, empty, TrustedSqlKind::Bootstrap);
+    CheckBootstrapSql(sql, SandboxSpec{});
 }
 
 void CheckBootstrapSql(const std::string &sql, const SandboxSpec &spec) {
-    CheckTrustedSql(sql, spec, TrustedSqlKind::Bootstrap);
+    (void)spec;
+    if (sql.empty()) {
+        return;
+    }
+    ddb::Parser parser;
+    try {
+        parser.ParseQuery(sql);
+    } catch (const std::exception &e) {
+        throw SqlRejected(std::string("lake bootstrap failed to parse: ") + e.what());
+    }
+    for (auto &st : parser.statements) {
+        if (!st) {
+            throw SqlRejected("lake bootstrap contains an empty statement");
+        }
+        if (st->type == ddb::StatementType::INSERT_STATEMENT) {
+            continue;
+        }
+        if (st->type == ddb::StatementType::CREATE_STATEMENT) {
+            auto &create = st->Cast<ddb::CreateStatement>();
+            if (create.info && (create.info->type == ddb::CatalogType::TABLE_ENTRY ||
+                                create.info->type == ddb::CatalogType::SCHEMA_ENTRY)) {
+                continue;
+            }
+            if (create.info && create.info->type == ddb::CatalogType::VIEW_ENTRY) {
+                throw SqlRejected(
+                    "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not CREATE VIEW");
+            }
+            if (create.info && (create.info->type == ddb::CatalogType::MACRO_ENTRY ||
+                                create.info->type == ddb::CatalogType::TABLE_MACRO_ENTRY)) {
+                throw SqlRejected(
+                    "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not CREATE MACRO");
+            }
+            if (create.info && create.info->type == ddb::CatalogType::TYPE_ENTRY) {
+                throw SqlRejected(
+                    "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not CREATE TYPE");
+            }
+            if (create.info && create.info->type == ddb::CatalogType::INDEX_ENTRY) {
+                throw SqlRejected(
+                    "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not CREATE INDEX");
+            }
+            auto kind =
+                create.info ? ddb::CatalogTypeToString(create.info->type) : std::string("CREATE");
+            throw SqlRejected(
+                "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not CREATE " + kind);
+        }
+        if (st->type == ddb::StatementType::ATTACH_STATEMENT) {
+            throw SqlRejected(
+                "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not ATTACH");
+        }
+        if (st->type == ddb::StatementType::SET_STATEMENT) {
+            throw SqlRejected("lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not SET");
+        }
+        if (st->type == ddb::StatementType::CREATE_FUNC_STATEMENT) {
+            throw SqlRejected(
+                "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not CREATE FUNCTION");
+        }
+        throw SqlRejected("lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not " +
+                          ddb::StatementTypeToString(st->type));
+    }
 }
 
 void ConstrainLakeAgainstDaemon(const SandboxSpec &spec, const DaemonConfig &daemon) {

@@ -13,7 +13,6 @@
 #include <iostream>
 #include <sstream>
 #include <sys/stat.h>
-#include <unordered_set>
 
 namespace duckbox {
 namespace {
@@ -23,9 +22,6 @@ std::vector<std::string> StringList(const YamlNode *n, const std::string &path) 
 }
 
 } // namespace
-
-const std::unordered_set<std::string> kDefaultAllowedInitSettings = {
-    "memory_limit", "threads", "default_null_order", "default_order", "TimeZone", "calendar", "integer_division"};
 
 std::pair<std::string, int> ParseListenAddress(const std::string &listen, int default_port) {
 	if (listen.empty()) {
@@ -124,7 +120,6 @@ void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity, const
 DaemonConfig DefaultDaemonConfig() {
 	DaemonConfig d;
 	d.allow_insecure_dev = true; // explicit local/dev helper; production YAML must set auth
-	d.allowed_init_settings = kDefaultAllowedInitSettings;
 	return d;
 }
 
@@ -138,7 +133,6 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 	                             "limits", "metrics", "metrics_listen", "lake_allow", "lease", "debug_http", "lake",
 	                             "tables", "policy", "spec"});
 	DaemonConfig d;
-	d.allowed_init_settings = kDefaultAllowedInitSettings;
 	d.source_path = path;
 	d.name = root.GetString("name", d.name);
 	d.listen = root.GetString("listen", d.listen);
@@ -253,7 +247,7 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 	}
 	if (auto *lim = root.Get("limits")) {
 		YamlRejectUnknownKeys(*lim, {"handle_ttl_seconds", "idle_evict_ms", "idle_timeout", "max_idle_timeout",
-		                             "max_sandboxes", "init_sql_timeout_ms"});
+		                             "max_sandboxes"});
 		d.handle_ttl_seconds = lim->GetInt("handle_ttl_seconds", d.handle_ttl_seconds);
 		d.idle_evict_ms = lim->GetInt("idle_evict_ms", d.idle_evict_ms);
 		auto idle_raw = lim->GetString("idle_timeout");
@@ -273,7 +267,6 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
 			d.max_idle_evict_ms = ms;
 		}
 		d.max_sandboxes = static_cast<size_t>(lim->GetInt("max_sandboxes", static_cast<int64_t>(d.max_sandboxes)));
-		d.init_sql_timeout_ms = lim->GetInt("init_sql_timeout_ms", d.init_sql_timeout_ms);
 	}
 	if (auto *allow = root.Get("lake_allow")) {
 		YamlRejectUnknownKeys(*allow, {"s3_endpoints", "secret_refs"});

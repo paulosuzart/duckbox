@@ -3,7 +3,6 @@
 
 #include "duckbox/arrow_ipc.hpp"
 #include "duckbox/http_server.hpp"
-#include "duckbox/init_sql.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/lease.hpp"
 #include "duckbox/rewriter.hpp"
@@ -28,9 +27,9 @@ void duckbox::test::RunSandboxExecTests() {
     auto key_a = ParseTenantKey("tenant_21:user_sergio", policy.key);
     auto key_b = ParseTenantKey("tenant_22:user_kim", policy.key);
 
-    TenantSandbox box_a(daemon, policy, key_a, "", spec_dir);
-    TenantSandbox box_b(daemon, policy, key_b, "", spec_dir);
-    TenantSandbox box_yaml(daemon, loaded, key_a, "", spec_dir);
+    TenantSandbox box_a(daemon, policy, key_a, spec_dir);
+    TenantSandbox box_b(daemon, policy, key_b, spec_dir);
+    TenantSandbox box_yaml(daemon, loaded, key_a, spec_dir);
 
     auto yaml_out = box_yaml.Execute("SELECT id, title, amount FROM deals ORDER BY id");
     Expect(yaml_out.row_count == 1, "yaml policy execute tenant 21");
@@ -76,7 +75,7 @@ void duckbox::test::RunSandboxExecTests() {
     {
         auto stolen = policy;
         stolen.Table("deals").filters = {"tenant_id = 22", "_deleted = false"};
-        TenantSandbox box_stolen(daemon, stolen, key_a, "", spec_dir);
+        TenantSandbox box_stolen(daemon, stolen, key_a, spec_dir);
         auto leak = box_stolen.Execute("SELECT id, title FROM deals ORDER BY id");
         Expect(leak.text_table.find("bravo") == std::string::npos,
                "K2 literal tenant_id=22 cannot read tenant 22 for a tenant_21 key");
@@ -97,61 +96,41 @@ void duckbox::test::RunSandboxExecTests() {
         Expect(leaked.text_table.find("note") == std::string::npos,
                "C1 qualified deals does not expose extra columns");
     }
-    {
-        TenantSandbox boxed(
-            daemon, policy, key_a,
-            "CREATE TEMP VIEW deals AS (WITH deals AS (SELECT 1) SELECT * FROM main.deals)",
-            spec_dir);
-        auto v = boxed.Execute("SELECT * FROM deals");
-        Expect(v.text_table.find("alpha deleted") == std::string::npos,
-               "C1 initSQL view of deals is still filtered");
-    }
 
     {
         auto view_pol = policy;
-        view_pol.Table("deals").authorized_view = true;
-        view_pol.Table("deals").filters.clear();
-        view_pol.Table("deals").columns = {"id", "title", "amount"};
-        TenantSandbox box_av(
-            daemon, view_pol, key_a,
-            "CREATE TEMP VIEW deals AS SELECT note AS title, 0 AS id, 0 AS amount FROM secrets",
-            spec_dir);
-        ExpectThrowContains([&] { box_av.Execute("SELECT id, title, amount FROM deals"); },
-                            "authorized view", "YAML authorized views are rejected fail-closed");
-        ExpectThrowContains(
-            [&] { box_av.Execute("SELECT a.title, b.title FROM deals a, deals b"); },
-            "authorized view", "repeated authorized-view FROM is still rejected");
-    }
-
-    {
-        auto hidden = HiddenAmountPolicy();
-        TablePolicy totals;
-        totals.name = "deal_totals";
-        totals.columns = {"id", "amount"};
-        totals.authorized_view = true;
-        hidden.PutTable(totals);
-        TenantSandbox box_join(
-            daemon, hidden, key_a,
-            "CREATE TEMP VIEW deal_totals AS SELECT id, amount FROM deals WHERE tenant_id = 21 AND "
-            "_deleted = false",
-            spec_dir);
-        ExpectThrowContains(
-            [&] {
-                box_join.Execute("SELECT v.id, v.amount, d.title FROM deal_totals v JOIN deals d "
-                                 "ON v.id = d.id");
-            },
-            "authorized view", "authorized view JOIN is rejected fail-closed");
-        ExpectThrowContains(
-            [&] {
-                box_join.Execute(
-                    "WITH deal_totals AS (SELECT * FROM deal_totals) SELECT * FROM deal_totals");
-            },
-            "authorized view", "CTE body that names an authorized view is rejected fail-closed");
-        ExpectThrowContains([&] { box_join.Execute("SELECT amount FROM deals"); }, "amount",
-                            "direct read of a hidden column is still rejected");
-        auto ok = box_join.Execute("SELECT id, title FROM deals ORDER BY id");
-        Expect(ok.row_count == 1 && ok.text_table.find("alpha deal") != std::string::npos,
-               "allowlisted table still executes after an authorized-view reject");
+        TablePolicy summaries;
+        summaries.name = "deal_summaries";
+        summaries.tenant_column = "tenant_id";
+        summaries.columns = {"tenant_id", "id", "title", "amount"};
+        summaries.filters = {"tenant_id = :tenant_id"};
+        view_pol.PutTable(summaries);
+        TenantSandbox box_v21(daemon, view_pol, key_a, spec_dir);
+        TenantSandbox box_v22(daemon, view_pol, key_b, spec_dir);
+        box_v21.Warmup(true);
+        box_v22.Warmup(true);
+        auto v21 = box_v21.Execute("SELECT id, title, amount FROM deal_summaries ORDER BY id");
+        Expect(v21.row_count == 1 && v21.text_table.find("alpha deal") != std::string::npos,
+               "allowlisted lake relation is tenant-wrapped for key 21");
+        Expect(
+            v21.text_table.find("bravo") == std::string::npos &&
+                v21.text_table.find("alpha deleted") == std::string::npos,
+            "lake relation wrap hides other tenants and deleted rows already excluded by the seed");
+        auto v22 = box_v22.Execute("SELECT id, title, amount FROM deal_summaries ORDER BY id");
+        Expect(v22.row_count == 2 && v22.text_table.find("bravo") != std::string::npos,
+               "allowlisted lake relation is tenant-wrapped for key 22");
+        Expect(v22.text_table.find("alpha") == std::string::npos,
+               "tenant 22 lake relation does not see tenant 21");
+        auto joined = box_v21.Execute("SELECT v.id, v.amount, d.title FROM deal_summaries v JOIN "
+                                      "deals d ON v.id = d.id ORDER BY v.id");
+        Expect(joined.row_count == 1 && joined.text_table.find("alpha deal") != std::string::npos,
+               "JOIN of an allowlisted lake relation still applies the tenant wrap");
+        ExpectThrowContains([&] { box_a.Execute("SELECT * FROM deal_summaries"); }, "allowlisted",
+                            "a lake relation that is not allowlisted is rejected");
+        ExpectThrowContains([&] { box_a.Execute("SELECT * FROM qv"); }, "allowlisted",
+                            "unknown relation is rejected by the allowlist");
+        ExpectThrowContains([&] { box_a.Execute("CREATE TEMP VIEW sneak AS SELECT 1 AS x"); },
+                            "only SELECT", "agent cannot CREATE VIEW");
     }
 
     {
@@ -171,92 +150,15 @@ void duckbox::test::RunSandboxExecTests() {
     }
 
     {
-        auto hidden = HiddenAmountPolicy();
-        TablePolicy big;
-        big.name = "big_deals";
-        big.columns = {"id", "amount"};
-        big.authorized_view = true;
-        hidden.PutTable(big);
-        TenantSandbox box_n4(
-            daemon, hidden, key_a,
-            "CREATE TEMP VIEW big_deals AS SELECT id, amount FROM deals WHERE tenant_id = 21 AND "
-            "_deleted = false AND amount > 50",
-            spec_dir);
-        ExpectThrowContains([&] { box_n4.Execute("SELECT id, amount FROM big_deals ORDER BY id"); },
-                            "authorized view", "initSQL authorized views are rejected fail-closed");
-        ExpectThrowContains(
-            [&] { box_n4.Execute("WITH x AS (SELECT * FROM big_deals) SELECT * FROM x"); },
-            "authorized view", "CTE over an authorized view is rejected fail-closed");
-        auto still = box_n4.Execute("SELECT id, title FROM deals ORDER BY id");
-        Expect(still.row_count == 1 && still.text_table.find("alpha deal") != std::string::npos,
-               "allowlisted table still works when an authorized view is listed");
-    }
-
-    {
-        auto view_pol = policy;
-        TablePolicy qv;
-        qv.name = "qv";
-        qv.columns = {"x"};
-        view_pol.PutTable(qv);
-        TenantSandbox box_v(daemon, view_pol, key_a,
-                            "CREATE TEMP VIEW qv AS SELECT * FROM query('SELECT 42 AS x')",
-                            spec_dir);
-        ExpectThrowContains([&] { box_v.Execute("SELECT * FROM qv"); }, "authorized view",
-                            "auto-detected authorized views are rejected fail-closed");
-        ExpectThrowContains([&] { box_v.Execute("SELECT * FROM query('SELECT 42 AS x')"); },
+        ExpectThrowContains([&] { box_a.Execute("SELECT * FROM query('SELECT 42 AS x')"); },
                             "table functions", "agent cannot call query() directly");
-        ExpectThrowContains([&] { box_v.Execute("CREATE TEMP VIEW sneak AS SELECT 1 AS x"); },
-                            "only SELECT", "agent cannot CREATE VIEW");
-    }
-
-    {
-        auto mix_pol = policy;
-        TablePolicy mix;
-        mix.name = "mix";
-        mix.columns = {"leaked", "i"};
-        mix_pol.PutTable(mix);
-        TenantSandbox box_mix(daemon, mix_pol, key_a,
-                              "CREATE TEMP VIEW mix AS SELECT (SELECT max(note) FROM secrets) AS "
-                              "leaked, r.range AS i FROM range(1, 3) r",
-                              spec_dir);
-        ExpectThrowContains([&] { box_mix.Execute("SELECT leaked, i FROM mix ORDER BY i"); },
-                            "authorized view", "mix authorized view is rejected fail-closed");
-        ExpectThrowContains([&] { box_mix.Execute("SELECT * FROM mix, secrets"); }, "allowlisted",
-                            "join of authorized view with secrets is denied");
-    }
-
-    {
-        auto ok_dir = std::string("/tmp/duckbox-authz-ok");
-        std::filesystem::create_directories(ok_dir);
-        auto ok_path = ok_dir + "/t.parquet";
-        {
-            ddb::DuckDB db(nullptr);
-            ddb::Connection con(db);
-            ExecOrThrow(con, "COPY (SELECT 1 AS id, 'from_parquet' AS title) TO '" + ok_path +
-                                 "' (FORMAT PARQUET)");
-        }
-        auto path_pol = policy;
-        Attachment ok_att;
-        ok_att.name = "ok_parquet";
-        ok_att.location = ok_dir;
-        path_pol.attachments["ok_parquet"] = ok_att;
-        TablePolicy okv;
-        okv.name = "parquet_ok";
-        okv.columns = {"id", "title"};
-        path_pol.PutTable(okv);
-        auto init = std::string("CREATE TEMP VIEW parquet_ok AS SELECT * FROM read_parquet('") +
-                    ok_path + "');";
-        TenantSandbox box_p(daemon, path_pol, key_a, init, spec_dir);
-        ExpectThrowContains([&] { box_p.Execute("SELECT * FROM parquet_ok"); }, "authorized view",
-                            "authorized read_parquet view is rejected fail-closed");
-        ExpectThrowContains([&] { box_p.Execute("SELECT * FROM read_parquet('" + ok_path + "')"); },
-                            "table functions",
-                            "agent cannot call read_parquet directly even on an attachment prefix");
+        ExpectThrowContains([&] { box_a.Execute("SELECT * FROM read_parquet('/tmp/x.parquet')"); },
+                            "table functions", "agent cannot call read_parquet directly");
     }
 
     {
         auto mallory = ParseTenantKey("tenant_2:mallory", policy.key);
-        TenantSandbox box_m(daemon, policy, mallory, "", spec_dir);
+        TenantSandbox box_m(daemon, policy, mallory, spec_dir);
         auto c2 =
             box_m.Execute("WITH deals AS (SELECT 1) SELECT * FROM main.deals WHERE tenant_id = 22");
         Expect(c2.text_table.find("bravo") == std::string::npos,
@@ -276,16 +178,18 @@ void duckbox::test::RunSandboxExecTests() {
     }
 
     {
-        // CREATE MACRO in initSQL is rejected (statement-type check) before warmup catalog scan.
+        // B1: CREATE TEMP MACRO + functions allowlist. Spec-level init_sql is
+        // gone; lake bootstrap rejects CREATE MACRO so the macro cannot exist.
         auto mac = policy;
         mac.functions.insert("total_all");
-        const char *init =
-            "CREATE TEMP MACRO total_all() AS (SELECT sum(amount) FROM memory.main.deals)";
-        TenantSandbox box_mac(daemon, mac, key_a, init, spec_dir);
+        mac.lake.bootstrap_sql +=
+            ";\nCREATE TEMP MACRO total_all() AS (SELECT sum(amount) FROM memory.main.deals)";
+        TenantSandbox box_mac(daemon, mac, key_a, spec_dir);
         ExpectThrowContains([&] { box_mac.Warmup(false); }, "CREATE MACRO",
-                            "warmup rejects initSQL CREATE TEMP MACRO total_all");
+                            "bootstrap CREATE MACRO is rejected before warmup");
         ExpectThrowContains([&] { box_mac.Execute("SELECT CAST(total_all() AS INTEGER)"); },
-                            "CREATE MACRO", "CREATE MACRO initSQL never reaches total_all()");
+                            "CREATE MACRO",
+                            "exact repro cannot run because bootstrap cannot create the macro");
     }
     {
         // Exact B1 repro: ATTACH a .db that contains macro total_all, plus a
@@ -299,10 +203,10 @@ void duckbox::test::RunSandboxExecTests() {
         }
         auto mac = policy;
         mac.functions.insert("total_all");
-        auto init = "ATTACH '" + evil +
-                    "' AS ext; CREATE TEMP MACRO duckdb_functions() AS TABLE SELECT 'count' AS "
-                    "function_name;";
-        TenantSandbox box_mac(daemon, mac, key_a, init, spec_dir);
+        mac.lake.bootstrap_sql += ";\nATTACH '" + evil +
+                                  "' AS ext; CREATE TEMP MACRO duckdb_functions() AS TABLE SELECT "
+                                  "'count' AS function_name;";
+        TenantSandbox box_mac(daemon, mac, key_a, spec_dir);
         try {
             box_mac.Warmup(false);
             Expect(false,
@@ -331,7 +235,7 @@ void duckbox::test::RunSandboxExecTests() {
     {
         auto pg = policy;
         pg.functions.insert("pg_get_viewdef");
-        TenantSandbox box_pg(daemon, pg, key_a, "", spec_dir);
+        TenantSandbox box_pg(daemon, pg, key_a, spec_dir);
         ExpectThrowContains([&] { box_pg.Warmup(false); },
                             MacroNotAllowlistedMessage("pg_get_viewdef"),
                             "warmup rejects built-in macro pg_get_viewdef by catalog type");
@@ -339,7 +243,7 @@ void duckbox::test::RunSandboxExecTests() {
     for (auto *fn : {"format_type", "pg_get_constraintdef", "get_block_size"}) {
         auto mac = policy;
         mac.functions.insert(fn);
-        TenantSandbox box_fn(daemon, mac, key_a, "", spec_dir);
+        TenantSandbox box_fn(daemon, mac, key_a, spec_dir);
         ExpectThrowContains([&] { box_fn.Warmup(false); }, MacroNotAllowlistedMessage(fn),
                             std::string("warmup rejects built-in macro ") + fn);
     }
@@ -353,12 +257,12 @@ void duckbox::test::RunSandboxExecTests() {
         stats.columns = {"tenant_id", "id", "title", "_deleted"};
         stats.filters = {"tenant_id = :tenant_id", "_deleted = false"};
         other.PutTable(stats);
-        TenantSandbox box_rep(
-            daemon, other, key_a,
-            "CREATE SCHEMA reporting; CREATE TABLE reporting.stats (tenant_id INTEGER, id INTEGER, "
-            "title VARCHAR, _deleted BOOLEAN); INSERT INTO reporting.stats VALUES "
-            "(21, 1, 'rep-21', false), (22, 2, 'rep-22', false), (21, 3, 'rep-del', true);",
-            spec_dir);
+        other.lake.bootstrap_sql +=
+            ";\nCREATE SCHEMA reporting;\nCREATE TABLE reporting.stats (tenant_id INTEGER, id "
+            "INTEGER, "
+            "title VARCHAR, _deleted BOOLEAN);\nINSERT INTO reporting.stats VALUES "
+            "(21, 1, 'rep-21', false), (22, 2, 'rep-22', false), (21, 3, 'rep-del', true);";
+        TenantSandbox box_rep(daemon, other, key_a, spec_dir);
         auto ok = box_rep.Execute("SELECT id, title FROM reporting.stats ORDER BY id");
         Expect(ok.row_count == 1 && ok.text_table.find("rep-21") != std::string::npos,
                "allowlisted reporting.stats is tenant-wrapped");
@@ -380,12 +284,11 @@ void duckbox::test::RunSandboxExecTests() {
         staging.columns = {"tenant_id", "id", "title", "_deleted"};
         staging.filters = {"tenant_id = :tenant_id", "_deleted = false"};
         two.PutTable(staging);
-        TenantSandbox box_two(
-            daemon, two, key_a,
-            "CREATE SCHEMA staging; CREATE TABLE staging.deals (tenant_id INTEGER, id INTEGER, "
-            "title VARCHAR, _deleted BOOLEAN); INSERT INTO staging.deals VALUES "
-            "(21, 10, 'stg-21', false), (22, 11, 'stg-22', false), (21, 12, 'stg-del', true);",
-            spec_dir);
+        two.lake.bootstrap_sql +=
+            ";\nCREATE SCHEMA staging;\nCREATE TABLE staging.deals (tenant_id INTEGER, id INTEGER, "
+            "title VARCHAR, _deleted BOOLEAN);\nINSERT INTO staging.deals VALUES "
+            "(21, 10, 'stg-21', false), (22, 11, 'stg-22', false), (21, 12, 'stg-del', true);";
+        TenantSandbox box_two(daemon, two, key_a, spec_dir);
         auto main_ok = box_two.Execute("SELECT id, title FROM deals ORDER BY id");
         Expect(main_ok.row_count == 1 && main_ok.text_table.find("alpha deal") != std::string::npos,
                "memory.main.deals still tenant-wrapped beside staging.deals");
@@ -415,7 +318,7 @@ void duckbox::test::RunSandboxExecTests() {
     {
         auto projected = policy;
         projected.Table("deals").columns = {"id", "title", "amount"};
-        TenantSandbox box_proj(daemon, projected, key_a, "", spec_dir);
+        TenantSandbox box_proj(daemon, projected, key_a, spec_dir);
         auto forged = box_proj.ExecuteRewritten("SELECT * FROM deals", {});
         Expect(forged.row_count == 1 && forged.text_table.find("alpha deal") != std::string::npos,
                "ExecuteRewritten reapplies spec filters (bound tenant, live rows)");
@@ -440,7 +343,7 @@ void duckbox::test::RunSandboxExecTests() {
         bypass.deny_table_functions = false;
         bypass.functions.insert("postgres_query");
         bypass.functions.insert("duckdb_tables");
-        TenantSandbox box_bypass(daemon, bypass, key_a, "", spec_dir);
+        TenantSandbox box_bypass(daemon, bypass, key_a, spec_dir);
         ExpectThrowContains([&] { box_bypass.Warmup(false); }, "not allowlisted",
                             "warmup rejects allowlisted duckdb_tables (table macro) even if "
                             "deny_table_functions is false");
@@ -460,7 +363,7 @@ void duckbox::test::RunSandboxExecTests() {
         auto paths = policy;
         paths.lake.data_path = "/tmp/duckbox-a4-allowed-paths";
         std::filesystem::create_directories(paths.lake.data_path);
-        TenantSandbox box_paths(daemon, paths, key_a, "", spec_dir);
+        TenantSandbox box_paths(daemon, paths, key_a, spec_dir);
         box_paths.Warmup(false);
         Expect(box_paths.Warm(), "A4 allowed_paths applied before enable_external_access=false");
         auto still = box_paths.Execute("SELECT id FROM deals ORDER BY id");
@@ -469,11 +372,11 @@ void duckbox::test::RunSandboxExecTests() {
     }
 
     {
-        TenantSandbox box(daemon, policy, key_a, "CREATE TEMP VIEW v AS SELECT 1 AS x", spec_dir);
+        TenantSandbox box(daemon, policy, key_a, spec_dir);
         box.Warmup(true);
         Expect(box.warmup_count() == 1, "first warmup");
         ExpectThrowContains([&] { box.Execute("SELECT * FROM v"); }, "allowlisted",
-                            "initSQL view hidden unless policy whitelists it");
+                            "unknown relation is rejected by the allowlist");
         box.Passivate();
         Expect(!box.Warm(), "passivate frees DuckDB");
         box.Warmup(false);

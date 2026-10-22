@@ -13,7 +13,7 @@ int main(int argc, char **argv) {
 	duckbox::BlockTerminationSignals();
 	CLI::App app{"duckbox — deny-by-default SQL sandbox (named sandboxes + control plane)\n\n"
 	             "The daemon has no data access. Named sandbox definitions (id, key, policy,\n"
-	             "lake, credential refs, initSQL) live in the registry. Queries send id + SQL."};
+	             "lake, credential refs) live in the registry. Queries send id + SQL."};
 	app.set_help_flag("-h,--help", "Print this help message and exit");
 	app.require_subcommand(1);
 	app.footer(std::string("DuckDB ") + DUCKBOX_DUCKDB_VERSION);
@@ -67,13 +67,11 @@ int main(int argc, char **argv) {
 	std::string run_spec;
 	std::string run_key;
 	std::string run_sql;
-	std::string run_init_sql;
 	auto *run = app.add_subcommand("run", "One-shot throwaway DuckDB (does not persist a named sandbox)");
 	run->add_option("--daemon", run_daemon, "Daemon YAML");
 	run->add_option("--spec", run_spec, "Sandbox spec YAML")->required();
 	run->add_option("--key", run_key, "Tenant key")->required();
 	run->add_option("--sql", run_sql, "SQL to execute")->required();
-	run->add_option("--init-sql", run_init_sql, "Optional initSQL override");
 
 	std::string validate_spec;
 	std::string validate_daemon;
@@ -146,7 +144,7 @@ int main(int argc, char **argv) {
 		}
 		if (*run) {
 			auto daemon = run_daemon.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(run_daemon);
-			return duckbox::RunLocalQuery(daemon, run_spec, run_key, run_sql, run_init_sql);
+			return duckbox::RunLocalQuery(daemon, run_spec, run_key, run_sql);
 		}
 		if (*validate) {
 			auto daemon =

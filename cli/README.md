@@ -8,7 +8,7 @@ duckbox sandbox create|get|update|delete|list|expire --url grpc://127.0.0.1:4747
 duckbox sandbox list [--id-prefix P] [--key-prefix P] [--policy-class C] [--state warm|passive|defined] [--limit N] [--offset N]
 duckbox sandbox expire --id ID
 duckbox node drain --url grpc://127.0.0.1:5747 [--timeout 5000] [--caller local]
-duckbox run --daemon FILE --spec FILE --key KEY --sql SQL [--init-sql SQL]
+duckbox run --daemon FILE --spec FILE --key KEY --sql SQL
 duckbox validate --daemon FILE --spec FILE
 ```
 

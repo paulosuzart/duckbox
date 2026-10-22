@@ -3,6 +3,7 @@
 
 #include <arpa/inet.h>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <netinet/in.h>
@@ -111,6 +112,21 @@ void duckbox::test::RunSignalShutdownTests() {
 	if (::access(DuckboxBin().c_str(), X_OK) != 0) {
 		Expect(false, "duckbox binary is required (build target duckbox)");
 		return;
+	}
+
+	{
+		auto cmd = DuckboxBin() + " run --init-sql x --spec /dev/null --key t --sql SELECT 2>&1";
+		FILE *pipe = popen(cmd.c_str(), "r");
+		Expect(pipe != nullptr, "popen duckbox run --init-sql");
+		std::string out;
+		char buf[256];
+		while (pipe && fgets(buf, sizeof(buf), pipe) != nullptr) {
+			out += buf;
+		}
+		int rc = pipe ? pclose(pipe) : -1;
+		Expect(rc != 0, "--init-sql is a CLI parse error");
+		Expect(out.find("init-sql") != std::string::npos || out.find("not expected") != std::string::npos,
+		       "--init-sql unknown option is reported");
 	}
 
 	int base = 18000 + static_cast<int>(::getpid() % 400) * 4;

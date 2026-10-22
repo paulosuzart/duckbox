@@ -3,8 +3,8 @@
 // AST rewriter: tenant isolation is this wrap only. Allowlisted base tables
 // become subqueries with spec filters; `:tenant_id` binds from the sandbox
 // key (never a spec literal). CTE bodies, subqueries, joins, and set ops are
-// walked the same way. Qualified names never match a CTE. Authorized views
-// are rejected fail-closed (they are not wrapped). User `?` / `$n` parameters
+// walked the same way. Qualified names never match a CTE. Lake views are
+// allowlisted like tables and wrapped the same way. User `?` / `$n` parameters
 // are left for Flight SQL binding at execute.
 
 #include "duckbox/duckdb_layer.hpp"
@@ -56,7 +56,7 @@ void BindNamedParametersInStatement(ddb::SQLStatement &stmt,
                                     const ddb::case_insensitive_map_t<ddb::Value> &values);
 
 ddb::unique_ptr<ddb::ParsedExpression> ParsePolicyFilter(const std::string &filter_sql);
-// Policy filters and initSQL views use :name; DuckDB named parameters are $name.
+// Policy filters use :name; DuckDB named parameters are $name.
 // Does not rewrite Postgres-style casts (`::`).
 std::string ColonParamsToDollar(const std::string &sql);
 ddb::Value ValueFromKeyVar(const std::string &name,

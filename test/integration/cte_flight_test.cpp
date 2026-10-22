@@ -285,31 +285,31 @@ void duckbox::test::RunCteFlightTests() {
         auto totals_body = SpecBodyHiddenAmount();
         auto fn = totals_body.find("functions:");
         if (fn != std::string::npos) {
-            totals_body.insert(fn, "  deal_totals:\n    authorized_view: true\n    columns:\n"
-                                   "      - id\n      - amount\n");
+            totals_body.insert(fn, "  deal_summaries:\n    tenant_column: tenant_id\n    columns:\n"
+                                   "      - tenant_id\n      - id\n      - title\n      - amount\n"
+                                   "    filters:\n      - \"tenant_id = :tenant_id\"\n");
         }
-        totals_body +=
-            "\ninit_sql: |\n  CREATE TEMP VIEW deal_totals AS SELECT id, amount FROM deals "
-            "WHERE tenant_id = 21 AND _deleted = false\n";
         auto o = opt;
-        o.headers.emplace_back("x-duckbox-sandbox", "cte-totals-21");
+        o.headers.emplace_back("x-duckbox-sandbox", "cte-summaries-21");
         o.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
-        Expect(ActionBody(*raw_client, o, "CreateSandbox", totals_body).find("cte-totals-21") !=
+        Expect(ActionBody(*raw_client, o, "CreateSandbox", totals_body).find("cte-summaries-21") !=
                    std::string::npos,
-               "create deal_totals sandbox for non-recursive CTE self-name");
+               "create deal_summaries sandbox for lake-view CTE self-name");
         auto q = opt;
-        q.headers.emplace_back("x-duckbox-sandbox", "cte-totals-21");
+        q.headers.emplace_back("x-duckbox-sandbox", "cte-summaries-21");
+        auto t = FetchSql(sql_client, *raw_client, q,
+                          "WITH deal_summaries AS (SELECT id, title FROM deal_summaries) "
+                          "SELECT * FROM deal_summaries");
+        Expect(t->num_rows() == 1, "Flight CTE over allowlisted lake view is tenant-wrapped");
         try {
-            auto t = FetchSql(
-                sql_client, *raw_client, q,
-                "WITH deal_totals AS (SELECT * FROM deal_totals) SELECT * FROM deal_totals");
-            Expect(false, "Flight authorized view deal_totals must be rejected fail-closed");
-            (void)t;
+            auto leaked = FetchSql(sql_client, *raw_client, q, "SELECT * FROM qv");
+            Expect(false, "Flight unknown relation qv must be rejected by the allowlist");
+            (void)leaked;
         } catch (const std::exception &e) {
             std::string w = e.what();
-            Expect(w.find("authorized view") != std::string::npos ||
+            Expect(w.find("allowlisted") != std::string::npos ||
                        w.find("rejected") != std::string::npos,
-                   "Flight deal_totals self-name is rejected fail-closed");
+                   "Flight unknown relation is rejected by the allowlist");
         }
     }
 

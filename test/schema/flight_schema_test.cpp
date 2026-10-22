@@ -362,13 +362,15 @@ void duckbox::test::RunFlightSchemaTests() {
         auto fn_at = body.find("functions:");
         Expect(fn_at != std::string::npos, "memory analyst spec has functions");
         if (fn_at != std::string::npos) {
-            body.insert(fn_at, "  qv:\n    authorized_view: true\n    columns: [x]\n"
-                               "  nested_t:\n    columns: [tenant_id, lst, st, mp]\n"
+            body.insert(fn_at, "  nested_t:\n    columns: [tenant_id, lst, st, mp]\n"
                                "    filters: [\"tenant_id = :tenant_id\"]\n");
         }
-        body += "\ninit_sql: |\n"
-                "  CREATE TEMP VIEW qv AS SELECT 1 AS x;\n"
-                "  CREATE TABLE nested_t (\n"
+        if (body.find("bootstrap_sql_inline:") == std::string::npos) {
+            body += "\nbootstrap_sql_inline: |\n";
+        } else {
+            body += "\n";
+        }
+        body += "  CREATE TABLE nested_t (\n"
                 "    tenant_id INTEGER,\n"
                 "    lst INTEGER[],\n"
                 "    st STRUCT(a INTEGER, b INTEGER),\n"
@@ -382,23 +384,10 @@ void duckbox::test::RunFlightSchemaTests() {
         view_opt.headers.emplace_back("x-duckbox-sandbox", "schema-views");
         view_opt.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
         auto created = ActionBody(*raw_client, view_opt, "CreateSandbox", body);
-        Expect(created.find("schema-views") != std::string::npos,
-               "CreateSandbox authorized view + nested table");
-
-        auto qv_info = sql_client.Execute(view_opt, "SELECT x FROM qv");
-        Expect(!qv_info.ok(), "authorized view qv is rejected fail-closed");
-        if (!qv_info.ok()) {
-            auto w = qv_info.status().ToString();
-            Expect(w.find("authorized view") != std::string::npos ||
-                       w.find("rejected") != std::string::npos,
-                   "authorized view qv error names the view");
-        }
-        auto qv_included = IncludedTableSchema(sql_client, *raw_client, view_opt, "qv");
-        if (qv_included) {
-            Expect(qv_included->num_fields() == 1 &&
-                       qv_included->field(0)->type()->id() == arrow::Type::INT32,
-                   "GetTables include_schema for authorized view qv is int32");
-        }
+        Expect(created.find("schema-views") != std::string::npos, "CreateSandbox nested table");
+        Expect(created.find("authorized_view") == std::string::npos &&
+                   created.find("warnings") == std::string::npos,
+               "CreateSandbox has no authorized-view residue");
 
         ExpectFlightMatch(sql_client, *raw_client, view_opt, "SELECT lst, st, mp FROM nested_t",
                           "nested LIST/STRUCT/MAP");

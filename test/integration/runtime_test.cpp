@@ -33,8 +33,8 @@ void duckbox::test::RunRuntimeTests() {
 		auto a2 = rt.Get(defs->Get(rec.id));
 		Expect(a.get() == a2.get(), "same named id reuses warm instance");
 		auto rec2 = rec;
-		rec2.spec.init_sql = "CREATE TEMP VIEW v AS SELECT 1 AS x";
-		rec2.spec.yaml_body += "\ninit_sql: CREATE TEMP VIEW v AS SELECT 1 AS x\n";
+		rec2.spec.resources.max_result_rows = 42;
+		rec2.spec.yaml_body += "\n# v2\n";
 		rec2 = defs->Update(rec2);
 		rt.PassivateId(rec2.id, "update");
 		auto b = rt.Get(rec2);

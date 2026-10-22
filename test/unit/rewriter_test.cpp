@@ -43,15 +43,6 @@ void duckbox::test::RunRewriterTests() {
         Expect(rw.find("21") != std::string::npos,
                "K2 rewrite binds the key tenant, not the spec literal");
     }
-    {
-        auto av = policy;
-        av.Table("deals").authorized_view = true;
-        av.Table("deals").filters.clear();
-        av.Table("deals").columns = {"id", "title", "amount"};
-        ExpectThrowContains(
-            [&] { RewriteUserSql("SELECT id, title, amount FROM deals", av, key_a); },
-            "authorized view", "authorized views are rejected fail-closed");
-    }
     ExpectThrowContains([&] { RewriteUserSql("SELECT * FROM staging.deals", policy, key_a); },
                         "not allowlisted", "staging.deals does not match memory.main.deals");
     ExpectThrowContains([&] { RewriteUserSql("SELECT * FROM other.main.deals", policy, key_a); },

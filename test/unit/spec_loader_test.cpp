@@ -49,9 +49,44 @@ void duckbox::test::RunSpecLoaderTests() {
     }
     ExpectThrowContains([&] { LoadDaemonFile(bad_path); }, "control-plane",
                         "daemon yaml with lake is rejected");
+    {
+        auto timeout_path = "/tmp/duckbox-init-sql-timeout.yaml";
+        {
+            std::ofstream o(timeout_path);
+            o << "name: x\nlisten: 127.0.0.1:9\nhandle_secret: duckbox-dev-secret\n"
+                 "limits:\n  init_sql_timeout_ms: 5000\n";
+        }
+        ExpectThrowContains([&] { LoadDaemonFile(timeout_path); }, "unknown key",
+                            "limits.init_sql_timeout_ms is rejected");
+        auto settings_root = "/tmp/duckbox-allowed-init-root.yaml";
+        {
+            std::ofstream o(settings_root);
+            o << "name: x\nlisten: 127.0.0.1:9\nhandle_secret: duckbox-dev-secret\n"
+                 "allowed_init_settings:\n  - memory_limit\n";
+        }
+        ExpectThrowContains([&] { LoadDaemonFile(settings_root); }, "unknown key",
+                            "root allowed_init_settings is rejected");
+        auto settings_lim = "/tmp/duckbox-allowed-init-limits.yaml";
+        {
+            std::ofstream o(settings_lim);
+            o << "name: x\nlisten: 127.0.0.1:9\nhandle_secret: duckbox-dev-secret\n"
+                 "limits:\n  allowed_init_settings:\n    - memory_limit\n";
+        }
+        ExpectThrowContains([&] { LoadDaemonFile(settings_lim); }, "unknown key",
+                            "limits.allowed_init_settings is rejected");
+    }
+    CheckBootstrapSql("");
     CheckBootstrapSql("CREATE TABLE t(i INT);\nINSERT INTO t VALUES (1);");
-    ExpectThrowContains([&] { CheckBootstrapSql("SELECT 1"); }, "CREATE",
+    CheckBootstrapSql("CREATE TABLE t AS SELECT 1 AS i");
+    ExpectThrowContains([&] { CheckBootstrapSql("SELECT 1"); }, "CREATE TABLE/SCHEMA/INSERT",
                         "memory bootstrap rejects SELECT");
+    ExpectThrowContains([&] { CheckBootstrapSql("CREATE VIEW v AS SELECT 1 AS x"); }, "CREATE VIEW",
+                        "memory bootstrap rejects CREATE VIEW");
+    ExpectThrowContains([&] { CheckBootstrapSql("CREATE MACRO m(x) AS x + 1"); }, "CREATE MACRO",
+                        "memory bootstrap rejects CREATE MACRO");
+    CheckBootstrapSql("CREATE SCHEMA s");
+    ExpectThrowContains([&] { CheckBootstrapSql("CREATE INDEX i ON t(i)"); },
+                        "CREATE TABLE/SCHEMA/INSERT", "memory bootstrap rejects CREATE INDEX");
     Expect(EscapeSqlString("a'b") == "a''b", "SQL string escape doubles quotes");
 
     auto yaml_path = MemoryAnalystPath();
@@ -156,25 +191,29 @@ void duckbox::test::RunSpecLoaderTests() {
            "catalog via env name, not inline");
     Expect(ducklake_spec.lake.s3.access_key.Spec() == "env:DUCKBOX_S3_KEY",
            "s3 key is a reference");
-    auto authz_spec =
-        LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/authz.yaml");
-    Expect(authz_spec.attachments.count("authorized_parquet") == 1 &&
-               authz_spec.attachments.at("authorized_parquet").location ==
-                   "s3://duckbox-lake/authorized/",
-           "authz spec attachment location");
-    auto authz_paths = DeclaredAllowedPaths(authz_spec);
-    Expect(std::find(authz_paths.begin(), authz_paths.end(), "s3://duckbox-lake/authorized/") !=
-                   authz_paths.end() &&
-               std::find(authz_paths.begin(), authz_paths.end(), "s3://duckbox-lake/data/") !=
-                   authz_paths.end(),
-           "declared paths include lake data_path and attachment prefix");
-    Expect(authz_spec.FindTable("parquet_ok") &&
-               authz_spec.FindTable("parquet_ok")->authorized_view,
-           "authz spec marks parquet_ok as authorized_view");
-    Expect(authz_spec.init_sql.find("read_parquet") != std::string::npos,
-           "authz spec initSQL creates parquet views");
-    Expect(FingerprintSpec(authz_spec) != FingerprintSpec(ducklake_spec),
-           "attachments/initSQL change the spec fingerprint");
+    ExpectThrowContains(
+        [&] { LoadSpecString(std::string(mini) + "init_sql: SELECT 1\n", "<init>"); },
+        "unknown key", "spec-level init_sql is rejected");
+    {
+        std::string s = mini;
+        auto pos = s.find("columns: [tenant_id, id]");
+        s.replace(pos, std::string("columns: [tenant_id, id]").size(),
+                  "authorized_view: true\n    columns: [tenant_id, id]");
+        ExpectThrowContains([&] { LoadSpecString(s, "<av>"); }, "unknown key",
+                            "tables.*.authorized_view is rejected");
+    }
+    {
+        std::string s = mini;
+        s += "attachments:\n  feed:\n    location: \"s3://duckbox-lake/authorized/\"\n";
+        auto attached = LoadSpecString(s, "<att>");
+        auto paths = DeclaredAllowedPaths(attached);
+        Expect(std::find(paths.begin(), paths.end(), "s3://duckbox-lake/authorized/") !=
+                       paths.end() &&
+                   std::find(paths.begin(), paths.end(), "s3://duckbox-lake/data/") == paths.end(),
+               "declared paths include attachment prefix without lake data_path");
+        Expect(FingerprintSpec(attached) != FingerprintSpec(ducklake_spec),
+               "attachments change the spec fingerprint");
+    }
 
     ExpectThrowContains(
         [&] {

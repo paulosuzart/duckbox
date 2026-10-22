@@ -1,5 +1,4 @@
 #include "duckbox/spec_validator.hpp"
-#include "duckbox/init_sql.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/rewriter.hpp"
 #include "duckbox/sandbox.hpp"
@@ -189,6 +188,9 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         add("lake.bootstrap_sql", "required when lake.kind=memory");
     }
     if (spec.lake.kind == LakeKind::Ducklake) {
+        if (!spec.lake.bootstrap_sql.empty() || !spec.lake.bootstrap_sql_path.empty()) {
+            add("lake.bootstrap_sql", "only valid when lake.kind=memory");
+        }
         if (spec.lake.catalog.empty() && spec.lake.catalog_ref.Empty() &&
             spec.lake.catalog_env.empty()) {
             add("lake.catalog",
@@ -214,6 +216,15 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         if (!need.empty()) {
             add("lake.extensions",
                 "ducklake requires explicit httpfs, postgres, ducklake (no autoload)");
+        }
+    } else if (!spec.lake.bootstrap_sql.empty()) {
+        // CreateSandbox / UpdateSandbox run ValidateStatic only. Without this,
+        // CREATE VIEW / CREATE MACRO in bootstrap is accepted at create and
+        // fails later at Warmup or `duckbox validate`.
+        try {
+            CheckBootstrapSql(spec.lake.bootstrap_sql, spec);
+        } catch (const std::exception &e) {
+            add("lake.bootstrap_sql", e.what());
         }
     }
 
@@ -244,7 +255,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         if (!SafeSqlIdent(kv.second.tenant_column)) {
             add(prefix + ".tenant_column", "not a valid identifier: " + kv.second.tenant_column);
         }
-        if (kv.second.filters.empty() && !kv.second.authorized_view) {
+        if (kv.second.filters.empty()) {
             add(prefix + ".filters", "required (at least one mandatory filter)");
         }
         bool tenant_from_key = false;
@@ -293,7 +304,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
                 add(path, std::string("failed to parse with DuckDB: ") + e.what());
             }
         }
-        if (!kv.second.authorized_view && !kv.second.filters.empty() && !tenant_from_key) {
+        if (!kv.second.filters.empty() && !tenant_from_key) {
             add(prefix + ".filters",
                 "tenant column '" + kv.second.tenant_column +
                     "' must be constrained by a key variable (e.g. tenant_id = :tenant_id)");
@@ -347,26 +358,15 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         }
     }
     // The rewriter does not expand macros. CREATE MACRO is also rejected by
-    // CheckTrustedSql; this still flags an allowlisted name created as a macro.
+    // CheckBootstrapSql; this still flags an allowlisted name created as a macro.
     {
         std::unordered_set<std::string> created;
-        CollectCreatedMacros(spec.init_sql, created);
         CollectCreatedMacros(spec.lake.bootstrap_sql, created);
         for (auto &fn : spec.functions) {
             if (created.count(ddb::StringUtil::Lower(fn))) {
                 add("functions", MacroNotAllowlistedMessage(fn));
             }
         }
-    }
-    try {
-        CheckTrustedSql(spec.init_sql, spec, TrustedSqlKind::InitSql);
-    } catch (const std::exception &e) {
-        add("init_sql", e.what());
-    }
-    try {
-        CheckTrustedSql(spec.lake.bootstrap_sql, spec, TrustedSqlKind::Bootstrap);
-    } catch (const std::exception &e) {
-        add("lake.bootstrap_sql", e.what());
     }
     if (!spec.functions.empty()) {
         try {
@@ -431,10 +431,6 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
         std::map<std::string, std::string> coltypes;
         kv.second.lake_columns.clear();
         auto q = fill_cols(qt.Display(), coltypes);
-        if (coltypes.empty()) {
-            // initSQL CREATE TEMP VIEW lives in catalog temp, not the lake alias.
-            q = fill_cols("temp." + qt.schema + "." + qt.name, coltypes);
-        }
         if (q && q->HasError() && coltypes.empty()) {
             add(prefix, "does not exist in the lake: " + q->GetError());
             continue;
@@ -449,23 +445,10 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
                     "column '" + col + "' does not exist on lake table '" + kv.second.name + "'");
             }
         }
-        bool is_view = false;
-        {
-            auto vr = con.Query(
-                "SELECT 1 FROM duckdb_views() WHERE lower(view_name)='" +
-                EscapeSqlString(ddb::StringUtil::Lower(kv.second.name)) +
-                "' AND lower(schema_name)='" + EscapeSqlString(qt.schema) +
-                "' AND (database_name IS NULL OR temporary OR lower(database_name)='" +
-                EscapeSqlString(qt.catalog) + "' OR lower(database_name)='temp') LIMIT 1");
-            if (vr && !vr->HasError()) {
-                auto chunk = vr->Fetch();
-                is_view = chunk && chunk->size() > 0;
-            }
-        }
-        if (kv.second.filters.empty() && !is_view) {
+        if (kv.second.filters.empty()) {
             add(prefix + ".filters", "required (at least one mandatory filter)");
         }
-        if (!is_view && !coltypes.count(ddb::StringUtil::Lower(kv.second.tenant_column))) {
+        if (!coltypes.count(ddb::StringUtil::Lower(kv.second.tenant_column))) {
             add(prefix + ".tenant_column",
                 "column '" + kv.second.tenant_column + "' does not exist");
         }
@@ -489,90 +472,29 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
     return issues;
 }
 
-namespace {
-
-bool ParamsReferenceKeyVars(const std::unordered_set<std::string> &params,
-                            const std::unordered_set<std::string> &vars) {
-    for (auto &p : params) {
-        if (vars.count(p)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// View name -> named parameters found on the parsed CREATE VIEW query (not SQL text).
-std::unordered_map<std::string, std::unordered_set<std::string>>
-InitSqlViewParams(const std::string &init_sql) {
-    std::unordered_map<std::string, std::unordered_set<std::string>> out;
-    if (init_sql.empty()) {
-        return out;
-    }
-    try {
-        ddb::Parser parser;
-        parser.ParseQuery(ColonParamsToDollar(init_sql));
-        for (auto &st : parser.statements) {
-            if (!st || st->type != ddb::StatementType::CREATE_STATEMENT) {
-                continue;
-            }
-            auto &cs = st->Cast<ddb::CreateStatement>();
-            if (!cs.info || cs.info->type != ddb::CatalogType::VIEW_ENTRY) {
-                continue;
-            }
-            auto &vi = cs.info->Cast<ddb::CreateViewInfo>();
-            std::unordered_set<std::string> params;
-            if (vi.query && vi.query->node) {
-                CollectParamsFromQuery(*vi.query->node, params);
-            }
-            out[ddb::StringUtil::Lower(vi.view_name)] = std::move(params);
-        }
-    } catch (...) {
-    }
-    return out;
-}
-
-} // namespace
-
-std::vector<std::string> AuthorizedViewWarnings(const SandboxSpec &spec) {
-    std::vector<std::string> warnings;
-    std::unordered_set<std::string> vars;
-    for (auto &n : spec.key.VariableNames()) {
-        vars.insert(ddb::StringUtil::Lower(n));
-    }
-    vars.insert("tenant_id");
-    auto views = InitSqlViewParams(spec.init_sql);
-    for (auto &kv : spec.tables) {
-        bool yaml_av = kv.second.authorized_view;
-        bool no_filters = kv.second.filters.empty();
-        if (!yaml_av && !no_filters) {
-            continue;
-        }
-        auto it = views.find(ddb::StringUtil::Lower(kv.second.name));
-        bool has_create = it != views.end();
-        if (!yaml_av && !has_create) {
-            continue;
-        }
-        if (has_create && ParamsReferenceKeyVars(it->second, vars)) {
-            continue;
-        }
-        warnings.push_back("authorized view '" + kv.second.name +
-                           "' does not reference a key variable; agent queries that name it are "
-                           "rejected fail-closed (authorized views skip the rewriter wrap)");
-    }
-    return warnings;
-}
-
 std::string MacroNotAllowlistedMessage(const std::string &name) {
     return "macro is not allowlisted: " + name;
 }
 
 bool IsAllowlistedMacroException(const std::string &name) {
-    // Built-in DuckDB aliases stored as MACRO_ENTRY. Tested. Everything else is rejected.
+    // Tested alias names only. RejectAllowlistedMacros also requires the
+    // catalog entry to be internal and to live in the system catalog.
     static const std::unordered_set<std::string> kOk = {
         "count", "count_star", "sum",    "avg",      "min",   "max",
         "lower", "upper",      "length", "coalesce", "round", "abs",
     };
     return kOk.count(ddb::StringUtil::Lower(name)) > 0;
+}
+
+static bool IsTrustedSystemMacroException(const ddb::CatalogEntry &entry) {
+    if (!IsAllowlistedMacroException(entry.name) || !entry.internal) {
+        return false;
+    }
+    try {
+        return ddb::StringUtil::Lower(entry.ParentCatalog().GetName()) == "system";
+    } catch (...) {
+        return false;
+    }
 }
 
 void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string> &out) {
@@ -616,30 +538,27 @@ void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con) {
         started = true;
     }
     try {
-        auto reject_if_listed = [&](const std::string &raw_name) {
-            auto n = ddb::StringUtil::Lower(raw_name);
-            if (spec.functions.count(n) && !IsAllowlistedMacroException(n)) {
+        auto reject_if_listed = [&](const ddb::CatalogEntry &entry) {
+            auto n = ddb::StringUtil::Lower(entry.name);
+            if (spec.functions.count(n) && !IsTrustedSystemMacroException(entry)) {
                 throw PolicyError(MacroNotAllowlistedMessage(n));
             }
         };
         for (auto type : {ddb::CatalogType::MACRO_ENTRY, ddb::CatalogType::TABLE_MACRO_ENTRY}) {
             auto entries = ddb::Catalog::GetAllEntries(ctx, type);
             for (auto &eref : entries) {
-                reject_if_listed(eref.get().name);
+                reject_if_listed(eref.get());
             }
         }
         auto schemas = ddb::Catalog::GetAllSchemas(ctx);
         for (auto &fn : spec.functions) {
-            if (IsAllowlistedMacroException(fn)) {
-                continue;
-            }
             for (auto &sref : schemas) {
                 auto &schema = sref.get();
                 auto txn = schema.GetCatalogTransaction(ctx);
                 for (auto type :
                      {ddb::CatalogType::MACRO_ENTRY, ddb::CatalogType::TABLE_MACRO_ENTRY}) {
-                    if (schema.GetEntry(txn, type, fn)) {
-                        throw PolicyError(MacroNotAllowlistedMessage(fn));
+                    if (auto found = schema.GetEntry(txn, type, fn)) {
+                        reject_if_listed(*found);
                     }
                 }
             }
@@ -680,7 +599,7 @@ int RunValidateCommand(const DaemonConfig &daemon, const std::string &spec_path)
             return 1;
         }
         auto key = ParseTenantKey("tenant_0:validate", spec.key);
-        TenantSandbox box(daemon, spec, key, spec.init_sql, dir);
+        TenantSandbox box(daemon, spec, key, dir);
         box.Warmup(/*validate_lake=*/true);
         std::cout << "sandbox spec '" << spec.name
                   << "' ok (static + throwaway sandbox lake check) version=" << spec.version

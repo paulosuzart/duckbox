@@ -101,7 +101,6 @@ private:
 		SandboxRecord rec;
 		Policy spec;
 		TenantKey key;
-		std::string init_sql;
 		std::string spec_dir;
 		std::string caller;
 	};
@@ -172,7 +171,7 @@ private:
 void BlockTerminationSignals();
 int RunServer(const ServerOptions &opt); // ValidateDaemonOrThrow then listen; returns process exit code
 int RunLocalQuery(const DaemonConfig &daemon, const std::string &spec_path, const std::string &key,
-                  const std::string &sql, const std::string &init_sql);
+                  const std::string &sql);
 struct SandboxCliRequest {
 	std::string op;
 	std::string url;

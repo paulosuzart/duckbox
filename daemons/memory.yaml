@@ -13,7 +13,6 @@ limits:
   idle_timeout: 5m
   max_idle_timeout: 1h
   max_sandboxes: 600
-  init_sql_timeout_ms: 5000
 handle_secret_env: DUCKBOX_HANDLE_SECRET
 metrics:
   listen: 127.0.0.1:9477

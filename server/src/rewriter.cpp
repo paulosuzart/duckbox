@@ -117,7 +117,7 @@ ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> 
     auto inner_from = base->Copy();
     inner_from->alias = "";
     inner_from->column_name_alias.clear();
-    if (inner_from->type == ddb::TableReferenceType::BASE_TABLE && !spec.authorized_view) {
+    if (inner_from->type == ddb::TableReferenceType::BASE_TABLE) {
         auto &b = inner_from->Cast<ddb::BaseTableRef>();
         // Always the allowlisted catalog.schema, never an agent-written qualifier
         // that happened to share the table name (e.g. staging.deals).
@@ -177,11 +177,6 @@ void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx) {
         }
         if (ref->alias.empty()) {
             ref->alias = base.table_name;
-        }
-        // Authorized views skip WrapFilteredTable. Reject fail-closed until a
-        // follow-up removes initSQL authorized views.
-        if (spec->authorized_view) {
-            throw SqlRejected("authorized view is rejected: " + base.table_name);
         }
         ref = WrapFilteredTable(ref->Copy(), *spec, *ctx.policy);
         return;

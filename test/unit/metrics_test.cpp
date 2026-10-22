@@ -57,6 +57,6 @@ void duckbox::test::RunMetricsTests() {
 	Expect(ClassifyRejection(PlanRejected("scan")) == std::string("plan"), "classify plan");
 	Expect(ClassifyRejection(AuthError("missing tenant key")) == std::string("auth"), "classify auth");
 	Expect(std::string(ClassifyLimit(Error("query timeout"))) == "timeout", "classify timeout");
-	WriteSandboxAudit("create", "acme-analyst", "tenant_21:user_sergio",
-	                  {"authorized view 'qv' does not reference a key variable"});
+	WriteSandboxAudit("create", "acme-analyst", "tenant_21:user_sergio");
+	Expect(text.find("duckbox_init_sql_seconds") == std::string::npos, "initSQL histogram is gone");
 }

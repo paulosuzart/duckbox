@@ -33,22 +33,20 @@ class SpecValidator : public ISpecValidator {
 int RunValidateCommand(const DaemonConfig &daemon,
                        const std::string &spec_path); // CLI; throwaway sandbox for lake check
 
-// Authorized views skip the rewriter wrap. Agent queries that name them are
-// rejected fail-closed. This helper still warns when a listed view does not
-// reference a key variable (the view is not a tenant-isolation mechanism).
-std::vector<std::string> AuthorizedViewWarnings(const SandboxSpec &spec);
-
 // Exact warmup / ValidateStatic message for an allowlisted macro.
 // The rewriter does not expand macros. Every catalog entry of type MACRO_ENTRY
 // or TABLE_MACRO_ENTRY (built-in or user, any attached catalog/schema) is
-// rejected unless IsAllowlistedMacroException says otherwise. The exception
-// list is the tested built-in aliases: count, count_star, sum, avg, min, max,
-// lower, upper, length, coalesce, round, abs. Error: "macro is not allowlisted: <name>".
+// rejected unless the name is on the tested exception list (count, count_star,
+// sum, avg, min, max, lower, upper, length, coalesce, round, abs) AND that
+// catalog entry is internal and lives in the system catalog. A user, extension,
+// or lake MACRO_ENTRY with the same name is rejected. Those exception names
+// show up as native functions in duckdb_functions(); the catalog materializes
+// a DefaultMacro through GetEntry. Error: "macro is not allowlisted: <name>".
 std::string MacroNotAllowlistedMessage(const std::string &name);
 bool IsAllowlistedMacroException(const std::string &name);
-// CREATE MACRO / CREATE TEMP MACRO names in trusted SQL (initSQL or bootstrap).
+// CREATE MACRO / CREATE TEMP MACRO names in trusted SQL (lake bootstrap).
 void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string> &out);
-// Catalog-API check after initSQL. Looks up each allowlisted name as
+// Catalog-API check after lake attach. Looks up each allowlisted name as
 // MACRO_ENTRY / TABLE_MACRO_ENTRY in every attached catalog and schema.
 // Does not run SQL through search_path (so a duckdb_functions() shadow cannot hide macros).
 void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con);

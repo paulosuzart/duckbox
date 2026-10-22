@@ -109,11 +109,11 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
     if (!root.IsMap()) {
         throw PolicyError("sandbox spec root must be a mapping: " + path);
     }
-    YamlRejectUnknownKeys(root, {"id", "key", "name", "policy_class", "metrics_class", "auth",
-                                 "resources", "lake", "tables", "functions", "deny_table_functions",
-                                 "require_prepared_statements", "init_sql", "extra_paths",
-                                 "bootstrap_sql_inline", "handles", "attachments", "metrics",
-                                 "lifecycle"});
+    YamlRejectUnknownKeys(root,
+                          {"id", "key", "name", "policy_class", "metrics_class", "auth",
+                           "resources", "lake", "tables", "functions", "deny_table_functions",
+                           "require_prepared_statements", "extra_paths", "bootstrap_sql_inline",
+                           "handles", "attachments", "metrics", "lifecycle"});
     SandboxSpec p;
     p.source_path = path;
     p.yaml_body = body;
@@ -228,8 +228,8 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
             if (!kv.second.IsMap()) {
                 throw PolicyError("tables." + kv.first + ": expected mapping");
             }
-            YamlRejectUnknownKeys(kv.second, {"columns", "filters", "tenant_column",
-                                              "authorized_view", "catalog", "schema"});
+            YamlRejectUnknownKeys(kv.second,
+                                  {"columns", "filters", "tenant_column", "catalog", "schema"});
             TablePolicy t;
             std::string key_catalog, key_schema, key_name;
             ParseTableKey(kv.first, key_catalog, key_schema, key_name);
@@ -247,7 +247,6 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
             t.filters =
                 StringList(kv.second.Get("filters"), ChildPath("tables." + kv.first, "filters"));
             t.tenant_column = kv.second.GetString("tenant_column", "tenant_id");
-            t.authorized_view = kv.second.GetBool("authorized_view", false);
             ApplyTableDefaults(t, p.lake);
             auto key = TableMapKey(p.lake, t);
             if (p.tables.count(key)) {
@@ -272,7 +271,6 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
     }
     p.deny_table_functions = true;
     p.require_prepared_statements = root.GetBool("require_prepared_statements", false);
-    p.init_sql = root.GetString("init_sql");
     p.extra_paths = StringList(root.Get("extra_paths"), "extra_paths");
     auto inline_boot = root.GetString("bootstrap_sql_inline");
     if (!inline_boot.empty()) {
@@ -615,7 +613,7 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
     }
     for (auto &kv : spec.tables) {
         os << kv.first << '|' << kv.second.catalog << '|' << kv.second.schema << '|'
-           << kv.second.tenant_column << '|' << kv.second.authorized_view << '|';
+           << kv.second.tenant_column << '|';
         for (auto &c : kv.second.columns) {
             os << c << ',';
         }
@@ -628,7 +626,7 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
     for (auto &fn : spec.functions) {
         os << fn << ',';
     }
-    os << "\ninit:" << spec.init_sql << '\n';
+    os << '\n';
     for (auto &p : spec.extra_paths) {
         os << "xp:" << p << '\n';
     }
