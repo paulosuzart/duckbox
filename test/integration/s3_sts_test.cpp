@@ -95,12 +95,22 @@ int main() {
     preview.region = "us-east-1";
     preview.access_key = ParseSecretRef("env:DUCKBOX_MINIO_KEY", "k");
     preview.secret_key = ParseSecretRef("env:DUCKBOX_MINIO_SECRET", "s");
-    preview.session_token = ParseSecretRef("env:DUCKBOX_MINIO_SESSION", "t");
-    setenv("DUCKBOX_MINIO_SESSION", "preview-token", 0);
     EnvFileSecretResolver preview_secrets;
     auto preview_sql = BuildDuckDbS3SecretSql(ResolveLakeS3Credentials(preview, preview_secrets));
-    Expect(preview_sql.find("SESSION_TOKEN") != std::string::npos,
-           "mode 2a SQL includes SESSION_TOKEN before the MinIO hop");
+    Expect(preview_sql.find("PROVIDER config") != std::string::npos &&
+               preview_sql.find("SESSION_TOKEN") == std::string::npos,
+           "mode 1 SQL is static keys without SESSION_TOKEN");
+    S3Settings preview_default;
+    preview_default.provider = "credential_chain";
+    preview_default.region = "us-east-1";
+    preview_default.url_style = "path";
+    preview_default.use_ssl = false;
+    auto preview_default_sql =
+        BuildDuckDbS3SecretSql(ResolveLakeS3Credentials(preview_default, preview_secrets));
+    Expect(preview_default_sql.find(std::string("CHAIN '") + DuckDbDefaultCredentialChain() +
+                                    "'") != std::string::npos,
+           "default chain SQL includes sts for IRSA web identity");
+    Expect(UsesDefaultCredentialChain(preview_default), "default chain helper");
     S3Settings preview_chain;
     preview_chain.provider = "credential_chain";
     preview_chain.profile = "minio-lake";
@@ -111,7 +121,7 @@ int main() {
         BuildDuckDbS3SecretSql(ResolveLakeS3Credentials(preview_chain, preview_secrets));
     Expect(preview_chain_sql.find("PROVIDER credential_chain") != std::string::npos &&
                preview_chain_sql.find("REFRESH auto") != std::string::npos,
-           "mode 2b SQL is credential_chain + REFRESH auto");
+           "mode 2 SQL is credential_chain + REFRESH auto");
 
     if (!TcpOpen(host, port)) {
         std::cout << "s3_sts skip remaining: MinIO is not reachable at " << hostport
@@ -144,54 +154,8 @@ int main() {
     Expect(put.status == 200 || put.status == 204, "MinIO accepts static lease keys");
 
     EnvFileSecretResolver secrets;
-    S3Settings session;
-    session.endpoint = hostport;
-    session.url_style = "path";
-    session.use_ssl = false;
-    session.region = "us-east-1";
-    session.access_key = ParseSecretRef("env:DUCKBOX_MINIO_KEY", "k");
-    session.secret_key = ParseSecretRef("env:DUCKBOX_MINIO_SECRET", "s");
-    setenv("DUCKBOX_MINIO_SESSION", "not-a-real-token", 1);
-    session.session_token = ParseSecretRef("env:DUCKBOX_MINIO_SESSION", "t");
-    auto resolved = ResolveLakeS3Credentials(session, secrets);
-    auto sql = BuildDuckDbS3SecretSql(resolved);
-    Expect(sql.find("SESSION_TOKEN") != std::string::npos, "MinIO path uses SESSION_TOKEN SQL");
-
     ddb::DuckDB db(nullptr);
     ddb::Connection con(db);
-    ExecOrThrow(con, "INSTALL httpfs; LOAD httpfs;");
-    try {
-        ExecOrThrow(con, sql);
-        auto probe =
-            con.Query("SELECT * FROM read_text('s3://" + lease.bucket + "/data/hello.txt')");
-        if (probe->HasError()) {
-            Expect(IsExpiredSessionCredentialError(probe->GetError()) ||
-                       std::string(probe->GetError()).find("403") != std::string::npos ||
-                       std::string(probe->GetError()).find("400") != std::string::npos ||
-                       std::string(probe->GetError()).find("Invalid") != std::string::npos,
-                   "invalid session token fails the lake read");
-            if (IsExpiredSessionCredentialError(probe->GetError())) {
-                ExpectThrowContains(
-                    [&] {
-                        try {
-                            throw Error(probe->GetError());
-                        } catch (const std::exception &e) {
-                            RethrowIfExpiredSessionCredentials(e, session);
-                            throw;
-                        }
-                    },
-                    "re-warmup", "expired MinIO session token asks for re-warmup");
-            }
-        } else {
-            Expect(true, "MinIO accepted a dummy session token (store-specific)");
-        }
-    } catch (const std::exception &e) {
-        RethrowIfExpiredSessionCredentials(e, session);
-        Expect(IsExpiredSessionCredentialError(e.what()) ||
-                   std::string(e.what()).find("re-warmup") != std::string::npos ||
-                   std::string(e.what()).find("SECRET") != std::string::npos,
-               "CREATE SECRET with a bad session token fails closed");
-    }
 
     auto dir = std::string("/tmp/duckbox-aws-") + std::to_string(getpid());
     std::filesystem::create_directories(dir);
@@ -210,6 +174,7 @@ int main() {
                chain_sql.find("REFRESH auto") != std::string::npos,
            "MinIO profile path uses credential_chain + REFRESH auto");
     try {
+        ExecOrThrow(con, "INSTALL httpfs; LOAD httpfs;");
         ExecOrThrow(con, "INSTALL aws; LOAD aws;");
         ExecOrThrow(con, chain_sql);
         auto got = con.Query("SELECT * FROM read_text('s3://" + lease.bucket + "/data/hello.txt')");
@@ -245,17 +210,21 @@ int main() {
         auto out = sts.AssumeRole(req);
         if (out.IsSuccess()) {
             auto creds = out.GetResult().GetCredentials();
-            setenv("DUCKBOX_STS_KEY", creds.GetAccessKeyId().c_str(), 1);
-            setenv("DUCKBOX_STS_SECRET", creds.GetSecretAccessKey().c_str(), 1);
-            setenv("DUCKBOX_STS_SESSION", creds.GetSessionToken().c_str(), 1);
+            auto sts_dir = dir + "-sts";
+            std::filesystem::create_directories(sts_dir);
+            WriteProfile(sts_dir, "minio-sts", creds.GetAccessKeyId().c_str(),
+                         creds.GetSecretAccessKey().c_str(), creds.GetSessionToken().c_str());
+            setenv("AWS_SHARED_CREDENTIALS_FILE", (sts_dir + "/credentials").c_str(), 1);
+            setenv("AWS_CONFIG_FILE", (sts_dir + "/config").c_str(), 1);
             LeaseSettings tmp = lease;
-            tmp.access_key_env = "DUCKBOX_STS_KEY";
-            tmp.secret_key_env = "DUCKBOX_STS_SECRET";
-            tmp.session_token_env = "DUCKBOX_STS_SESSION";
+            tmp.access_key_env.clear();
+            tmp.secret_key_env.clear();
+            tmp.provider = "credential_chain";
+            tmp.profile = "minio-sts";
             auto sts_client = MakeS3ControlClient(tmp);
             auto got = sts_client->Get("data/hello.txt");
             Expect(got.status == 200 || got.status == 403 || got.status == 400,
-                   "MinIO AssumeRole temporary creds are usable on the lease client");
+                   "MinIO AssumeRole temp creds are usable via credential_chain profile");
         } else {
             std::clog << "s3_sts note: MinIO AssumeRole: " << out.GetError().GetMessage() << "\n";
             Expect(true, "MinIO AssumeRole is optional when the store rejects STS");

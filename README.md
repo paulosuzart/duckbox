@@ -156,9 +156,9 @@ The **daemon is a control plane**. It has **no data access**. It owns:
 - routing of calls to warm instances
 - S3 **ownership leases** (its only credential is the lease/registry prefix)
 
-**Lake attach, attachments, and credentials belong on the sandbox definition** and are used only by that sandbox’s DuckDB instance, at create/warmup (before `lock_configuration`). The registry stores **credential references only** (`env:DUCKBOX_S3_KEY`, `file:/run/secrets/x`) — never values. Values are resolved inside the sandbox at each warmup. Refs are checked syntactically at create; every env/file ref (including `session_token_env`) and every `profile` / `role_arn` must be on the node's `lake_allow` lists (fail closed). Resolvability is checked at warmup. Values are never logged.
+**Lake attach, attachments, and credentials belong on the sandbox definition** and are used only by that sandbox’s DuckDB instance, at create/warmup (before `lock_configuration`). The registry stores **credential references only** (`env:DUCKBOX_S3_KEY`, `file:/run/secrets/x`) — never values. Values are resolved inside the sandbox at each warmup. Refs are checked syntactically at create; every env/file ref and every `profile` / `role_arn` must be on the node's `lake_allow` lists (fail closed). Resolvability is checked at warmup. Values are never logged.
 
-Lake S3 supports static keys, a pre-fetched session token, or DuckDB `PROVIDER credential_chain` (refresh via profile / assume-role). Full examples, expiry, and the AWS-only (no IAM user) path: [docs/lake-s3-credentials.md](docs/lake-s3-credentials.md).
+Lake S3 supports two modes: static keys, or DuckDB `PROVIDER credential_chain` (refresh via profile / assume-role / the default chain, including IRSA web identity). Full examples and the AWS-only (no IAM user) path: [docs/lake-s3-credentials.md](docs/lake-s3-credentials.md).
 
 Mode 1 — static keys (refs only; every env name must appear on `lake_allow.secret_refs`):
 
@@ -170,17 +170,7 @@ lake:
     region: us-east-1
 ```
 
-Mode 2a — pre-fetched temporary credentials (add `env:DUCKBOX_S3_SESSION` to `secret_refs`). These do not refresh; re-warmup after rotating the token:
-
-```yaml
-lake:
-  s3:
-    access_key_env: DUCKBOX_S3_KEY
-    secret_key_env: DUCKBOX_S3_SECRET
-    session_token_env: DUCKBOX_S3_SESSION
-```
-
-Mode 2b — credential chain (no IAM user). List each profile and role on the daemon; do not use `*`:
+Mode 2 — credential chain (refreshable; no IAM user). List each profile and role on the daemon, or set `allow_default_credential_chain` for IRSA / the default chain. Do not use `*`:
 
 ```yaml
 # spec

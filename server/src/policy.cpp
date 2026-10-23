@@ -205,10 +205,10 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
         }
         p.lake.extensions = StringList(lake->Get("extensions"), "lake.extensions");
         if (auto *s3 = lake->Get("s3")) {
-            YamlRejectUnknownKeys(*s3, {"endpoint", "endpoint_env", "url_style", "use_ssl",
-                                        "access_key", "access_key_env", "secret_key",
-                                        "secret_key_env", "session_token", "session_token_env",
-                                        "provider", "profile", "role_arn", "region", "region_env"});
+            YamlRejectUnknownKeys(*s3,
+                                  {"endpoint", "endpoint_env", "url_style", "use_ssl", "access_key",
+                                   "access_key_env", "secret_key", "secret_key_env", "provider",
+                                   "profile", "role_arn", "region", "region_env"});
             p.lake.s3.endpoint = s3->GetString("endpoint");
             p.lake.s3.endpoint_env = s3->GetString("endpoint_env");
             p.lake.s3.url_style = s3->GetString("url_style", "path");
@@ -217,8 +217,6 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
                 OptionalRef(s3, "access_key", "access_key_env", "lake.s3.access_key");
             p.lake.s3.secret_key =
                 OptionalRef(s3, "secret_key", "secret_key_env", "lake.s3.secret_key");
-            p.lake.s3.session_token =
-                OptionalRef(s3, "session_token", "session_token_env", "lake.s3.session_token");
             p.lake.s3.provider = s3->GetString("provider");
             p.lake.s3.profile = s3->GetString("profile");
             p.lake.s3.role_arn = s3->GetString("role_arn");
@@ -596,8 +594,8 @@ std::string FingerprintSpec(const SandboxSpec &spec) {
     os << spec.lake.s3.endpoint << '|' << spec.lake.s3.endpoint_env << '|' << spec.lake.s3.url_style
        << '|' << spec.lake.s3.use_ssl << '|' << spec.lake.s3.region << '|'
        << spec.lake.s3.access_key.Spec() << '|' << spec.lake.s3.secret_key.Spec() << '|'
-       << spec.lake.s3.session_token.Spec() << '|' << spec.lake.s3.provider << '|'
-       << spec.lake.s3.profile << '|' << spec.lake.s3.role_arn << '\n';
+       << spec.lake.s3.provider << '|' << spec.lake.s3.profile << '|' << spec.lake.s3.role_arn
+       << '\n';
     for (auto &e : spec.lake.extensions) {
         os << "ext:" << e << '\n';
     }

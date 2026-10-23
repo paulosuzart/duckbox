@@ -309,7 +309,6 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
                                        "prefix",
                                        "access_key_env",
                                        "secret_key_env",
-                                       "session_token_env",
                                        "provider",
                                        "profile",
                                        "role_arn",
@@ -334,7 +333,6 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
         d.lease.prefix = lease->GetString("prefix", d.lease.prefix);
         d.lease.access_key_env = lease->GetString("access_key_env");
         d.lease.secret_key_env = lease->GetString("secret_key_env");
-        d.lease.session_token_env = lease->GetString("session_token_env");
         d.lease.provider = lease->GetString("provider");
         d.lease.profile = lease->GetString("profile");
         d.lease.role_arn = lease->GetString("role_arn");

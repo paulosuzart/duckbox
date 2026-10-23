@@ -16,12 +16,6 @@ std::string LowerCopy(std::string s) {
     return s;
 }
 
-bool ContainsInsensitive(const std::string &hay, const char *needle) {
-    auto h = LowerCopy(hay);
-    auto n = LowerCopy(needle);
-    return h.find(n) != std::string::npos;
-}
-
 bool ListedExactly(const std::vector<std::string> &allow, const std::string &value) {
     return std::find(allow.begin(), allow.end(), value) != allow.end();
 }
@@ -185,10 +179,9 @@ void ValidateS3CredentialFields(const S3Settings &s3, LakeKind kind,
                                 const std::vector<std::string> &extensions,
                                 std::vector<SpecIssue> &issues) {
     if (kind != LakeKind::Ducklake) {
-        if (!s3.provider.empty() || !s3.session_token.Empty() || !s3.profile.empty() ||
-            !s3.role_arn.empty()) {
-            issues.push_back({"lake.s3", "provider, session_token, profile, and role_arn are only "
-                                         "valid when lake.kind=ducklake"});
+        if (!s3.provider.empty() || !s3.profile.empty() || !s3.role_arn.empty()) {
+            issues.push_back({"lake.s3", "provider, profile, and role_arn are only valid when "
+                                         "lake.kind=ducklake"});
         }
         return;
     }
@@ -211,9 +204,6 @@ void ValidateS3CredentialFields(const S3Settings &s3, LakeKind kind,
             ValidateSecretRefSyntax(s3.access_key, "lake.s3.access_key", issues);
             ValidateSecretRefSyntax(s3.secret_key, "lake.s3.secret_key", issues);
         }
-        if (!s3.session_token.Empty()) {
-            ValidateSecretRefSyntax(s3.session_token, "lake.s3.session_token", issues);
-        }
         if (!s3.profile.empty()) {
             issues.push_back(
                 {"lake.s3.profile", "profile is only valid with provider credential_chain"});
@@ -225,10 +215,9 @@ void ValidateS3CredentialFields(const S3Settings &s3, LakeKind kind,
         return;
     }
 
-    if (!s3.access_key.Empty() || !s3.secret_key.Empty() || !s3.session_token.Empty()) {
-        issues.push_back({"lake.s3",
-                          "provider credential_chain cannot be mixed with access_key, secret_key, "
-                          "or session_token"});
+    if (!s3.access_key.Empty() || !s3.secret_key.Empty()) {
+        issues.push_back(
+            {"lake.s3", "provider credential_chain cannot be mixed with access_key or secret_key"});
     }
     if (!s3.profile.empty() && !ValidAwsProfileName(s3.profile)) {
         issues.push_back(
@@ -284,7 +273,6 @@ void ValidateS3CredentialAllowlists(const SandboxSpec &spec, const DaemonConfig 
     };
     check_ref(spec.lake.s3.access_key, "lake.s3.access_key");
     check_ref(spec.lake.s3.secret_key, "lake.s3.secret_key");
-    check_ref(spec.lake.s3.session_token, "lake.s3.session_token");
     check_ref(spec.lake.catalog_ref, "lake.catalog");
     auto env_as_ref = [&](const std::string &env_name, const std::string &field) {
         if (env_name.empty()) {
@@ -354,9 +342,6 @@ ResolvedS3Credentials ResolveLakeS3Credentials(const S3Settings &s3,
         }
         out.key_id = secrets.Resolve(s3.access_key, "lake.s3.access_key");
         out.secret = secrets.Resolve(s3.secret_key, "lake.s3.secret_key");
-        if (!s3.session_token.Empty()) {
-            out.session_token = secrets.Resolve(s3.session_token, "lake.s3.session_token");
-        }
     }
     return out;
 }
@@ -372,6 +357,8 @@ std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds) {
             sql << ", CHAIN 'sts'";
         } else if (!creds.profile.empty()) {
             sql << ", CHAIN 'config'";
+        } else {
+            sql << ", CHAIN '" << DuckDbDefaultCredentialChain() << "'";
         }
         if (!creds.profile.empty()) {
             sql << ", PROFILE '" << EscapeSqlString(creds.profile) << "'";
@@ -382,9 +369,6 @@ std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds) {
     } else {
         sql << "config, KEY_ID '" << EscapeSqlString(creds.key_id) << "', SECRET '"
             << EscapeSqlString(creds.secret) << "'";
-        if (!creds.session_token.empty()) {
-            sql << ", SESSION_TOKEN '" << EscapeSqlString(creds.session_token) << "'";
-        }
     }
     if (!creds.endpoint.empty()) {
         sql << ", ENDPOINT '" << EscapeSqlString(creds.endpoint) << "'";
@@ -399,37 +383,26 @@ std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds) {
     return sql.str();
 }
 
-bool UsesStaticSessionToken(const S3Settings &s3) {
+const char *DuckDbDefaultCredentialChain() {
+    // config = env/profile files; sts = assume-role and AssumeRoleWithWebIdentity
+    // (IRSA: AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN).
+    return "config;sts";
+}
+
+bool UsesDefaultCredentialChain(const S3Settings &s3) {
     try {
-        return LakeS3Provider(s3) == S3CredentialProvider::Config && !s3.session_token.Empty();
+        return LakeS3Provider(s3) == S3CredentialProvider::CredentialChain && s3.profile.empty() &&
+               s3.role_arn.empty();
     } catch (...) {
         return false;
     }
 }
 
-bool IsExpiredSessionCredentialError(const std::string &message) {
-    return ContainsInsensitive(message, "ExpiredToken") ||
-           ContainsInsensitive(message, "TokenRefreshRequired") ||
-           ContainsInsensitive(message, "InvalidToken") ||
-           ContainsInsensitive(message, "expired token") ||
-           ContainsInsensitive(message, "expired credentials") ||
-           ContainsInsensitive(message, "The provided token has expired") ||
-           (ContainsInsensitive(message, "session token") &&
-            (ContainsInsensitive(message, "expired") || ContainsInsensitive(message, "invalid")));
-}
-
-std::string ExpiredSessionCredentialMessage() {
-    return "lake S3 session credentials expired; re-warmup the sandbox after refreshing "
-           "session_token_env";
-}
-
-void ThrowExpiredSessionCredentials() {
-    throw Error(ExpiredSessionCredentialMessage());
-}
-
-void RethrowIfExpiredSessionCredentials(const std::exception &e, const S3Settings &s3) {
-    if (UsesStaticSessionToken(s3) && IsExpiredSessionCredentialError(e.what())) {
-        ThrowExpiredSessionCredentials();
+bool LeaseUsesDefaultCredentialChain(const LeaseSettings &lease) {
+    try {
+        return ClassifyLeaseAuth(lease) == LeaseAuthKind::DefaultChain;
+    } catch (...) {
+        return false;
     }
 }
 
@@ -444,9 +417,6 @@ LeaseAuthKind ClassifyLeaseAuth(const LeaseSettings &lease) {
         }
         return LeaseAuthKind::DefaultChain;
     }
-    if (!lease.session_token_env.empty()) {
-        return LeaseAuthKind::StaticSession;
-    }
     return LeaseAuthKind::StaticKeys;
 }
 
@@ -457,6 +427,7 @@ bool LeaseUsesCredentialChain(const LeaseSettings &lease) {
 
 void ValidateLeaseCredentialFields(const LeaseSettings &lease, bool allow_insecure_dev,
                                    std::vector<SpecIssue> &issues) {
+    (void)allow_insecure_dev;
     S3CredentialProvider provider = S3CredentialProvider::Config;
     try {
         provider = ParseS3Provider(lease.provider, "lease.provider");
@@ -465,11 +436,9 @@ void ValidateLeaseCredentialFields(const LeaseSettings &lease, bool allow_insecu
         return;
     }
     if (provider == S3CredentialProvider::CredentialChain) {
-        if (!lease.access_key_env.empty() || !lease.secret_key_env.empty() ||
-            !lease.session_token_env.empty()) {
-            issues.push_back({"lease",
-                              "provider credential_chain cannot be mixed with access_key_env, "
-                              "secret_key_env, or session_token_env"});
+        if (!lease.access_key_env.empty() || !lease.secret_key_env.empty()) {
+            issues.push_back({"lease", "provider credential_chain cannot be mixed with "
+                                       "access_key_env or secret_key_env"});
         }
         if (!lease.profile.empty() && !ValidAwsProfileName(lease.profile)) {
             issues.push_back(
@@ -480,10 +449,8 @@ void ValidateLeaseCredentialFields(const LeaseSettings &lease, bool allow_insecu
                 {"lease.role_arn",
                  "must be a concrete IAM role ARN (arn:aws:iam::<account>:role/<name>)"});
         }
-        if (lease.profile.empty() && lease.role_arn.empty() && !allow_insecure_dev) {
-            issues.push_back({"lease", "credential_chain requires profile or role_arn unless "
-                                       "auth.allow_insecure_dev"});
-        }
+        // Default chain (no profile/role) is the IRSA / env / instance path.
+        // The operator opted in by setting provider: credential_chain.
         return;
     }
     if (!lease.profile.empty()) {

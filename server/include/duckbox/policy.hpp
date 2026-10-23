@@ -26,7 +26,6 @@ struct S3Settings {
     bool use_ssl = false;
     SecretRef access_key;
     SecretRef secret_key;
-    SecretRef session_token;
     std::string provider; // empty / config / credential_chain
     std::string profile;
     std::string role_arn;

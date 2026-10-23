@@ -13,13 +13,12 @@
 namespace duckbox {
 
 enum class S3CredentialProvider {
-    Config,          // DuckDB PROVIDER config (static keys; optional session token)
+    Config,          // DuckDB PROVIDER config (static access key + secret)
     CredentialChain, // DuckDB PROVIDER credential_chain (refresh via AWS SDK)
 };
 
 enum class LeaseAuthKind {
     StaticKeys,
-    StaticSession,
     DefaultChain,
     Profile,
     AssumeRole,
@@ -29,7 +28,6 @@ struct ResolvedS3Credentials {
     S3CredentialProvider provider = S3CredentialProvider::Config;
     std::string key_id;
     std::string secret;
-    std::string session_token;
     std::string endpoint;
     std::string url_style = "path";
     bool use_ssl = false;
@@ -65,11 +63,12 @@ void RejectS3CredentialAllowlistIssues(const SandboxSpec &spec, const DaemonConf
 ResolvedS3Credentials ResolveLakeS3Credentials(const S3Settings &s3, const SecretResolver &secrets);
 std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds);
 
-bool UsesStaticSessionToken(const S3Settings &s3);
-bool IsExpiredSessionCredentialError(const std::string &message);
-std::string ExpiredSessionCredentialMessage();
-[[noreturn]] void ThrowExpiredSessionCredentials();
-void RethrowIfExpiredSessionCredentials(const std::exception &e, const S3Settings &s3);
+// DuckDB CHAIN for provider credential_chain with no profile/role: config then
+// sts. sts includes AssumeRoleWithWebIdentity (IRSA: AWS_WEB_IDENTITY_TOKEN_FILE
+// + AWS_ROLE_ARN). The lease client uses DefaultAWSCredentialsProviderChain.
+const char *DuckDbDefaultCredentialChain();
+bool UsesDefaultCredentialChain(const S3Settings &s3);
+bool LeaseUsesDefaultCredentialChain(const LeaseSettings &lease);
 
 LeaseAuthKind ClassifyLeaseAuth(const LeaseSettings &lease);
 bool LeaseUsesCredentialChain(const LeaseSettings &lease);

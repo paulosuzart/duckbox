@@ -37,7 +37,7 @@ duckbox::DaemonConfig ProdAllow() {
     d.allow_insecure_dev = false;
     d.lake_allow.s3_endpoints = {"127.0.0.1:9000", "s3.amazonaws.com"};
     d.lake_allow.secret_refs = {"env:DUCKBOX_S3_KEY", "env:DUCKBOX_S3_SECRET",
-                                "env:DUCKBOX_S3_SESSION", "env:DUCKBOX_LAKE_CATALOG"};
+                                "env:DUCKBOX_LAKE_CATALOG"};
     d.lake_allow.aws_profiles = {"lake-readonly"};
     d.lake_allow.role_arns = {"arn:aws:iam::123456789012:role/duckbox-lake"};
     return d;
@@ -66,17 +66,22 @@ int main() {
     Expect(static_spec.lake.s3.access_key.Spec() == "env:DUCKBOX_S3_KEY", "mode 1 access_key_env");
     Expect(static_spec.lake.s3.secret_key.Spec() == "env:DUCKBOX_S3_SECRET",
            "mode 1 secret_key_env");
-    Expect(static_spec.lake.s3.session_token.Empty(), "mode 1 has no session token");
     Expect(LakeS3Provider(static_spec.lake.s3) == S3CredentialProvider::Config,
            "default provider is config");
 
     const char *session_s3 =
         "    endpoint: \"127.0.0.1:9000\"\n    access_key_env: DUCKBOX_S3_KEY\n"
         "    secret_key_env: DUCKBOX_S3_SECRET\n    session_token_env: DUCKBOX_S3_SESSION\n";
-    auto session_spec = LoadSpecString(DucklakeYaml(session_s3), "<session>");
-    Expect(session_spec.lake.s3.session_token.Spec() == "env:DUCKBOX_S3_SESSION",
-           "mode 2a session_token_env");
-    Expect(UsesStaticSessionToken(session_spec.lake.s3), "mode 2a uses a static session token");
+    ExpectThrowContains([&] { (void)LoadSpecString(DucklakeYaml(session_s3), "<session>"); },
+                        "unknown key", "session_token_env is an unknown lake.s3 key");
+    ExpectThrowContains(
+        [&] {
+            (void)LoadSpecString(
+                DucklakeYaml("    access_key_env: DUCKBOX_S3_KEY\n    secret_key_env: "
+                             "DUCKBOX_S3_SECRET\n    session_token: env:DUCKBOX_S3_SESSION\n"),
+                "<session-alt>");
+        },
+        "unknown key", "session_token is an unknown lake.s3 key");
 
     const char *chain_s3 =
         "    endpoint: \"s3.amazonaws.com\"\n    use_ssl: true\n    url_style: vhost\n"
@@ -84,10 +89,12 @@ int main() {
         "    role_arn: arn:aws:iam::123456789012:role/duckbox-lake\n    region: us-east-1\n";
     auto chain_spec = LoadSpecString(DucklakeYaml(chain_s3, "aws"), "<chain>");
     Expect(LakeS3Provider(chain_spec.lake.s3) == S3CredentialProvider::CredentialChain,
-           "mode 2b provider");
-    Expect(chain_spec.lake.s3.profile == "lake-readonly", "mode 2b profile");
+           "mode 2 provider");
+    Expect(chain_spec.lake.s3.profile == "lake-readonly", "mode 2 profile");
     Expect(chain_spec.lake.s3.role_arn == "arn:aws:iam::123456789012:role/duckbox-lake",
-           "mode 2b role_arn");
+           "mode 2 role_arn");
+    Expect(!UsesDefaultCredentialChain(chain_spec.lake.s3),
+           "profile+role is not the default chain");
 
     ExpectThrowContains([&] { ParseS3Provider("imds", "lake.s3.provider"); }, "credential_chain",
                         "unknown provider is rejected");
@@ -111,8 +118,7 @@ int main() {
 
     SpecValidator v;
     Expect(v.ValidateStatic(static_spec).empty(), "mode 1 is statically valid");
-    Expect(v.ValidateStatic(session_spec).empty(), "mode 2a is statically valid");
-    Expect(v.ValidateStatic(chain_spec).empty(), "mode 2b is statically valid");
+    Expect(v.ValidateStatic(chain_spec).empty(), "mode 2 is statically valid");
 
     auto missing_keys = LoadSpecString(
         DucklakeYaml("    endpoint: \"127.0.0.1:9000\"\n    region: us-east-1\n"), "<nokeys>");
@@ -143,14 +149,7 @@ int main() {
 
     auto prod = ProdAllow();
     Expect(v.ValidateStatic(static_spec, prod).empty(), "mode 1 allowlisted refs pass");
-    Expect(v.ValidateStatic(session_spec, prod).empty(),
-           "mode 2a session_token_env on secret_refs");
-    Expect(v.ValidateStatic(chain_spec, prod).empty(), "mode 2b profile and role on allowlists");
-
-    auto other_session = session_spec;
-    other_session.lake.s3.session_token = ParseSecretRef("env:DUCKBOX_OTHER_SESSION", "t");
-    Expect(HasIssue(v.ValidateStatic(other_session, prod), "lake.s3.session_token", "secret_refs"),
-           "session_token_env fail-closed when missing from secret_refs");
+    Expect(v.ValidateStatic(chain_spec, prod).empty(), "mode 2 profile and role on allowlists");
 
     auto other_profile = chain_spec;
     other_profile.lake.s3.profile = "admin";
@@ -184,7 +183,6 @@ int main() {
 
     setenv("DUCKBOX_S3_KEY", "id", 1);
     setenv("DUCKBOX_S3_SECRET", "sec", 1);
-    setenv("DUCKBOX_S3_SESSION", "tok", 1);
     EnvFileSecretResolver secrets;
     auto resolved_static = ResolveLakeS3Credentials(static_spec.lake.s3, secrets);
     Expect(resolved_static.key_id == "id" && resolved_static.secret == "sec",
@@ -192,26 +190,18 @@ int main() {
     auto sql_static = BuildDuckDbS3SecretSql(resolved_static);
     Expect(sql_static.find("PROVIDER config") != std::string::npos &&
                sql_static.find("SESSION_TOKEN") == std::string::npos,
-           "mode 1 SQL is PROVIDER config");
-
-    auto resolved_session = ResolveLakeS3Credentials(session_spec.lake.s3, secrets);
-    auto sql_session = BuildDuckDbS3SecretSql(resolved_session);
-    Expect(sql_session.find("SESSION_TOKEN 'tok'") != std::string::npos,
-           "mode 2a SQL has SESSION_TOKEN");
-    Expect(sql_session.find("REFRESH") == std::string::npos,
-           "static session token does not refresh");
+           "mode 1 SQL is PROVIDER config without SESSION_TOKEN");
 
     auto resolved_chain = ResolveLakeS3Credentials(chain_spec.lake.s3, secrets);
     auto sql_chain = BuildDuckDbS3SecretSql(resolved_chain);
-    Expect(sql_chain.find("PROVIDER credential_chain") != std::string::npos,
-           "mode 2b SQL provider");
-    Expect(sql_chain.find("PROFILE 'lake-readonly'") != std::string::npos, "mode 2b SQL profile");
+    Expect(sql_chain.find("PROVIDER credential_chain") != std::string::npos, "mode 2 SQL provider");
+    Expect(sql_chain.find("PROFILE 'lake-readonly'") != std::string::npos, "mode 2 SQL profile");
     Expect(sql_chain.find("ASSUME_ROLE_ARN 'arn:aws:iam::123456789012:role/duckbox-lake'") !=
                std::string::npos,
-           "mode 2b SQL assume-role");
+           "mode 2 SQL assume-role");
     Expect(sql_chain.find("REFRESH auto") != std::string::npos,
-           "mode 2b SQL refreshes via the chain");
-    Expect(sql_chain.find("KEY_ID") == std::string::npos, "mode 2b SQL has no static keys");
+           "mode 2 SQL refreshes via the chain");
+    Expect(sql_chain.find("KEY_ID") == std::string::npos, "mode 2 SQL has no static keys");
 
     ResolvedS3Credentials aws_default;
     aws_default.provider = S3CredentialProvider::CredentialChain;
@@ -223,45 +213,14 @@ int main() {
     Expect(sql_aws.find("ENDPOINT") == std::string::npos,
            "empty endpoint is omitted for AWS default");
 
-    Expect(IsExpiredSessionCredentialError("HTTP 400 ExpiredToken"), "ExpiredToken is classified");
-    Expect(IsExpiredSessionCredentialError("The provided token has expired."),
-           "human expired token is classified");
-    Expect(!IsExpiredSessionCredentialError("AccessDenied"), "AccessDenied is not expiry");
-    Expect(ExpiredSessionCredentialMessage().find("re-warmup") != std::string::npos,
-           "expiry message asks for re-warmup");
-    ExpectThrowContains(
-        [&] {
-            try {
-                throw Error("InvalidToken: The provided token has expired.");
-            } catch (const std::exception &e) {
-                RethrowIfExpiredSessionCredentials(e, session_spec.lake.s3);
-                throw;
-            }
-        },
-        "re-warmup", "static session expiry is rewritten");
-    try {
-        throw Error("ExpiredToken");
-    } catch (const std::exception &e) {
-        try {
-            RethrowIfExpiredSessionCredentials(e, static_spec.lake.s3);
-            Expect(true, "config without session token keeps the original error");
-        } catch (...) {
-            Expect(false, "config without session token must not rewrite expiry");
-        }
-    }
-
     auto fp1 = FingerprintSpec(static_spec);
-    auto fp2 = FingerprintSpec(session_spec);
     auto fp3 = FingerprintSpec(chain_spec);
-    Expect(fp1 != fp2 && fp2 != fp3 && fp1 != fp3,
-           "fingerprint includes token, provider, profile, role");
+    Expect(fp1 != fp3, "fingerprint includes provider, profile, role");
 
     LeaseSettings lease;
     lease.access_key_env = "DUCKBOX_S3_KEY";
     lease.secret_key_env = "DUCKBOX_S3_SECRET";
     Expect(ClassifyLeaseAuth(lease) == LeaseAuthKind::StaticKeys, "lease mode 1");
-    lease.session_token_env = "DUCKBOX_S3_SESSION";
-    Expect(ClassifyLeaseAuth(lease) == LeaseAuthKind::StaticSession, "lease mode 2a");
     LeaseSettings chain_lease;
     chain_lease.provider = "credential_chain";
     Expect(ClassifyLeaseAuth(chain_lease) == LeaseAuthKind::DefaultChain, "lease default chain");
@@ -273,7 +232,7 @@ int main() {
 
     std::vector<SpecIssue> lease_issues;
     ValidateLeaseCredentialFields(lease, false, lease_issues);
-    Expect(lease_issues.empty(), "lease static+session fields are valid");
+    Expect(lease_issues.empty(), "lease static key fields are valid");
     LeaseSettings mixed_lease = chain_lease;
     mixed_lease.access_key_env = "DUCKBOX_S3_KEY";
     lease_issues.clear();
@@ -282,25 +241,36 @@ int main() {
 
     LeaseSettings bare_chain;
     bare_chain.provider = "credential_chain";
+    Expect(ClassifyLeaseAuth(bare_chain) == LeaseAuthKind::DefaultChain,
+           "lease default chain is selected with no profile/role");
+    Expect(LeaseUsesDefaultCredentialChain(bare_chain), "lease default-chain helper");
     lease_issues.clear();
     ValidateLeaseCredentialFields(bare_chain, false, lease_issues);
-    Expect(HasIssue(lease_issues, "lease", "profile or role_arn"),
-           "lease default chain fails closed without insecure-dev");
-    lease_issues.clear();
-    ValidateLeaseCredentialFields(bare_chain, true, lease_issues);
-    Expect(lease_issues.empty(), "lease default chain allowed in insecure-dev");
+    Expect(lease_issues.empty(), "lease default chain is allowed (IRSA / env / instance profile)");
+
+    setenv("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/eks.amazonaws.com/serviceaccount/token",
+           0);
+    setenv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/duckbox-lake", 0);
+    Expect(LeaseUsesDefaultCredentialChain(bare_chain),
+           "IRSA env vars still use DefaultAWSCredentialsProviderChain");
 
     setenv("DUCKBOX_FAKE_KEY", "testkey", 1);
     setenv("DUCKBOX_FAKE_SECRET", "testsecret", 1);
-    setenv("DUCKBOX_FAKE_SESSION", "testsession", 1);
     LeaseSettings aws_client;
     aws_client.endpoint = "http://127.0.0.1:1";
     aws_client.bucket = "control";
     aws_client.access_key_env = "DUCKBOX_FAKE_KEY";
     aws_client.secret_key_env = "DUCKBOX_FAKE_SECRET";
-    aws_client.session_token_env = "DUCKBOX_FAKE_SESSION";
-    auto session_client = MakeS3ControlClient(aws_client);
-    Expect(session_client->Get("nope").status != 200, "lease session-token client constructs");
+    auto static_client = MakeS3ControlClient(aws_client);
+    Expect(static_client->Get("nope").status != 200, "lease static-key client constructs");
+
+    LeaseSettings irsa_client;
+    irsa_client.endpoint = "http://127.0.0.1:1";
+    irsa_client.bucket = "control";
+    irsa_client.provider = "credential_chain";
+    auto irsa_cli = MakeS3ControlClient(irsa_client);
+    Expect(irsa_cli->bucket() == "control",
+           "lease default chain (IRSA/web identity) client constructs");
 
     LeaseSettings chain_client;
     chain_client.endpoint = "http://127.0.0.1:1";
@@ -336,7 +306,7 @@ int main() {
         o << "name: sts\nlisten: 127.0.0.1:4747\nhandle_secret: duckbox-dev-secret\n"
              "auth:\n  allow_insecure_dev: true\n"
              "lake_allow:\n  s3_endpoints: [\"s3.amazonaws.com\"]\n"
-             "  secret_refs: [\"env:DUCKBOX_S3_SESSION\"]\n"
+             "  secret_refs: [\"env:DUCKBOX_LAKE_CATALOG\"]\n"
              "  aws_profiles: [\"lake-readonly\"]\n"
              "  role_arns: [\"arn:aws:iam::123456789012:role/duckbox-lake\"]\n"
              "lease:\n  endpoint: http://127.0.0.1:9\n  bucket: b\n  skip_probe: true\n"
@@ -443,6 +413,22 @@ int main() {
     auto sql_role = BuildDuckDbS3SecretSql(role_only);
     Expect(sql_role.find("CHAIN 'sts'") != std::string::npos, "role-only chain uses CHAIN sts");
 
+    ResolvedS3Credentials default_chain_creds;
+    default_chain_creds.provider = S3CredentialProvider::CredentialChain;
+    default_chain_creds.region = "us-east-1";
+    default_chain_creds.url_style = "vhost";
+    default_chain_creds.use_ssl = true;
+    auto sql_default = BuildDuckDbS3SecretSql(default_chain_creds);
+    Expect(sql_default.find(std::string("CHAIN '") + DuckDbDefaultCredentialChain() + "'") !=
+               std::string::npos,
+           "default chain SQL includes config;sts for IRSA web identity");
+    Expect(sql_default.find("REFRESH auto") != std::string::npos, "default chain refreshes");
+    S3Settings default_s3;
+    default_s3.provider = "credential_chain";
+    Expect(UsesDefaultCredentialChain(default_s3), "lake default chain helper");
+    Expect(std::string(DuckDbDefaultCredentialChain()).find("sts") != std::string::npos,
+           "DuckDB default chain includes sts (web identity)");
+
     LeaseSettings lease_cfg_profile;
     lease_cfg_profile.access_key_env = "DUCKBOX_S3_KEY";
     lease_cfg_profile.secret_key_env = "DUCKBOX_S3_SECRET";
@@ -465,8 +451,17 @@ int main() {
     Expect(HasIssue(lease_issues, "lease.provider", "credential_chain"),
            "lease rejects an unknown provider");
 
-    ExpectThrowContains([&] { ThrowExpiredSessionCredentials(); }, "re-warmup",
-                        "expiry helper throws the defined message");
+    auto lease_session_yaml = "/tmp/duckbox-daemon-session-token.yaml";
+    {
+        std::ofstream o(lease_session_yaml);
+        o << "name: sts\nlisten: 127.0.0.1:4747\nhandle_secret: duckbox-dev-secret\n"
+             "auth:\n  allow_insecure_dev: true\n"
+             "lease:\n  endpoint: http://127.0.0.1:9\n  bucket: b\n  skip_probe: true\n"
+             "  access_key_env: DUCKBOX_S3_KEY\n  secret_key_env: DUCKBOX_S3_SECRET\n"
+             "  session_token_env: DUCKBOX_S3_SESSION\n";
+    }
+    ExpectThrowContains([&] { LoadDaemonFile(lease_session_yaml); }, "unknown key",
+                        "lease.session_token_env is an unknown key");
 
     setenv("DUCKBOX_LAKE_CATALOG",
            "ducklake:postgres:dbname=nope host=127.0.0.1 port=1 user=x password=x", 1);
@@ -478,17 +473,14 @@ int main() {
             Expect(true, msg);
         } catch (const std::exception &e) {
             auto w = std::string(e.what());
-            Expect(w.find("SECRET") == std::string::npos ||
-                       w.find("re-warmup") != std::string::npos,
-                   std::string(msg) + " (" + w + ")");
+            Expect(w.find("SECRET") == std::string::npos, std::string(msg) + " (" + w + ")");
         }
     };
     attach_secret(static_spec, "mode 1 warmup creates the S3 secret before catalog attach");
-    attach_secret(session_spec, "mode 2a warmup creates the session-token secret");
     try {
-        attach_secret(chain_spec, "mode 2b warmup loads aws and creates credential_chain secret");
+        attach_secret(chain_spec, "mode 2 warmup loads aws and creates credential_chain secret");
     } catch (...) {
-        Expect(true, "mode 2b attach is best-effort without a live AWS profile");
+        Expect(true, "mode 2 attach is best-effort without a live AWS profile");
     }
 
     LeaseSettings aws_assume;

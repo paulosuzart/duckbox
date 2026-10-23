@@ -83,7 +83,6 @@ Endpoint ParseLeaseEndpoint(const LeaseSettings &lease) {
 struct LeaseStaticKeys {
     std::string access_key;
     std::string secret_key;
-    std::string session_token;
 };
 
 LeaseStaticKeys ResolveLeaseStaticKeys(const LeaseSettings &lease) {
@@ -97,11 +96,6 @@ LeaseStaticKeys ResolveLeaseStaticKeys(const LeaseSettings &lease) {
                                "lease.access_key_env");
     out.secret_key = r.Resolve(ParseSecretRef(lease.secret_key_env, "lease.secret_key_env"),
                                "lease.secret_key_env");
-    if (!lease.session_token_env.empty()) {
-        out.session_token =
-            r.Resolve(ParseSecretRef(lease.session_token_env, "lease.session_token_env"),
-                      "lease.session_token_env");
-    }
     return out;
 }
 
@@ -136,6 +130,8 @@ MakeLeaseCredentialsProvider(const LeaseSettings &lease, const Endpoint &ep) {
             "duckbox-lease", lease.profile.c_str());
     }
     if (kind == LeaseAuthKind::DefaultChain) {
+        // Includes Environment, profile, process, STS web identity (IRSA:
+        // AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN), SSO, and instance profile.
         return Aws::MakeShared<Aws::Auth::DefaultAWSCredentialsProviderChain>("duckbox-lease");
     }
     return nullptr;
@@ -311,8 +307,7 @@ class AwsS3ControlClient final : public S3ControlClient {
             client_ = std::make_shared<Aws::S3::S3Client>(provider, nullptr, cfg);
         } else {
             auto keys = ResolveLeaseStaticKeys(lease);
-            Aws::Auth::AWSCredentials creds(keys.access_key.c_str(), keys.secret_key.c_str(),
-                                            keys.session_token.c_str());
+            Aws::Auth::AWSCredentials creds(keys.access_key.c_str(), keys.secret_key.c_str());
             client_ = std::make_shared<Aws::S3::S3Client>(creds, nullptr, cfg);
         }
     }

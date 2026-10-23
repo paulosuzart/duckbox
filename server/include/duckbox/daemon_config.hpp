@@ -45,7 +45,6 @@ struct LeaseSettings {
     std::string prefix = "leases/";
     std::string access_key_env;
     std::string secret_key_env;
-    std::string session_token_env;
     std::string provider; // empty / config / credential_chain
     std::string profile;
     std::string role_arn;

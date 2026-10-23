@@ -38,7 +38,7 @@ services:
   # Optional STS emulator. Started only with `--profile sts`.
   # Root user can AssumeRole for local temporary-credential tests.
   minio:
-    image: quay.io/minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":19001"
     environment:
       MINIO_ROOT_USER: minioadmin

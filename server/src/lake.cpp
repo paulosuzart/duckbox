@@ -163,13 +163,7 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
     }
 
     auto &s3 = spec.lake.s3;
-    ResolvedS3Credentials creds;
-    try {
-        creds = ResolveLakeS3Credentials(s3, secrets);
-    } catch (const std::exception &e) {
-        RethrowIfExpiredSessionCredentials(e, s3);
-        throw;
-    }
+    ResolvedS3Credentials creds = ResolveLakeS3Credentials(s3, secrets);
     if (creds.provider == S3CredentialProvider::CredentialChain) {
         std::clog << "sandbox: attaching ducklake catalog (s3 credential_chain";
         if (!creds.profile.empty()) {
@@ -181,18 +175,10 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
         std::clog << ", values not logged)\n";
     } else {
         std::clog << "sandbox: attaching ducklake catalog (s3 credentials from "
-                  << s3.access_key.Spec() << "/" << s3.secret_key.Spec();
-        if (!s3.session_token.Empty()) {
-            std::clog << "/" << s3.session_token.Spec();
-        }
-        std::clog << ", values not logged)\n";
+                  << s3.access_key.Spec() << "/" << s3.secret_key.Spec()
+                  << ", values not logged)\n";
     }
-    try {
-        ExecOrThrow(con, BuildDuckDbS3SecretSql(creds));
-    } catch (const std::exception &e) {
-        RethrowIfExpiredSessionCredentials(e, s3);
-        throw;
-    }
+    ExecOrThrow(con, BuildDuckDbS3SecretSql(creds));
 
     std::string catalog = ResolveLakeCatalog(spec, secrets);
     if (catalog.empty()) {
@@ -217,13 +203,8 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
         add("READ_ONLY");
     }
     attach << ")";
-    try {
-        ExecOrThrow(con, attach.str());
-        ExecOrThrow(con, "USE " + alias);
-    } catch (const std::exception &e) {
-        RethrowIfExpiredSessionCredentials(e, s3);
-        throw;
-    }
+    ExecOrThrow(con, attach.str());
+    ExecOrThrow(con, "USE " + alias);
 }
 
 } // namespace duckbox
