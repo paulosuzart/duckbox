@@ -477,8 +477,9 @@ int main() {
                std::string(DuckDbDefaultCredentialChain()).find("sso") != std::string::npos,
            "DuckDB default chain includes env, web_identity (IRSA), and sso");
     Expect(std::string(DuckDbDefaultCredentialChain()).find("sts") == std::string::npos &&
-               std::string(DuckDbDefaultCredentialChain()).find("instance") == std::string::npos,
-           "DuckDB default chain omits sts-without-ARN and instance/IMDS");
+               std::string(DuckDbDefaultCredentialChain()).find("instance") == std::string::npos &&
+               std::string(DuckDbDefaultCredentialChain()).find("container") == std::string::npos,
+           "DuckDB default chain omits sts-without-ARN, instance/IMDS, and container");
 
     LeaseSettings lease_cfg_profile;
     lease_cfg_profile.access_key_env = "DUCKBOX_S3_KEY";
@@ -516,22 +517,77 @@ int main() {
 
     setenv("DUCKBOX_LAKE_CATALOG",
            "ducklake:postgres:dbname=nope host=127.0.0.1 port=1 user=x password=x", 1);
-    auto attach_secret = [&](const SandboxSpec &spec, const char *msg) {
+
+    auto warmup_aws = std::string("/tmp/duckbox-warmup-aws-") + std::to_string(getpid());
+    std::filesystem::create_directories(warmup_aws);
+    {
+        std::ofstream creds(warmup_aws + "/credentials");
+        creds << "[lake-readonly]\naws_access_key_id=id\naws_secret_access_key=sec\n"
+                 "[default]\naws_access_key_id=id\naws_secret_access_key=sec\n";
+        std::ofstream cfg(warmup_aws + "/config");
+        cfg << "[profile lake-readonly]\nregion=us-east-1\n[default]\nregion=us-east-1\n";
+    }
+    setenv("AWS_SHARED_CREDENTIALS_FILE", (warmup_aws + "/credentials").c_str(), 1);
+    setenv("AWS_CONFIG_FILE", (warmup_aws + "/config").c_str(), 1);
+    setenv("AWS_ACCESS_KEY_ID", "id", 1);
+    setenv("AWS_SECRET_ACCESS_KEY", "sec", 1);
+    unsetenv("AWS_PROFILE");
+    unsetenv("AWS_SESSION_TOKEN");
+
+    auto secret_has_refresh_auto = [](ddb::Connection &con) {
+        // Inspect refresh without printing secret_string (key_id exposure is #22).
+        auto q =
+            con.Query("SELECT CASE WHEN lower(coalesce(secret_string, '')) LIKE '%refresh%auto%' "
+                      "THEN 'yes' ELSE 'no' END AS refresh_auto "
+                      "FROM duckdb_secrets() WHERE name = 'duckbox_s3'");
+        return !q->HasError() && q->ToString().find("yes") != std::string::npos;
+    };
+    auto attach_creates_secret = [&](const SandboxSpec &spec, const DaemonConfig &daemon,
+                                     bool expect_refresh, const char *msg) {
+        ddb::DuckDB db(nullptr);
+        ddb::Connection con(db);
+        std::string attach_err;
+        try {
+            AttachLakeFromSpec(con, spec, "", secrets, daemon);
+        } catch (const std::exception &e) {
+            attach_err = e.what();
+            Expect(attach_err.find("CREATE OR REPLACE SECRET") == std::string::npos,
+                   std::string(msg) + " CREATE SECRET must run before attach fails (" + attach_err +
+                       ")");
+        }
+        auto listed = con.Query("SELECT name, type, provider FROM duckdb_secrets()");
+        Expect(!listed->HasError() && listed->ToString().find("duckbox_s3") != std::string::npos,
+               std::string(msg) + " creates duckbox_s3 via AttachLakeFromSpec (" + attach_err +
+                   ")");
+        ExecOrThrow(con, "SET lock_configuration=true");
+        auto locked = con.Query("SELECT name, provider FROM duckdb_secrets()");
+        Expect(!locked->HasError() && locked->ToString().find("duckbox_s3") != std::string::npos,
+               std::string(msg) + " secret survives lock_configuration");
+        if (expect_refresh) {
+            Expect(secret_has_refresh_auto(con),
+                   std::string(msg) + " keeps REFRESH auto after lock_configuration");
+        }
+    };
+    attach_creates_secret(static_spec, ProdAllow(), false, "mode 1 AttachLakeFromSpec");
+    attach_creates_secret(chain_spec, ProdAllow(), true, "mode 2 profile AttachLakeFromSpec");
+    {
+        auto def_daemon = ProdAllow();
+        def_daemon.lake_allow.allow_default_credential_chain = true;
+        attach_creates_secret(chain_default, def_daemon, true,
+                              "mode 2 default-chain AttachLakeFromSpec");
+    }
+    {
         ddb::DuckDB db(nullptr);
         ddb::Connection con(db);
         try {
-            AttachLakeFromSpec(con, spec, "", secrets, duckbox::test::TestDaemon());
-            Expect(true, msg);
+            AttachLakeFromSpec(con, role_spec, "", secrets, ProdAllow());
+            Expect(false, "role_arn CREATE SECRET should fail without a reachable STS");
         } catch (const std::exception &e) {
             auto w = std::string(e.what());
-            Expect(w.find("SECRET") == std::string::npos, std::string(msg) + " (" + w + ")");
+            Expect(w.find("Role-arn") != std::string::npos ||
+                       w.find("Secret Validation") != std::string::npos,
+                   std::string("role_arn AttachLakeFromSpec reaches CREATE SECRET (") + w + ")");
         }
-    };
-    attach_secret(static_spec, "mode 1 warmup creates the S3 secret before catalog attach");
-    try {
-        attach_secret(chain_spec, "mode 2 warmup loads aws and creates credential_chain secret");
-    } catch (...) {
-        Expect(true, "mode 2 attach is best-effort without a live AWS profile");
     }
 
     LeaseSettings aws_assume;

@@ -7,7 +7,8 @@ on S3. There are **exactly two** modes, for both `lake.s3` and the daemon
 1. **Static keys** — `access_key_env` + `secret_key_env` (service-account style).
 2. **Refreshable credentials** — `provider: credential_chain`, with optional
    `profile` **or** `role_arn` (not both), or the default AWS chain (IRSA /
-   env / process / SSO). Instance profiles / IMDS are not supported yet.
+   env / process / SSO). DuckDB 1.5.6 has no `container` CHAIN item. IMDS /
+   instance profiles are not supported.
 
 Two sandboxes on the same node can use different keys, profiles, or roles. The
 daemon never stores secret values — only references — and `lake_allow` is
@@ -114,9 +115,10 @@ DuckDB 1.5.6 `CHAIN` (from `aws_secret.cpp`):
 
 `sts` without `ASSUME_ROLE_ARN` is an error. `config` without `PROFILE` is
 only the default profile file (no env, no IMDS, no SSO). IRSA is the
-`web_identity` item. `instance` is omitted: the lease SDK sets
-`AWS_EC2_METADATA_DISABLED=true` for the whole process, so instance profiles
-are **not supported yet**.
+`web_identity` item. DuckDB 1.5.6 has **no** `container` CHAIN item (ECS /
+container-credential sources are not selectable). `instance` is omitted:
+the lease SDK sets `AWS_EC2_METADATA_DISABLED=true` for the whole process,
+so IMDS / instance profiles are **not supported**.
 
 The lease client uses this SDK's `DefaultAWSCredentialsProviderChain` (env,
 profile, process, STS web identity, SSO — documented on the class). That is

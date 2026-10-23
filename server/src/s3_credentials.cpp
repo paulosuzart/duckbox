@@ -348,10 +348,7 @@ std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds) {
     sql << "CREATE OR REPLACE SECRET duckbox_s3 (TYPE s3, PROVIDER ";
     if (creds.provider == S3CredentialProvider::CredentialChain) {
         sql << "credential_chain";
-        if (!creds.role_arn.empty() && !creds.profile.empty()) {
-            // Rejected at validation; do not emit CHAIN sts + PROFILE (ignored).
-            sql << ", CHAIN 'sts'";
-        } else if (!creds.role_arn.empty()) {
+        if (!creds.role_arn.empty()) {
             sql << ", CHAIN 'sts'";
         } else if (!creds.profile.empty()) {
             sql << ", CHAIN '" << DuckDbProfileCredentialChain() << "'";

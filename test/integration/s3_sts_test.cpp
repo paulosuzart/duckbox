@@ -371,6 +371,14 @@ int main() {
         ExecOrThrow(con_def, "INSTALL aws; LOAD aws;");
         ExecOrThrow(con_def, default_live_sql);
         ExecOrThrow(con_def, "SET lock_configuration=true");
+        {
+            auto refresh = con_def.Query(
+                "SELECT CASE WHEN lower(coalesce(secret_string, '')) LIKE '%refresh%auto%' "
+                "THEN 'yes' ELSE 'no' END AS refresh_auto "
+                "FROM duckdb_secrets() WHERE name = 'duckbox_s3'");
+            Expect(!refresh->HasError() && refresh->ToString().find("yes") != std::string::npos,
+                   "secret keeps REFRESH auto after lock_configuration");
+        }
         auto got_def = con_def.Query("SELECT * FROM read_text('s3://" + std::string(kBucket) +
                                      "/data/hello.txt')");
         if (!got_def->HasError()) {
