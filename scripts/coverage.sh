@@ -19,6 +19,7 @@ python3 -m gcovr --root "$ROOT" \
   --exclude '\.deps/' \
   --exclude 'test/' \
   --gcov-ignore-errors=no_working_dir_found \
+  --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
   "$BUILD" \
   --txt \
   --print-summary \

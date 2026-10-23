@@ -4,13 +4,18 @@
 // header is refs, allowlists, SQL shape, and provider classification.
 
 #include "node/daemon_config.hpp"
-#include "config/policy.hpp"
 #include "s3/secrets.hpp"
 
 #include <string>
 #include <vector>
 
 namespace duckbox {
+namespace config {
+enum class LakeKind : int;
+struct S3Settings;
+struct SandboxSpec;
+} // namespace config
+
 namespace s3 {
 
 enum class S3CredentialProvider {
@@ -56,12 +61,15 @@ void ValidateS3CredentialFields(const config::S3Settings &s3, config::LakeKind k
                                 std::vector<common::SpecIssue> &issues);
 
 // Node allowlists. Fail closed: empty profile/role lists deny those fields.
-void ValidateS3CredentialAllowlists(const config::SandboxSpec &spec, const node::DaemonConfig &daemon,
+void ValidateS3CredentialAllowlists(const config::SandboxSpec &spec,
+                                    const node::DaemonConfig &daemon,
                                     std::vector<common::SpecIssue> &issues);
 
-void RejectS3CredentialAllowlistIssues(const config::SandboxSpec &spec, const node::DaemonConfig &daemon);
+void RejectS3CredentialAllowlistIssues(const config::SandboxSpec &spec,
+                                       const node::DaemonConfig &daemon);
 
-ResolvedS3Credentials ResolveLakeS3Credentials(const config::S3Settings &s3, const SecretResolver &secrets);
+ResolvedS3Credentials ResolveLakeS3Credentials(const config::S3Settings &s3,
+                                               const SecretResolver &secrets);
 std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds);
 
 // DuckDB 1.5.6 aws extension CHAIN items (docs + aws_secret.cpp):

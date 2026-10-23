@@ -6,7 +6,7 @@
 // opens the lake; only a sandbox DuckDB instance does, at create/warmup.
 
 #include "common/error.hpp"
-#include "s3/secrets.hpp"
+#include "s3/secret_ref.hpp"
 
 #include <cstdint>
 #include <map>
@@ -17,7 +17,7 @@
 namespace duckbox {
 namespace config {
 
-enum class LakeKind { Memory, Ducklake };
+enum class LakeKind : int { Memory, Ducklake };
 
 // Endpoint and credential refs only. Values are resolved at sandbox warmup.
 struct S3Settings {
@@ -40,8 +40,8 @@ struct LakeSettings {
     LakeKind kind = LakeKind::Memory;
     std::string alias = "lake";
     std::string catalog;
-    s3::SecretRef catalog_ref;   // env:/file: for catalog DSN; never a value in the registry
-    std::string catalog_env; // shorthand env name
+    s3::SecretRef catalog_ref; // env:/file: for catalog DSN; never a value in the registry
+    std::string catalog_env;   // shorthand env name
     std::string data_path;
     bool read_only = true;
     std::string bootstrap_sql_path;

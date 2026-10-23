@@ -1,6 +1,7 @@
 #include "s3/s3_credentials.hpp"
 
 #include "common/error.hpp"
+#include "config/policy.hpp"
 #include "lake/lake.hpp"
 
 #include <algorithm>
