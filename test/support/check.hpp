@@ -3,9 +3,7 @@
 // Shared assertions and fixtures for unit / guardrail / integration suites.
 
 #include "node/daemon_config.hpp"
-#include "common/duckdb_layer.hpp"
 #include "config/policy.hpp"
-#include "rewriter/tenant_key.hpp"
 
 #include <functional>
 #include <string>
@@ -22,10 +20,10 @@ void ExpectThrowContains(const std::function<void()> &fn, const std::string &nee
                          const std::string &msg);
 int ReportAndExit(const char *suite);
 
-DaemonConfig TestDaemon();
-Policy TestPolicy();
-Policy HiddenAmountPolicy(); // TestPolicy with deals.amount omitted
-Policy TestDucklakePolicy(const Policy &base);
+node::DaemonConfig TestDaemon();
+config::Policy TestPolicy();
+config::Policy HiddenAmountPolicy(); // TestPolicy with deals.amount omitted
+config::Policy TestDucklakePolicy(const config::Policy &base);
 std::string MemorySpecDir();
 std::string MemoryAnalystPath();
 

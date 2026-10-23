@@ -12,6 +12,12 @@
 
 void duckbox::test::RunRegistryTests() {
 	using namespace duckbox;
+	using namespace duckbox::common;
+	using namespace duckbox::node;
+	using namespace duckbox::config;
+	using namespace duckbox::rewriter;
+	using namespace duckbox::sandbox;
+	using namespace duckbox::flight;
 	auto daemon = TestDaemon();
 	auto loaded = LoadPolicyFile(MemoryAnalystPath());
 	auto spec_dir = MemorySpecDir();

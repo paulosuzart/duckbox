@@ -6,6 +6,7 @@
 
 void duckbox::test::RunRewriterTests() {
     using namespace duckbox;
+    using namespace duckbox::rewriter;
     auto policy = TestPolicy();
     auto key_a = ParseTenantKey("tenant_21:user_sergio", policy.key);
 

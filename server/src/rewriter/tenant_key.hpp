@@ -21,16 +21,13 @@ struct TenantKey {
 	int64_t tenant_id_i64 = 0;
 	std::map<std::string, std::string> vars;
 
-	std::string Var(const std::string &name) const; // empty if missing; names come from KeySpec
+	std::string Var(const std::string &name) const; // empty if missing; names come from config::KeySpec
 };
 
 // Default extractor used only when a spec omits auth.key (LoadSpecFile rejects that).
-TenantKey ParseTenantKey(const std::string &raw); // AuthError if unparseable
-TenantKey ParseTenantKey(const std::string &raw, const KeySpec &spec);
+TenantKey ParseTenantKey(const std::string &raw); // common::AuthError if unparseable
+TenantKey ParseTenantKey(const std::string &raw, const config::KeySpec &spec);
 
 } // namespace rewriter
-
-using rewriter::TenantKey;
-using rewriter::ParseTenantKey;
 
 } // namespace duckbox

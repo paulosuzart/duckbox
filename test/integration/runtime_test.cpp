@@ -13,6 +13,10 @@
 
 void duckbox::test::RunRuntimeTests() {
 	using namespace duckbox;
+	using namespace duckbox::config;
+	using namespace duckbox::rewriter;
+	using namespace duckbox::cluster;
+	using namespace duckbox::sandbox;
 	auto daemon = TestDaemon();
 	auto loaded = LoadPolicyFile(MemoryAnalystPath());
 	auto spec_dir = MemorySpecDir();

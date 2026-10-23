@@ -2,10 +2,10 @@
 #include "check.hpp"
 
 #include "flight/handle.hpp"
-#include "config/policy.hpp"
 
 void duckbox::test::RunHandleTests() {
 	using namespace duckbox;
+	using namespace duckbox::flight;
 	auto policy = TestPolicy();
 	HmacHandleSigner signer("test-secret", 60);
 	StatementHandle h;

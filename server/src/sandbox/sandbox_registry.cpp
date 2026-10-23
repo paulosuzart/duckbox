@@ -1,5 +1,4 @@
 #include "sandbox/sandbox_registry.hpp"
-#include "common/crypto.hpp"
 #include "common/json.hpp"
 #include "config/spec_validator.hpp"
 
@@ -9,6 +8,10 @@
 
 namespace duckbox {
 namespace sandbox {
+using namespace common;
+using namespace config;
+using namespace node;
+using namespace s3;
 namespace {
 
 std::string VersionKey(const std::string &id, int version) {

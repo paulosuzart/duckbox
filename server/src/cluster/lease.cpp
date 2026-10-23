@@ -1,4 +1,5 @@
 #include "cluster/lease.hpp"
+#include "rewriter/tenant_key.hpp"
 #include "common/crypto.hpp"
 #include "common/error.hpp"
 #include "common/json.hpp"
@@ -11,6 +12,11 @@
 
 namespace duckbox {
 namespace cluster {
+using namespace rewriter;
+using namespace common;
+using namespace metrics;
+using namespace node;
+using namespace s3;
 namespace {
 
 constexpr int kMaxCasAttempts = 8;

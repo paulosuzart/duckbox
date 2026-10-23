@@ -14,7 +14,7 @@ using duckbox::test::ExpectThrowContains;
 using duckbox::test::TestDaemon;
 using duckbox::test::TestPolicy;
 
-void ExpectDenied(duckbox::TenantSandbox &box, const std::string &sql, const char *needle,
+void ExpectDenied(duckbox::sandbox::TenantSandbox &box, const std::string &sql, const char *needle,
                   const char *msg) {
     ExpectThrowContains([&] { (void)box.Execute(sql); }, needle, msg);
 }
@@ -23,6 +23,8 @@ void ExpectDenied(duckbox::TenantSandbox &box, const std::string &sql, const cha
 
 int main() {
     using namespace duckbox;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::sandbox;
     auto daemon = TestDaemon();
     auto policy = TestPolicy();
     auto key = ParseTenantKey("tenant_21:user_sergio", policy.key);

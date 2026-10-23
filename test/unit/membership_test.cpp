@@ -13,6 +13,9 @@
 
 void duckbox::test::RunMembershipTests() {
 	using namespace duckbox;
+	using namespace duckbox::s3;
+	using namespace duckbox::metrics;
+	using namespace duckbox::cluster;
 	auto s3 = MakeMemoryS3ControlClient("control");
 	auto clock = std::make_shared<FakeClock>(2'000'000);
 	S3LeaseOptions opt;

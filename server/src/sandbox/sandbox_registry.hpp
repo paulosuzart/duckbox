@@ -35,12 +35,12 @@ struct SandboxRecord {
 	int64_t updated_at_ms = 0; // wall clock when this version became current
 	int64_t expires_at_ms = 0; // 0 = none; from lifecycle.ttl / expires_at
 	int handle_gen = 0;        // ExpireSandbox; not a spec version
-	SandboxSpec spec;
+	config::SandboxSpec spec;
 
 	std::string ToJson() const;      // immutable vN.json body
 	std::string PointerJson() const; // current.json (id, version, etag, tombstone)
 	static SandboxRecord FromJson(const std::string &json);
-	void ParseSpec(); // LoadSpecString(spec_yaml); throws PolicyError
+	void ParseSpec(); // config::LoadSpecString(spec_yaml); throws common::PolicyError
 };
 
 class SandboxRegistry {
@@ -48,13 +48,13 @@ public:
 	virtual ~SandboxRegistry() = default;
 	// Same content is idempotent; different content on an existing id is ConflictError.
 	virtual SandboxRecord Create(SandboxRecord rec) = 0;
-	virtual SandboxRecord Get(const std::string &id) = 0; // NotFoundError / hides tombstones
-	virtual SandboxRecord Update(SandboxRecord rec) = 0;  // bumps version; ConflictError on CAS fail
+	virtual SandboxRecord Get(const std::string &id) = 0; // common::NotFoundError / hides tombstones
+	virtual SandboxRecord Update(SandboxRecord rec) = 0;  // bumps version; common::ConflictError on CAS fail
 	virtual SandboxRecord Delete(const std::string &id) = 0;
 	virtual std::vector<SandboxRecord> List() = 0; // live definitions; tombstones omitted
 	// Passivate-invalidate: bump handle_gen, keep spec version. Definition stays.
 	virtual SandboxRecord Expire(const std::string &id) = 0;
-	virtual void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) = 0;
+	virtual void RememberLakeValidation(const std::string &id, int version, config::SandboxSpec spec) = 0;
 	virtual bool LakeValidated(const std::string &id, int version) const = 0;
 	virtual SandboxRecord GetVersion(const std::string &id, int version) = 0; // immutable vN, including N-1
 };
@@ -68,7 +68,7 @@ public:
 	SandboxRecord Delete(const std::string &id) override;
 	std::vector<SandboxRecord> List() override;
 	SandboxRecord Expire(const std::string &id) override;
-	void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) override;
+	void RememberLakeValidation(const std::string &id, int version, config::SandboxSpec spec) override;
 	bool LakeValidated(const std::string &id, int version) const override;
 	SandboxRecord GetVersion(const std::string &id, int version) override;
 
@@ -82,8 +82,8 @@ private:
 // Control-plane S3 registry. Create uses If-None-Match:*; update uses If-Match etag.
 class S3SandboxRegistry : public SandboxRegistry {
 public:
-	explicit S3SandboxRegistry(LeaseSettings lease);
-	explicit S3SandboxRegistry(std::shared_ptr<S3ControlClient> client);
+	explicit S3SandboxRegistry(node::LeaseSettings lease);
+	explicit S3SandboxRegistry(std::shared_ptr<s3::S3ControlClient> client);
 
 	SandboxRecord Create(SandboxRecord rec) override;
 	SandboxRecord Get(const std::string &id) override;
@@ -91,7 +91,7 @@ public:
 	SandboxRecord Delete(const std::string &id) override;
 	std::vector<SandboxRecord> List() override;
 	SandboxRecord Expire(const std::string &id) override;
-	void RememberLakeValidation(const std::string &id, int version, SandboxSpec spec) override;
+	void RememberLakeValidation(const std::string &id, int version, config::SandboxSpec spec) override;
 	bool LakeValidated(const std::string &id, int version) const override;
 	SandboxRecord GetVersion(const std::string &id, int version) override;
 
@@ -101,13 +101,13 @@ private:
 	void PutVersion(const SandboxRecord &rec);
 	void PutCurrent(const SandboxRecord &rec, const std::string &if_match, const std::string &if_none_match);
 
-	std::shared_ptr<S3ControlClient> client_;
+	std::shared_ptr<s3::S3ControlClient> client_;
 	mutable std::mutex mu_;
-	mutable std::unordered_map<std::string, SandboxSpec> lake_cache_;
+	mutable std::unordered_map<std::string, config::SandboxSpec> lake_cache_;
 };
 
-std::shared_ptr<SandboxRegistry> MakeSandboxRegistry(const DaemonConfig &daemon); // S3 if lease.bucket set, else memory
-SandboxRecord RecordFromSpec(SandboxSpec spec, std::string spec_dir = "");
+std::shared_ptr<SandboxRegistry> MakeSandboxRegistry(const node::DaemonConfig &daemon); // S3 if lease.bucket set, else memory
+SandboxRecord RecordFromSpec(config::SandboxSpec spec, std::string spec_dir = "");
 // UpdateSandbox cannot rebind an existing sandbox to another key. Empty
 // body or header keys are ignored; a different non-empty value is rejected.
 void RejectSandboxKeyChange(const std::string &current_key, const std::string &body_key,
@@ -123,18 +123,5 @@ bool IsExpired(const SandboxRecord &rec, int64_t now_ms = 0); // uses WallNowMs 
 void ApplyLifecycleTimes(SandboxRecord &rec, int64_t now_ms = 0);
 
 } // namespace sandbox
-
-using sandbox::SandboxRecord;
-using sandbox::SandboxRegistry;
-using sandbox::MemorySandboxRegistry;
-using sandbox::S3SandboxRegistry;
-using sandbox::MakeSandboxRegistry;
-using sandbox::RecordFromSpec;
-using sandbox::RejectSandboxKeyChange;
-using sandbox::WallNowMs;
-using sandbox::ResolveHandleVersion;
-using sandbox::EnsureCurrentVersion;
-using sandbox::IsExpired;
-using sandbox::ApplyLifecycleTimes;
 
 } // namespace duckbox

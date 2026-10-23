@@ -112,19 +112,4 @@ class SpecError : public PolicyError {
 
 } // namespace common
 
-using common::AuthError;
-using common::ConflictError;
-using common::Error;
-using common::HandleError;
-using common::LeaseLostError;
-using common::NotFoundError;
-using common::PlanRejected;
-using common::PolicyError;
-using common::RedirectError;
-using common::SpecError;
-using common::SpecIssue;
-using common::SqlRejected;
-using common::StaleHandleError;
-using common::UnavailableError;
-
 } // namespace duckbox

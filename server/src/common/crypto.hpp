@@ -38,16 +38,4 @@ std::string VerifyJwtHs256(const std::string &token, const std::string &secret);
 
 } // namespace common
 
-using common::Base64UrlEncode;
-using common::Base64UrlDecode;
-using common::HmacSha256;
-using common::Sha256Raw;
-using common::Sha256Hex;
-using common::HexEncode;
-using common::RandomHex;
-using common::ConstTimeEquals;
-using common::AesGcmEncrypt;
-using common::AesGcmDecrypt;
-using common::VerifyJwtHs256;
-
 } // namespace duckbox

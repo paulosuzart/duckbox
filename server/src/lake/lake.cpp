@@ -9,6 +9,10 @@
 
 namespace duckbox {
 namespace lake {
+using namespace common;
+using namespace s3;
+using namespace node;
+using namespace config;
 
 std::string EscapeSqlString(const std::string &s) {
     std::string out;

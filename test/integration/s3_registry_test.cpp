@@ -8,6 +8,10 @@
 
 void duckbox::test::RunS3RegistryTests() {
 	using namespace duckbox;
+	using namespace duckbox::s3;
+	using namespace duckbox::config;
+	using namespace duckbox::rewriter;
+	using namespace duckbox::sandbox;
 	auto loaded = LoadPolicyFile(MemoryAnalystPath());
 	auto spec_dir = MemorySpecDir();
 	auto key_a = ParseTenantKey("tenant_21:user_sergio", loaded.key);

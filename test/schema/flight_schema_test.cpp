@@ -32,7 +32,7 @@
 namespace {
 
 std::string SpecBodyForAction(const std::string &path) {
-    auto spec = duckbox::LoadSpecFile(path);
+    auto spec = duckbox::config::LoadSpecFile(path);
     auto body = spec.yaml_body;
     if (!spec.lake.bootstrap_sql.empty() &&
         body.find("bootstrap_sql_inline:") == std::string::npos) {
@@ -46,12 +46,12 @@ std::string SpecBodyForAction(const std::string &path) {
     return body;
 }
 
-std::string ActionBody(arrow::flight::FlightClient &client,
-                       const arrow::flight::FlightCallOptions &opt, const std::string &type,
+std::string ActionBody(::arrow::flight::FlightClient &client,
+                       const ::arrow::flight::FlightCallOptions &opt, const std::string &type,
                        const std::string &body) {
-    arrow::flight::Action action;
+    ::arrow::flight::Action action;
     action.type = type;
-    action.body = arrow::Buffer::FromString(body);
+    action.body = ::arrow::Buffer::FromString(body);
     auto stream_res = client.DoAction(opt, action);
     if (!stream_res.ok()) {
         throw std::runtime_error(stream_res.status().ToString());
@@ -75,8 +75,8 @@ std::string ActionBody(arrow::flight::FlightClient &client,
     return out;
 }
 
-std::shared_ptr<arrow::Schema> InfoSchema(const arrow::flight::FlightInfo &info) {
-    arrow::ipc::DictionaryMemo memo;
+std::shared_ptr<::arrow::Schema> InfoSchema(const ::arrow::flight::FlightInfo &info) {
+    ::arrow::ipc::DictionaryMemo memo;
     auto schema = info.GetSchema(&memo);
     if (!schema.ok()) {
         return nullptr;
@@ -84,8 +84,8 @@ std::shared_ptr<arrow::Schema> InfoSchema(const arrow::flight::FlightInfo &info)
     return *schema;
 }
 
-void ExpectFlightMatch(arrow::flight::sql::FlightSqlClient &sql, arrow::flight::FlightClient &raw,
-                       const arrow::flight::FlightCallOptions &opt, const std::string &sql_text,
+void ExpectFlightMatch(::arrow::flight::sql::FlightSqlClient &sql, ::arrow::flight::FlightClient &raw,
+                       const ::arrow::flight::FlightCallOptions &opt, const std::string &sql_text,
                        const std::string &msg) {
     auto info_res = sql.Execute(opt, sql_text);
     duckbox::test::Expect(info_res.ok(), msg + " Execute: " + info_res.status().ToString());
@@ -102,7 +102,7 @@ void ExpectFlightMatch(arrow::flight::sql::FlightSqlClient &sql, arrow::flight::
     auto schema_rpc = raw.GetSchema(opt, info->descriptor());
     duckbox::test::Expect(schema_rpc.ok(), msg + " GetSchema: " + schema_rpc.status().ToString());
     if (schema_rpc.ok()) {
-        arrow::ipc::DictionaryMemo memo;
+        ::arrow::ipc::DictionaryMemo memo;
         auto got = (*schema_rpc)->GetSchema(&memo);
         duckbox::test::Expect(got.ok() && (*got)->Equals(*advertised),
                               msg + " GetSchema matches GetFlightInfo");
@@ -128,16 +128,16 @@ void ExpectFlightMatch(arrow::flight::sql::FlightSqlClient &sql, arrow::flight::
                               advertised->ToString() + " batch=" + (*tbl)->schema()->ToString());
 }
 
-std::shared_ptr<arrow::Schema> SchemaFromIpcMessage(const uint8_t *data, int32_t size,
+std::shared_ptr<::arrow::Schema> SchemaFromIpcMessage(const uint8_t *data, int32_t size,
                                                     const std::string &msg) {
     if (!data || size <= 0) {
         duckbox::test::Expect(false, msg + " empty included schema");
         return nullptr;
     }
-    auto buf = std::make_shared<arrow::Buffer>(data, size);
-    auto reader = std::make_shared<arrow::io::BufferReader>(buf);
-    arrow::ipc::DictionaryMemo memo;
-    auto got = arrow::ipc::ReadSchema(reader.get(), &memo);
+    auto buf = std::make_shared<::arrow::Buffer>(data, size);
+    auto reader = std::make_shared<::arrow::io::BufferReader>(buf);
+    ::arrow::ipc::DictionaryMemo memo;
+    auto got = ::arrow::ipc::ReadSchema(reader.get(), &memo);
     duckbox::test::Expect(got.ok(), msg + " ReadSchema: " + got.status().ToString());
     if (!got.ok()) {
         return nullptr;
@@ -145,9 +145,9 @@ std::shared_ptr<arrow::Schema> SchemaFromIpcMessage(const uint8_t *data, int32_t
     return *got;
 }
 
-std::shared_ptr<arrow::Schema> IncludedTableSchema(arrow::flight::sql::FlightSqlClient &sql,
-                                                   arrow::flight::FlightClient &raw,
-                                                   const arrow::flight::FlightCallOptions &opt,
+std::shared_ptr<::arrow::Schema> IncludedTableSchema(::arrow::flight::sql::FlightSqlClient &sql,
+                                                   ::arrow::flight::FlightClient &raw,
+                                                   const ::arrow::flight::FlightCallOptions &opt,
                                                    const std::string &table_name) {
     auto info_res = sql.GetTables(opt, nullptr, nullptr, &table_name, true, nullptr);
     duckbox::test::Expect(info_res.ok(),
@@ -178,8 +178,8 @@ std::shared_ptr<arrow::Schema> IncludedTableSchema(arrow::flight::sql::FlightSql
     if (!names || !schemas) {
         return nullptr;
     }
-    auto name_arr = std::static_pointer_cast<arrow::StringArray>(names->chunk(0));
-    auto schema_arr = std::static_pointer_cast<arrow::BinaryArray>(schemas->chunk(0));
+    auto name_arr = std::static_pointer_cast<::arrow::StringArray>(names->chunk(0));
+    auto schema_arr = std::static_pointer_cast<::arrow::BinaryArray>(schemas->chunk(0));
     for (int64_t i = 0; i < name_arr->length(); i++) {
         if (name_arr->GetString(i) != table_name) {
             continue;
@@ -196,6 +196,13 @@ std::shared_ptr<arrow::Schema> IncludedTableSchema(arrow::flight::sql::FlightSql
 
 void duckbox::test::RunFlightSchemaTests() {
     using namespace duckbox;
+    using namespace duckbox::node;
+    using namespace duckbox::config;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::cluster;
+    using namespace duckbox::arrow;
+    using namespace duckbox::sandbox;
+    using namespace duckbox::flight;
     auto daemon = TestDaemon();
     daemon.listen = "127.0.0.1:0";
     daemon.callers.push_back(CallerRule{"analyst-svc", {"tenant_21:*"}});
@@ -208,9 +215,9 @@ void duckbox::test::RunFlightSchemaTests() {
     auto rewriter = std::make_shared<SqlRewriter>();
     auto sql = std::make_unique<DuckboxFlightSqlServer>(daemon, defs, runtime, signer, rewriter);
     auto server = std::make_unique<DuckboxFlightServer>(std::move(sql));
-    auto loc_res = arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
+    auto loc_res = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
     Expect(loc_res.ok(), "schema flight listen location");
-    arrow::flight::FlightServerOptions fopt(*loc_res);
+    ::arrow::flight::FlightServerOptions fopt(*loc_res);
     fopt.auth_handler = std::make_shared<HandshakeAuthHandler>(daemon);
     auto st = server->Init(fopt);
     Expect(st.ok(), "schema flight init");
@@ -228,8 +235,8 @@ void duckbox::test::RunFlightSchemaTests() {
         return;
     }
 
-    auto client_loc = arrow::flight::Location::ForGrpcTcp("127.0.0.1", port);
-    auto client_res = arrow::flight::FlightClient::Connect(*client_loc);
+    auto client_loc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", port);
+    auto client_res = ::arrow::flight::FlightClient::Connect(*client_loc);
     Expect(client_res.ok(), "schema flight client connect");
     if (!client_res.ok()) {
         (void)server->Shutdown();
@@ -239,9 +246,9 @@ void duckbox::test::RunFlightSchemaTests() {
         return;
     }
     auto raw_client =
-        std::shared_ptr<arrow::flight::FlightClient>(std::move(client_res).ValueOrDie());
+        std::shared_ptr<::arrow::flight::FlightClient>(std::move(client_res).ValueOrDie());
 
-    arrow::flight::FlightCallOptions opt;
+    ::arrow::flight::FlightCallOptions opt;
     opt.headers.emplace_back("x-duckbox-caller", "analyst-svc");
     opt.headers.emplace_back("x-duckbox-sandbox", "schema-int");
     opt.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
@@ -249,7 +256,7 @@ void duckbox::test::RunFlightSchemaTests() {
         ActionBody(*raw_client, opt, "CreateSandbox", SpecBodyForAction(MemoryAnalystPath()));
     Expect(created.find("schema-int") != std::string::npos, "CreateSandbox for schema suite");
 
-    arrow::flight::sql::FlightSqlClient sql_client(raw_client);
+    ::arrow::flight::sql::FlightSqlClient sql_client(raw_client);
 
     ExpectFlightMatch(sql_client, *raw_client, opt, "SELECT count(*) FROM deals", "count(*)");
     ExpectFlightMatch(sql_client, *raw_client, opt, "SELECT CAST(id AS BIGINT) AS id64 FROM deals",
@@ -273,12 +280,12 @@ void duckbox::test::RunFlightSchemaTests() {
             auto ps = std::move(prep_res).ValueOrDie();
             auto dataset = ps->dataset_schema();
             Expect(dataset && dataset->num_fields() == 1 &&
-                       dataset->field(0)->type()->id() == arrow::Type::INT64,
+                       dataset->field(0)->type()->id() == ::arrow::Type::INT64,
                    "prepared count(*) dataset schema is int64");
             auto gs = ps->GetSchema(opt);
             Expect(gs.ok(), "prepared count(*) GetSchema");
             if (gs.ok()) {
-                arrow::ipc::DictionaryMemo memo;
+                ::arrow::ipc::DictionaryMemo memo;
                 auto got = (*gs)->GetSchema(&memo);
                 Expect(got.ok() && dataset->Equals(**got),
                        "prepared GetSchema matches dataset schema");
@@ -309,25 +316,25 @@ void duckbox::test::RunFlightSchemaTests() {
         Expect(prep_res.ok(), "Prepare parameterized deals: " + prep_res.status().ToString());
         if (prep_res.ok()) {
             auto ps = std::move(prep_res).ValueOrDie();
-            arrow::Int32Builder ids;
+            ::arrow::Int32Builder ids;
             Expect(ids.Append(1).ok(), "bind id parameter");
-            std::shared_ptr<arrow::Array> id_arr;
+            std::shared_ptr<::arrow::Array> id_arr;
             Expect(ids.Finish(&id_arr).ok(), "finish id parameter");
-            auto pschema = arrow::schema({arrow::field("$1", arrow::int32())});
-            auto batch = arrow::RecordBatch::Make(pschema, 1, {id_arr});
+            auto pschema = ::arrow::schema({::arrow::field("$1", ::arrow::int32())});
+            auto batch = ::arrow::RecordBatch::Make(pschema, 1, {id_arr});
             Expect(ps->SetParameters(batch).ok(), "SetParameters id = 1");
             auto dataset = ps->dataset_schema();
             Expect(dataset && dataset->num_fields() == 2, "parameterized dataset has id, title");
             if (dataset && dataset->num_fields() == 2) {
-                Expect(dataset->field(0)->type()->id() == arrow::Type::INT32,
+                Expect(dataset->field(0)->type()->id() == ::arrow::Type::INT32,
                        "parameterized id is int32");
-                Expect(dataset->field(1)->type()->id() == arrow::Type::STRING,
+                Expect(dataset->field(1)->type()->id() == ::arrow::Type::STRING,
                        "parameterized title is utf8");
             }
             auto gs = ps->GetSchema(opt);
             Expect(gs.ok(), "parameterized GetSchema: " + gs.status().ToString());
             if (gs.ok() && dataset) {
-                arrow::ipc::DictionaryMemo memo;
+                ::arrow::ipc::DictionaryMemo memo;
                 auto got = (*gs)->GetSchema(&memo);
                 Expect(got.ok() && dataset->Equals(**got),
                        "parameterized GetSchema matches dataset schema");
@@ -396,11 +403,11 @@ void duckbox::test::RunFlightSchemaTests() {
             auto lst = nested_included->GetFieldByName("lst");
             auto st = nested_included->GetFieldByName("st");
             auto mp = nested_included->GetFieldByName("mp");
-            Expect(lst && lst->type()->id() == arrow::Type::LIST,
+            Expect(lst && lst->type()->id() == ::arrow::Type::LIST,
                    "GetTables include_schema lst is LIST, not utf8");
-            Expect(st && st->type()->id() == arrow::Type::STRUCT,
+            Expect(st && st->type()->id() == ::arrow::Type::STRUCT,
                    "GetTables include_schema st is STRUCT, not utf8");
-            Expect(mp && mp->type()->id() == arrow::Type::MAP,
+            Expect(mp && mp->type()->id() == ::arrow::Type::MAP,
                    "GetTables include_schema mp is MAP, not utf8");
         }
         auto nested_info = sql_client.Execute(view_opt, "SELECT lst, st, mp FROM nested_t");
@@ -411,11 +418,11 @@ void duckbox::test::RunFlightSchemaTests() {
             Expect(advertised && advertised->num_fields() == 3,
                    "nested query advertises 3 columns");
             if (advertised && advertised->num_fields() == 3) {
-                Expect(advertised->field(0)->type()->id() == arrow::Type::LIST,
+                Expect(advertised->field(0)->type()->id() == ::arrow::Type::LIST,
                        "lst is LIST, not utf8");
-                Expect(advertised->field(1)->type()->id() == arrow::Type::STRUCT,
+                Expect(advertised->field(1)->type()->id() == ::arrow::Type::STRUCT,
                        "st is STRUCT, not utf8");
-                Expect(advertised->field(2)->type()->id() == arrow::Type::MAP,
+                Expect(advertised->field(2)->type()->id() == ::arrow::Type::MAP,
                        "mp is MAP, not utf8");
             }
         }

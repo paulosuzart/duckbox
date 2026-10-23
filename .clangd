@@ -1,0 +1,8 @@
+# Point editors at the CMake compile database after sources moved under
+# server/src/<area>/. Do not check in compile_commands.json itself.
+CompileFlags:
+  CompilationDatabase: build
+
+Diagnostics:
+  UnusedIncludes: Strict
+

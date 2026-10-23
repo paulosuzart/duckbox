@@ -1,7 +1,7 @@
 #include "check.hpp"
 #include "suite.hpp"
 
-#include "sandbox/arrow_ipc.hpp"
+#include "arrow/arrow_ipc.hpp"
 #include "flight/http_server.hpp"
 #include "lake/lake.hpp"
 #include "cluster/lease.hpp"
@@ -20,6 +20,16 @@
 
 void duckbox::test::RunSandboxExecTests() {
     using namespace duckbox;
+    using namespace duckbox::s3;
+    using namespace duckbox::node;
+    using namespace duckbox::config;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::lake;
+    using namespace duckbox::metrics;
+    using namespace duckbox::cluster;
+    using namespace duckbox::arrow;
+    using namespace duckbox::sandbox;
+    using namespace duckbox::flight;
     auto daemon = TestDaemon();
     auto policy = TestPolicy();
     auto spec_dir = MemorySpecDir();

@@ -36,17 +36,17 @@ std::string MkJwt(const std::string &secret, const std::string &sub, const std::
 	if (exp == 0) {
 		exp = static_cast<int64_t>(std::time(nullptr)) + 3600;
 	}
-	auto header = duckbox::Base64UrlEncode(std::string("{\"alg\":\"") + alg + "\",\"typ\":\"JWT\"}");
-	auto payload = duckbox::Base64UrlEncode(std::string("{\"sub\":\"") + sub + "\",\"exp\":" + std::to_string(exp) + "}");
+	auto header = duckbox::common::Base64UrlEncode(std::string("{\"alg\":\"") + alg + "\",\"typ\":\"JWT\"}");
+	auto payload = duckbox::common::Base64UrlEncode(std::string("{\"sub\":\"") + sub + "\",\"exp\":" + std::to_string(exp) + "}");
 	auto msg = header + "." + payload;
 	if (alg == "none") {
 		return msg + ".";
 	}
-	return msg + "." + duckbox::Base64UrlEncode(duckbox::HmacSha256(secret, msg));
+	return msg + "." + duckbox::common::Base64UrlEncode(duckbox::common::HmacSha256(secret, msg));
 }
 
 std::string SpecBodyForAction(const std::string &path) {
-	auto spec = duckbox::LoadSpecFile(path);
+	auto spec = duckbox::config::LoadSpecFile(path);
 	auto body = spec.yaml_body;
 	if (!spec.lake.bootstrap_sql.empty() && body.find("bootstrap_sql_inline:") == std::string::npos) {
 		body += "\nbootstrap_sql_inline: |\n";
@@ -59,11 +59,11 @@ std::string SpecBodyForAction(const std::string &path) {
 	return body;
 }
 
-std::string ActionBody(arrow::flight::FlightClient &client, const arrow::flight::FlightCallOptions &opt,
+std::string ActionBody(::arrow::flight::FlightClient &client, const ::arrow::flight::FlightCallOptions &opt,
                        const std::string &type, const std::string &body) {
-	arrow::flight::Action action;
+	::arrow::flight::Action action;
 	action.type = type;
-	action.body = arrow::Buffer::FromString(body);
+	action.body = ::arrow::Buffer::FromString(body);
 	auto stream_res = client.DoAction(opt, action);
 	if (!stream_res.ok()) {
 		throw std::runtime_error(stream_res.status().ToString());
@@ -99,6 +99,15 @@ void ExpectNoAuthorizedViewResidue(const std::string &json, const char *what) {
 
 void duckbox::test::RunAuthFlightTests() {
 	using namespace duckbox;
+	using namespace duckbox::common;
+	using namespace duckbox::node;
+	using namespace duckbox::config;
+	using namespace duckbox::rewriter;
+	using namespace duckbox::lake;
+	using namespace duckbox::cluster;
+	using namespace duckbox::arrow;
+	using namespace duckbox::sandbox;
+	using namespace duckbox::flight;
 	auto daemon = TestDaemon();
 	auto ducklake_spec = LoadSpecFile(std::string(DUCKBOX_SOURCE_DIR) + "/policies/ducklake/analyst.yaml");
 
@@ -115,7 +124,7 @@ void duckbox::test::RunAuthFlightTests() {
 		prod.jwt_secret = "jwt-secret-value-here";
 		ExpectThrowContains([&] { ValidateDaemonOrThrow(prod); }, "callers",
 		                    "H4 production requires auth.callers");
-		prod.callers.push_back(duckbox::CallerRule{"analyst-svc", {"tenant_21:*"}});
+		prod.callers.push_back(duckbox::node::CallerRule{"analyst-svc", {"tenant_21:*"}});
 		ValidateDaemonOrThrow(prod);
 		prod.handle_secret = "duckbox-dev-secret";
 		ExpectThrowContains([&] { ValidateDaemonOrThrow(prod); }, "duckbox-dev-secret",
@@ -171,26 +180,26 @@ void duckbox::test::RunAuthFlightTests() {
 		ExpectThrowContains([&] { AuthenticateCallerIdentity(tok, "", MkJwt(tok.jwt_secret, "x", "none"), ""); },
 		                    "unsigned JWT", "A1 unsigned JWT is not accepted");
 		auto now = static_cast<int64_t>(std::time(nullptr));
-		auto header_kid = duckbox::Base64UrlEncode(std::string("{\"alg\":\"none\",\"kid\":\"HS256\",\"typ\":\"JWT\"}"));
-		auto payload_kid = duckbox::Base64UrlEncode(std::string("{\"sub\":\"analyst-svc\",\"exp\":") +
+		auto header_kid = duckbox::common::Base64UrlEncode(std::string("{\"alg\":\"none\",\"kid\":\"HS256\",\"typ\":\"JWT\"}"));
+		auto payload_kid = duckbox::common::Base64UrlEncode(std::string("{\"sub\":\"analyst-svc\",\"exp\":") +
 		                                            std::to_string(now + 3600) + "}");
 		auto msg_kid = header_kid + "." + payload_kid;
-		auto tok_kid = msg_kid + "." + duckbox::Base64UrlEncode(duckbox::HmacSha256(tok.jwt_secret, msg_kid));
+		auto tok_kid = msg_kid + "." + duckbox::common::Base64UrlEncode(duckbox::common::HmacSha256(tok.jwt_secret, msg_kid));
 		ExpectThrowContains([&] { AuthenticateCallerIdentity(tok, "", tok_kid, ""); }, "unsigned JWT",
 		                    "H1 alg=none with kid=HS256 is rejected");
-		auto header_ok = duckbox::Base64UrlEncode(std::string("{\"alg\":\"HS256\",\"typ\":\"JWT\"}"));
-		auto payload_noexp = duckbox::Base64UrlEncode(std::string("{\"sub\":\"analyst-svc\"}"));
+		auto header_ok = duckbox::common::Base64UrlEncode(std::string("{\"alg\":\"HS256\",\"typ\":\"JWT\"}"));
+		auto payload_noexp = duckbox::common::Base64UrlEncode(std::string("{\"sub\":\"analyst-svc\"}"));
 		auto msg_noexp = header_ok + "." + payload_noexp;
-		auto tok_noexp = msg_noexp + "." + duckbox::Base64UrlEncode(duckbox::HmacSha256(tok.jwt_secret, msg_noexp));
+		auto tok_noexp = msg_noexp + "." + duckbox::common::Base64UrlEncode(duckbox::common::HmacSha256(tok.jwt_secret, msg_noexp));
 		ExpectThrowContains([&] { AuthenticateCallerIdentity(tok, "", tok_noexp, ""); }, "exp",
 		                    "H1 JWT without exp is rejected");
 		ExpectThrowContains([&] { AuthenticateCallerIdentity(tok, "", MkJwt(tok.jwt_secret, "analyst-svc", "HS256", now - 120), ""); },
 		                    "expired", "H1 expired JWT is rejected");
-		auto payload_nbf = duckbox::Base64UrlEncode(std::string("{\"sub\":\"analyst-svc\",\"exp\":") +
+		auto payload_nbf = duckbox::common::Base64UrlEncode(std::string("{\"sub\":\"analyst-svc\",\"exp\":") +
 		                                            std::to_string(now + 3600) + ",\"nbf\":" + std::to_string(now + 3600) +
 		                                            "}");
 		auto msg_nbf = header_ok + "." + payload_nbf;
-		auto tok_nbf = msg_nbf + "." + duckbox::Base64UrlEncode(duckbox::HmacSha256(tok.jwt_secret, msg_nbf));
+		auto tok_nbf = msg_nbf + "." + duckbox::common::Base64UrlEncode(duckbox::common::HmacSha256(tok.jwt_secret, msg_nbf));
 		ExpectThrowContains([&] { AuthenticateCallerIdentity(tok, "", tok_nbf, ""); }, "not yet valid",
 		                    "H1 nbf in the future is rejected");
 	}
@@ -231,9 +240,9 @@ void duckbox::test::RunAuthFlightTests() {
 		auto rewriter = std::make_shared<SqlRewriter>();
 		auto sql = std::make_unique<DuckboxFlightSqlServer>(cfg, defs, runtime, signer, rewriter);
 		auto server = std::make_unique<DuckboxFlightServer>(std::move(sql));
-		auto loc_res = arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
+		auto loc_res = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
 		Expect(loc_res.ok(), "flight listen location");
-		arrow::flight::FlightServerOptions fopt(*loc_res);
+		::arrow::flight::FlightServerOptions fopt(*loc_res);
 		fopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg);
 		auto st = server->Init(fopt);
 		Expect(st.ok(), "flight init");
@@ -244,13 +253,13 @@ void duckbox::test::RunAuthFlightTests() {
 		int port = server->port();
 		Expect(port > 0, "flight bound a port");
 
-		auto client_loc = arrow::flight::Location::ForGrpcTcp("127.0.0.1", port);
-		auto client_res = arrow::flight::FlightClient::Connect(*client_loc);
+		auto client_loc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", port);
+		auto client_res = ::arrow::flight::FlightClient::Connect(*client_loc);
 		Expect(client_res.ok(), "flight client connect");
-		auto raw_client = std::shared_ptr<arrow::flight::FlightClient>(std::move(client_res).ValueOrDie());
+		auto raw_client = std::shared_ptr<::arrow::flight::FlightClient>(std::move(client_res).ValueOrDie());
 
 		auto body = SpecBodyForAction(MemoryAnalystPath());
-		arrow::flight::FlightCallOptions opt;
+		::arrow::flight::FlightCallOptions opt;
 		opt.headers.emplace_back("x-duckbox-caller", "analyst-svc");
 
 		auto create_one = [&](const std::string &id, const std::string &key) {
@@ -452,7 +461,7 @@ void duckbox::test::RunAuthFlightTests() {
 			}
 		}
 
-		arrow::flight::sql::FlightSqlClient sql_client(raw_client);
+		::arrow::flight::sql::FlightSqlClient sql_client(raw_client);
 		auto qopt = opt;
 		qopt.headers.emplace_back("x-duckbox-sandbox", "flight-c");
 		{
@@ -497,8 +506,8 @@ void duckbox::test::RunAuthFlightTests() {
 					auto tbl = stream->ToTable();
 					Expect(tbl.ok() && (*tbl)->num_columns() >= 4, "GetTables ToTable");
 					if (tbl.ok() && (*tbl)->num_rows() > 0 && (*tbl)->column(2)->num_chunks() > 0) {
-						auto names = std::static_pointer_cast<arrow::StringArray>((*tbl)->column(2)->chunk(0));
-						auto types = std::static_pointer_cast<arrow::StringArray>((*tbl)->column(3)->chunk(0));
+						auto names = std::static_pointer_cast<::arrow::StringArray>((*tbl)->column(2)->chunk(0));
+						auto types = std::static_pointer_cast<::arrow::StringArray>((*tbl)->column(3)->chunk(0));
 						Expect((*tbl)->num_rows() == 1 && names->GetString(0) == "deals",
 						       "GetTables lists only the allowlisted table");
 						Expect(types->GetString(0) == "TABLE", "GetTables type is TABLE, not VIEW");
@@ -614,7 +623,7 @@ void duckbox::test::RunAuthFlightTests() {
 			       "DrainNode on the public listener is rejected");
 		}
 		{
-			arrow::flight::FlightCallOptions opopt;
+			::arrow::flight::FlightCallOptions opopt;
 			opopt.headers.emplace_back("x-duckbox-caller", "ops");
 			try {
 				(void)ActionBody(*raw_client, opopt, "DrainNode", "timeout_ms: 1\n");
@@ -631,8 +640,8 @@ void duckbox::test::RunAuthFlightTests() {
 		auto int_sql = std::make_unique<DuckboxFlightSqlServer>(cfg, defs, runtime, signer, rewriter,
 		                                                       ListenerPlane::Internal);
 		auto int_server = std::make_unique<DuckboxFlightServer>(std::move(int_sql));
-		auto int_loc_res = arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
-		arrow::flight::FlightServerOptions iopt(*int_loc_res);
+		auto int_loc_res = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
+		::arrow::flight::FlightServerOptions iopt(*int_loc_res);
 		iopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
 		Expect(int_server->Init(iopt).ok(), "internal flight init");
 		std::thread int_th([&] { (void)int_server->Serve(); });
@@ -641,13 +650,13 @@ void duckbox::test::RunAuthFlightTests() {
 		}
 		int iport = int_server->port();
 		Expect(iport > 0, "internal flight bound a port");
-		auto iclient_loc = arrow::flight::Location::ForGrpcTcp("127.0.0.1", iport);
-		auto iclient_res = arrow::flight::FlightClient::Connect(*iclient_loc);
+		auto iclient_loc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", iport);
+		auto iclient_res = ::arrow::flight::FlightClient::Connect(*iclient_loc);
 		Expect(iclient_res.ok(), "internal flight client connect");
-		auto iclient = std::shared_ptr<arrow::flight::FlightClient>(std::move(iclient_res).ValueOrDie());
+		auto iclient = std::shared_ptr<::arrow::flight::FlightClient>(std::move(iclient_res).ValueOrDie());
 
 		try {
-			arrow::flight::FlightCallOptions agent;
+			::arrow::flight::FlightCallOptions agent;
 			agent.headers.emplace_back("x-duckbox-caller", "analyst-svc");
 			(void)ActionBody(*iclient, agent, "DrainNode", "timeout_ms: 1\n");
 			g_failed++;
@@ -658,7 +667,7 @@ void duckbox::test::RunAuthFlightTests() {
 			       "DrainNode denies the authenticated agent identity");
 		}
 		{
-			arrow::flight::FlightCallOptions opopt;
+			::arrow::flight::FlightCallOptions opopt;
 			opopt.headers.emplace_back("x-duckbox-caller", "ops");
 			auto drained = ActionBody(*iclient, opopt, "DrainNode", "timeout_ms: 1\n");
 			Expect(drained.find("\"draining\":true") != std::string::npos, "DrainNode allows a listed operator");
@@ -680,7 +689,7 @@ void duckbox::test::RunAuthFlightTests() {
 			Expect(RunNodeDrain(bad) != 0, "drain CLI rejects a bad URL");
 		}
 		{
-			arrow::flight::FlightCallOptions none;
+			::arrow::flight::FlightCallOptions none;
 			try {
 				(void)ActionBody(*iclient, none, "CreateSandbox", body);
 				g_failed++;
@@ -692,37 +701,37 @@ void duckbox::test::RunAuthFlightTests() {
 			}
 		}
 		{
-			class SecretAuth : public arrow::flight::ClientAuthHandler {
+			class SecretAuth : public ::arrow::flight::ClientAuthHandler {
 			public:
 				explicit SecretAuth(std::string s) : s_(std::move(s)) {
 				}
-				arrow::Status Authenticate(arrow::flight::ClientAuthSender *o,
-				                           arrow::flight::ClientAuthReader *i) override {
+				::arrow::Status Authenticate(::arrow::flight::ClientAuthSender *o,
+				                           ::arrow::flight::ClientAuthReader *i) override {
 					ARROW_RETURN_NOT_OK(o->Write(s_));
 					std::string id;
 					return i->Read(&id);
 				}
-				arrow::Status GetToken(std::string *t) override {
+				::arrow::Status GetToken(std::string *t) override {
 					*t = s_;
-					return arrow::Status::OK();
+					return ::arrow::Status::OK();
 				}
 				std::string s_;
 			};
-			auto bad_loc = arrow::flight::Location::ForGrpcTcp("127.0.0.1", iport);
-			auto bad_cli = arrow::flight::FlightClient::Connect(*bad_loc);
+			auto bad_loc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", iport);
+			auto bad_cli = ::arrow::flight::FlightClient::Connect(*bad_loc);
 			Expect(bad_cli.ok(), "peer wrong-secret client connects");
 			auto bad = std::move(bad_cli).ValueOrDie();
 			auto auth_st = bad->Authenticate({}, std::make_unique<SecretAuth>("wrong-secret"));
 			Expect(!auth_st.ok(), "peer call with the wrong secret is rejected");
 			{
-				arrow::flight::sql::FlightSqlClient sql_int(iclient);
-				arrow::flight::FlightCallOptions qopt;
+				::arrow::flight::sql::FlightSqlClient sql_int(iclient);
+				::arrow::flight::FlightCallOptions qopt;
 				qopt.headers.emplace_back("x-duckbox-sandbox", "flight-c");
 				qopt.headers.emplace_back("x-duckbox-caller", "ops");
 				auto exec = sql_int.Execute(qopt, "SELECT 1");
 				Expect(!exec.ok(), "peer call without the peer secret is rejected");
 			}
-			auto good_cli = arrow::flight::FlightClient::Connect(*bad_loc);
+			auto good_cli = ::arrow::flight::FlightClient::Connect(*bad_loc);
 			auto good = std::move(good_cli).ValueOrDie();
 			auto good_st = good->Authenticate({}, std::make_unique<SecretAuth>("peer-secret-value"));
 			Expect(good_st.ok(), "peer call with the shared secret is accepted");

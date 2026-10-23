@@ -7,6 +7,7 @@
 
 namespace duckbox {
 namespace s3 {
+using namespace common;
 namespace {
 
 bool ValidEnvName(const std::string &s) {

@@ -6,6 +6,8 @@
 
 void duckbox::test::RunMetricsTests() {
 	using namespace duckbox;
+	using namespace duckbox::common;
+	using namespace duckbox::metrics;
 	MetricsRegistry reg("node-a", {"analyst"});
 	Expect(reg.PolicyLabel("analyst") == "analyst", "declared policy class is used");
 	Expect(reg.PolicyLabel("") == "other", "missing class falls back to other");

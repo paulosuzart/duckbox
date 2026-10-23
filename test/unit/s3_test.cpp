@@ -8,6 +8,8 @@
 
 void duckbox::test::RunS3ClientTests() {
 	using namespace duckbox;
+	using namespace duckbox::s3;
+	using namespace duckbox::node;
 
 	ExpectThrowContains([&] { MakeMemoryS3ControlClient(""); }, "bucket", "memory client requires a bucket");
 

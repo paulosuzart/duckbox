@@ -128,26 +128,4 @@ void AuthorizeOperator(const DaemonConfig &cfg, const std::string &identity);
 
 } // namespace node
 
-using node::AuthenticateCallerIdentity;
-using node::AuthMode;
-using node::AuthorizeCaller;
-using node::AuthorizeOperator;
-using node::BearerSecret;
-using node::CallerRule;
-using node::DaemonConfig;
-using node::DefaultDaemonConfig;
-using node::DefaultInternalListen;
-using node::FinalizeDaemonListen;
-using node::GlobMatch;
-using node::IsLoopbackHost;
-using node::kMinHandleSecretLen;
-using node::kMinPeerSecretLen;
-using node::kPeerIdentity;
-using node::LakeAllow;
-using node::LeaseSettings;
-using node::ListenerPlane;
-using node::LoadDaemonFile;
-using node::ParseListenAddress;
-using node::ValidateDaemonOrThrow;
-
 } // namespace duckbox

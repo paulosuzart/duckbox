@@ -8,6 +8,8 @@
 
 namespace duckbox {
 namespace rewriter {
+using namespace common;
+using namespace config;
 namespace {
 
 bool LooksNumeric(const std::string &s) {
@@ -120,48 +122,6 @@ std::string TenantKey::Var(const std::string &name) const {
     }
     return it->second;
 }
-
-} // namespace rewriter
-
-namespace config {
-
-std::vector<std::string> KeySpec::VariableNames() const {
-    std::vector<std::string> names;
-    auto add = [&](const std::string &n) {
-        if (n.empty()) {
-            return;
-        }
-        for (auto &e : names) {
-            if (e == n) {
-                return;
-            }
-        }
-        names.push_back(n);
-    };
-    for (auto &pat : patterns) {
-        for (size_t i = 0; i < pat.size(); i++) {
-            if (pat[i] == '{') {
-                auto end = pat.find('}', i);
-                if (end == std::string::npos) {
-                    break;
-                }
-                add(pat.substr(i + 1, end - i - 1));
-                i = end;
-            }
-        }
-    }
-    for (auto &n : regex_names) {
-        add(n);
-    }
-    for (auto &n : split_names) {
-        add(n);
-    }
-    return names;
-}
-
-} // namespace config
-
-namespace rewriter {
 
 TenantKey ParseTenantKey(const std::string &raw) {
     return FromDefault(raw);

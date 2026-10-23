@@ -11,7 +11,7 @@ bool HasCol(const std::string &text, const char *col) {
     return duckbox::ddb::StringUtil::Lower(text).find(col) != std::string::npos;
 }
 
-void ExpectTenant21Live(const duckbox::QueryOutput &out, const std::string &msg) {
+void ExpectTenant21Live(const duckbox::sandbox::QueryOutput &out, const std::string &msg) {
     duckbox::test::Expect(out.row_count == 1, msg + ": one live row");
     duckbox::test::Expect(HasCol(out.text_table, "alpha deal"), msg + ": sees alpha");
     duckbox::test::Expect(!HasCol(out.text_table, "bravo"), msg + ": no tenant 22");
@@ -19,7 +19,7 @@ void ExpectTenant21Live(const duckbox::QueryOutput &out, const std::string &msg)
     duckbox::test::Expect(!HasCol(out.text_table, "amount"), msg + ": amount hidden");
 }
 
-void ExpectTenant22Live(const duckbox::QueryOutput &out, const std::string &msg) {
+void ExpectTenant22Live(const duckbox::sandbox::QueryOutput &out, const std::string &msg) {
     duckbox::test::Expect(out.row_count == 2, msg + ": two live rows");
     duckbox::test::Expect(HasCol(out.text_table, "bravo"), msg + ": sees bravo");
     duckbox::test::Expect(!HasCol(out.text_table, "alpha"), msg + ": no tenant 21");
@@ -30,6 +30,8 @@ void ExpectTenant22Live(const duckbox::QueryOutput &out, const std::string &msg)
 
 void duckbox::test::RunCteExecTests() {
     using namespace duckbox;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::sandbox;
     auto daemon = TestDaemon();
     auto policy = TestPolicy();
     auto hidden = HiddenAmountPolicy();

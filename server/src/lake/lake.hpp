@@ -20,23 +20,15 @@ void ExecOrThrow(ddb::Connection &con, const std::string &sql);
 // Memory-lake seed only: CREATE TABLE / SCHEMA (including CTAS) and INSERT.
 // VIEW, INDEX, MACRO, FUNCTION, TYPE, ATTACH, and SET are rejected.
 void CheckBootstrapSql(const std::string &sql);
-void CheckBootstrapSql(const std::string &sql, const SandboxSpec &spec);
-void ConstrainLakeAgainstDaemon(const SandboxSpec &spec,
-                                const DaemonConfig &daemon); // lake_allow; PolicyError
+void CheckBootstrapSql(const std::string &sql, const config::SandboxSpec &spec);
+void ConstrainLakeAgainstDaemon(const config::SandboxSpec &spec,
+                                const node::DaemonConfig &daemon); // lake_allow; common::PolicyError
 // Resolved catalog DSN for attach. Never log the value.
-std::string ResolveLakeCatalog(const SandboxSpec &spec, const SecretResolver &secrets);
+std::string ResolveLakeCatalog(const config::SandboxSpec &spec, const s3::SecretResolver &secrets);
 // LOAD then INSTALL-on-miss. Does not disable external access (sandbox does after attach).
-void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std::string &spec_dir,
-                        const SecretResolver &secrets, const DaemonConfig &daemon = {});
+void AttachLakeFromSpec(ddb::Connection &con, const config::SandboxSpec &spec, const std::string &spec_dir,
+                        const s3::SecretResolver &secrets, const node::DaemonConfig &daemon = {});
 
 } // namespace lake
-
-using lake::EscapeSqlString;
-using lake::ResolvePath;
-using lake::ExecOrThrow;
-using lake::CheckBootstrapSql;
-using lake::ConstrainLakeAgainstDaemon;
-using lake::ResolveLakeCatalog;
-using lake::AttachLakeFromSpec;
 
 } // namespace duckbox

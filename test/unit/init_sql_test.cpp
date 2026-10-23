@@ -5,6 +5,7 @@
 
 void duckbox::test::RunInitSqlTests() {
     using namespace duckbox;
+    using namespace duckbox::lake;
     auto policy = TestPolicy();
 
     CheckBootstrapSql("CREATE TABLE t(i INTEGER)", policy);

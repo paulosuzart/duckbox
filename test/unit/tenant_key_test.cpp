@@ -5,6 +5,9 @@
 
 void duckbox::test::RunTenantKeyTests() {
 	using namespace duckbox;
+	using namespace duckbox::common;
+	using namespace duckbox::config;
+	using namespace duckbox::rewriter;
 	auto policy = TestPolicy();
 	auto key_a = ParseTenantKey("tenant_21:user_sergio", policy.key);
 	auto key_b = ParseTenantKey("tenant_22:user_kim", policy.key);

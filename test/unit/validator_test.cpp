@@ -10,6 +10,9 @@
 
 void duckbox::test::RunValidatorTests() {
     using namespace duckbox;
+    using namespace duckbox::common;
+    using namespace duckbox::config;
+    using namespace duckbox::lake;
     SpecValidator validator;
     auto loaded = LoadPolicyFile(MemoryAnalystPath());
     Expect(validator.ValidateStatic(loaded).empty(), "memory analyst spec is statically valid");

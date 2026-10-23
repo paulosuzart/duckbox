@@ -26,7 +26,7 @@
 namespace {
 
 std::string SpecBodyHiddenAmount() {
-    auto spec = duckbox::LoadSpecFile(duckbox::test::MemoryAnalystPath());
+    auto spec = duckbox::config::LoadSpecFile(duckbox::test::MemoryAnalystPath());
     auto body = spec.yaml_body;
     const std::string amount_line = "      - amount\n";
     auto pos = body.find(amount_line);
@@ -45,12 +45,12 @@ std::string SpecBodyHiddenAmount() {
     return body;
 }
 
-std::string ActionBody(arrow::flight::FlightClient &client,
-                       const arrow::flight::FlightCallOptions &opt, const std::string &type,
+std::string ActionBody(::arrow::flight::FlightClient &client,
+                       const ::arrow::flight::FlightCallOptions &opt, const std::string &type,
                        const std::string &body) {
-    arrow::flight::Action action;
+    ::arrow::flight::Action action;
     action.type = type;
-    action.body = arrow::Buffer::FromString(body);
+    action.body = ::arrow::Buffer::FromString(body);
     auto stream_res = client.DoAction(opt, action);
     if (!stream_res.ok()) {
         throw std::runtime_error(stream_res.status().ToString());
@@ -74,9 +74,9 @@ std::string ActionBody(arrow::flight::FlightClient &client,
     return out;
 }
 
-std::shared_ptr<arrow::Table> FetchSql(arrow::flight::sql::FlightSqlClient &sql,
-                                       arrow::flight::FlightClient &raw,
-                                       const arrow::flight::FlightCallOptions &opt,
+std::shared_ptr<::arrow::Table> FetchSql(::arrow::flight::sql::FlightSqlClient &sql,
+                                       ::arrow::flight::FlightClient &raw,
+                                       const ::arrow::flight::FlightCallOptions &opt,
                                        const std::string &sql_text) {
     auto info_res = sql.Execute(opt, sql_text);
     if (!info_res.ok()) {
@@ -98,24 +98,24 @@ std::shared_ptr<arrow::Table> FetchSql(arrow::flight::sql::FlightSqlClient &sql,
     return *tbl;
 }
 
-bool TableHasColumn(const arrow::Table &tbl, const std::string &name) {
+bool TableHasColumn(const ::arrow::Table &tbl, const std::string &name) {
     return tbl.schema()->GetFieldIndex(name) >= 0;
 }
 
-int64_t ArrayIntAt(const std::shared_ptr<arrow::Array> &arr, int64_t i) {
-    if (arr->type_id() == arrow::Type::INT32) {
-        return std::static_pointer_cast<arrow::Int32Array>(arr)->Value(i);
+int64_t ArrayIntAt(const std::shared_ptr<::arrow::Array> &arr, int64_t i) {
+    if (arr->type_id() == ::arrow::Type::INT32) {
+        return std::static_pointer_cast<::arrow::Int32Array>(arr)->Value(i);
     }
-    if (arr->type_id() == arrow::Type::INT64) {
-        return std::static_pointer_cast<arrow::Int64Array>(arr)->Value(i);
+    if (arr->type_id() == ::arrow::Type::INT64) {
+        return std::static_pointer_cast<::arrow::Int64Array>(arr)->Value(i);
     }
-    if (arr->type_id() == arrow::Type::INT16) {
-        return std::static_pointer_cast<arrow::Int16Array>(arr)->Value(i);
+    if (arr->type_id() == ::arrow::Type::INT16) {
+        return std::static_pointer_cast<::arrow::Int16Array>(arr)->Value(i);
     }
     throw std::runtime_error("unexpected tenant_id arrow type");
 }
 
-bool EveryRowTenant(const arrow::Table &tbl, int64_t tenant) {
+bool EveryRowTenant(const ::arrow::Table &tbl, int64_t tenant) {
     auto idx = tbl.schema()->GetFieldIndex("tenant_id");
     if (idx < 0) {
         return false;
@@ -138,6 +138,13 @@ bool EveryRowTenant(const arrow::Table &tbl, int64_t tenant) {
 
 void duckbox::test::RunCteFlightTests() {
     using namespace duckbox;
+    using namespace duckbox::node;
+    using namespace duckbox::config;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::cluster;
+    using namespace duckbox::arrow;
+    using namespace duckbox::sandbox;
+    using namespace duckbox::flight;
     auto daemon = TestDaemon();
     DaemonConfig cfg = daemon;
     cfg.listen = "127.0.0.1:0";
@@ -149,9 +156,9 @@ void duckbox::test::RunCteFlightTests() {
     auto rewriter = std::make_shared<SqlRewriter>();
     auto sql = std::make_unique<DuckboxFlightSqlServer>(cfg, defs, runtime, signer, rewriter);
     auto server = std::make_unique<DuckboxFlightServer>(std::move(sql));
-    auto loc_res = arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
+    auto loc_res = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
     Expect(loc_res.ok(), "cte flight listen location");
-    arrow::flight::FlightServerOptions fopt(*loc_res);
+    ::arrow::flight::FlightServerOptions fopt(*loc_res);
     fopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg);
     auto st = server->Init(fopt);
     Expect(st.ok(), "cte flight init");
@@ -162,15 +169,15 @@ void duckbox::test::RunCteFlightTests() {
     int port = server->port();
     Expect(port > 0, "cte flight bound a port");
 
-    auto client_loc = arrow::flight::Location::ForGrpcTcp("127.0.0.1", port);
-    auto client_res = arrow::flight::FlightClient::Connect(*client_loc);
+    auto client_loc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", port);
+    auto client_res = ::arrow::flight::FlightClient::Connect(*client_loc);
     Expect(client_res.ok(), "cte flight client connect");
     auto raw_client =
-        std::shared_ptr<arrow::flight::FlightClient>(std::move(client_res).ValueOrDie());
+        std::shared_ptr<::arrow::flight::FlightClient>(std::move(client_res).ValueOrDie());
 
     auto body = SpecBodyHiddenAmount();
     Expect(body.find("- amount") == std::string::npos, "hidden-amount spec omits amount");
-    arrow::flight::FlightCallOptions opt;
+    ::arrow::flight::FlightCallOptions opt;
     opt.headers.emplace_back("x-duckbox-caller", "analyst-svc");
 
     auto create_one = [&](const std::string &id, const std::string &key) {
@@ -185,7 +192,7 @@ void duckbox::test::RunCteFlightTests() {
     Expect(create_one("cte-hide-22", "tenant_22:user_kim").find("cte-hide-22") != std::string::npos,
            "create hidden-amount sandbox tenant 22");
 
-    arrow::flight::sql::FlightSqlClient sql_client(raw_client);
+    ::arrow::flight::sql::FlightSqlClient sql_client(raw_client);
     auto q21 = opt;
     q21.headers.emplace_back("x-duckbox-sandbox", "cte-hide-21");
     auto q22 = opt;
@@ -247,12 +254,12 @@ void duckbox::test::RunCteFlightTests() {
         Expect(prep.ok(), "Flight Prepare of parameterized self-reference");
         if (prep.ok()) {
             auto ps = std::move(prep).ValueOrDie();
-            arrow::Int32Builder b;
+            ::arrow::Int32Builder b;
             Expect(b.Append(1).ok(), "bind id=1");
-            std::shared_ptr<arrow::Array> arr;
+            std::shared_ptr<::arrow::Array> arr;
             Expect(b.Finish(&arr).ok(), "finish bind batch");
-            auto schema = arrow::schema({arrow::field("$1", arrow::int32())});
-            auto batch = arrow::RecordBatch::Make(schema, 1, {arr});
+            auto schema = ::arrow::schema({::arrow::field("$1", ::arrow::int32())});
+            auto batch = ::arrow::RecordBatch::Make(schema, 1, {arr});
             Expect(ps->SetParameters(batch).ok(), "Flight SetParameters id=1");
             auto ex = ps->Execute(q21);
             Expect(ex.ok(), "Flight prepared Execute of self-reference");

@@ -13,6 +13,10 @@
 
 void duckbox::test::RunLeaseTests() {
 	using namespace duckbox;
+	using namespace duckbox::common;
+	using namespace duckbox::s3;
+	using namespace duckbox::metrics;
+	using namespace duckbox::cluster;
 
 	{
 		SingleNodeLeaseManager local;

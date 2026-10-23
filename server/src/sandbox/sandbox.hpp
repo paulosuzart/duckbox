@@ -7,7 +7,7 @@
 
 #include "node/daemon_config.hpp"
 #include "common/duckdb_layer.hpp"
-#include "cluster/lease.hpp"
+#include "arrow/arrow_types.hpp"
 #include "config/policy.hpp"
 #include "sandbox/sandbox_registry.hpp"
 #include "s3/secrets.hpp"
@@ -25,6 +25,12 @@
 #include <vector>
 
 namespace duckbox {
+namespace cluster {
+class ILeaseManager;
+class IRouter;
+class S3NodeDirectory;
+class Clock;
+}
 namespace sandbox {
 
 // One query result. arrow_ipc is produced from the same materialized result as text_table (query
@@ -35,19 +41,14 @@ struct QueryOutput {
     int64_t row_count = 0;
 };
 
-struct ColumnSchema {
-    std::string name;
-    std::string logical_type;
-};
-
 // One warm DuckDB for id@version. Execute / ExecuteRewritten / ExtractPlan /
 // DescribeRewritten take mu_ for the whole statement so Flight DoGet and
 // Execute on the same instance cannot interleave.
 class TenantSandbox {
   public:
-    TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key, std::string spec_dir,
+    TenantSandbox(node::DaemonConfig daemon, config::Policy policy, rewriter::TenantKey key, std::string spec_dir,
                   std::string sandbox_id = "", int version = 0,
-                  std::shared_ptr<SecretResolver> secrets = {});
+                  std::shared_ptr<s3::SecretResolver> secrets = {});
     ~TenantSandbox();
 
     void Warmup(bool validate_lake); // attach lake, then disable external access +
@@ -62,15 +63,15 @@ class TenantSandbox {
     QueryOutput ExecuteRewritten(
         const std::string &sql,
         std::vector<ddb::Value> params); // re-rewrites handle SQL (projection + filters + AST)
-    std::vector<ColumnSchema> DescribeRewritten(const std::string &sql);
+    std::vector<arrow::ColumnSchema> DescribeRewritten(const std::string &sql);
     // Same converter + client properties as Execute / DoGet batches.
-    std::shared_ptr<arrow::Schema> DescribeRewrittenArrow(const std::string &sql);
+    std::shared_ptr<::arrow::Schema> DescribeRewrittenArrow(const std::string &sql);
     ddb::unique_ptr<ddb::LogicalOperator>
     ExtractPlan(const std::string &sql); // tests: real bound plans
 
-    const Policy &GetPolicy() const { return policy_; }
-    Policy &GetPolicyMut() { return policy_; }
-    const TenantKey &GetKey() const { return key_; }
+    const config::Policy &GetPolicy() const { return policy_; }
+    config::Policy &GetPolicyMut() { return policy_; }
+    const rewriter::TenantKey &GetKey() const { return key_; }
     const std::string &SandboxId() const { return sandbox_id_; }
     int Version() const { return version_; }
     int warmup_count() const { return warmup_count_; }
@@ -85,13 +86,13 @@ class TenantSandbox {
     // catalog transaction aborted (next query would be a cheap DoS).
     void RecoverAfterFailure();
 
-    DaemonConfig daemon_;
-    Policy policy_;
-    TenantKey key_;
+    node::DaemonConfig daemon_;
+    config::Policy policy_;
+    rewriter::TenantKey key_;
     std::string spec_dir_;
     std::string sandbox_id_;
     int version_ = 0;
-    std::shared_ptr<SecretResolver> secrets_;
+    std::shared_ptr<s3::SecretResolver> secrets_;
     std::unique_ptr<ddb::DuckDB> db_;
     std::unique_ptr<ddb::Connection> con_;
     std::mutex interrupt_mu_; // Interrupt vs Passivate; not held during Execute
@@ -128,18 +129,18 @@ struct SandboxListFilter {
 // Process-local map of id@version → TenantSandbox. Evicts idle instances.
 class SandboxRuntime {
   public:
-    SandboxRuntime(DaemonConfig daemon, std::shared_ptr<ILeaseManager> leases,
-                   std::shared_ptr<SandboxRegistry> defs, std::shared_ptr<IRouter> router = nullptr,
-                   std::shared_ptr<SecretResolver> secrets = {});
+    SandboxRuntime(node::DaemonConfig daemon, std::shared_ptr<cluster::ILeaseManager> leases,
+                   std::shared_ptr<SandboxRegistry> defs, std::shared_ptr<cluster::IRouter> router = nullptr,
+                   std::shared_ptr<s3::SecretResolver> secrets = {});
 
     std::shared_ptr<TenantSandbox>
     Get(const SandboxRecord &rec); // warms on miss; respects max_sandboxes
     // keep_from_version >= 0 keeps id@v for v >= that (N-1 during stale-handle grace).
     void PassivateId(const std::string &id, const char *reason = "update",
                      int keep_from_version = -1);
-    void SetNodeDirectory(std::shared_ptr<S3NodeDirectory> nodes);
-    void SetClock(std::shared_ptr<Clock> clock);
-    void SetFenceHook(std::function<void(const std::string &)> hook); // tests; production SelfFence
+    void SetNodeDirectory(std::shared_ptr<cluster::S3NodeDirectory> nodes);
+    void SetClock(std::shared_ptr<cluster::Clock> clock);
+    void SetFenceHook(std::function<void(const std::string &)> hook); // tests; production cluster::SelfFence
     void Drain(int64_t timeout_ms = 0); // stop new leases, wait inflight, release, persist draining
     // Node-lease renew at ~1/3 TTL. Failed renew retries until published expiry;
     // then (or on missing/mismatch record) fences: stop sandboxes, fail inflight, exit.
@@ -148,7 +149,7 @@ class SandboxRuntime {
     bool Serving() const;
     bool fenced() const { return fenced_.load(); }
     const std::string &fence_reason() const { return fence_reason_; }
-    std::shared_ptr<ILeaseManager> Leases() const { return leases_; }
+    std::shared_ptr<cluster::ILeaseManager> Leases() const { return leases_; }
     size_t Size() const;
     size_t WarmCount() const;
     // Idle-passivate instances and report per-id state for ListSandboxes.
@@ -158,7 +159,7 @@ class SandboxRuntime {
     std::vector<SandboxSummary> Summarize(const std::vector<SandboxRecord> &recs,
                                           const SandboxListFilter &filter) const;
     std::string NodeName() const { return daemon_.name; }
-    std::shared_ptr<S3NodeDirectory> Nodes() const { return nodes_; }
+    std::shared_ptr<cluster::S3NodeDirectory> Nodes() const { return nodes_; }
     int Inflight() const { return inflight_.load(); }
     void BeginRequest();
     void EndRequest();
@@ -181,16 +182,16 @@ class SandboxRuntime {
     void PublishResidentLocked();
     const TenantSandbox *FindIdLocked(const std::string &id) const;
     void InterruptId(const std::string &id);
-    void Fence(const std::string &reason); // writes nothing; then fence hook / SelfFence
+    void Fence(const std::string &reason); // writes nothing; then fence hook / cluster::SelfFence
     int64_t NowMs() const;
 
-    DaemonConfig daemon_;
-    std::shared_ptr<ILeaseManager> leases_;
+    node::DaemonConfig daemon_;
+    std::shared_ptr<cluster::ILeaseManager> leases_;
     std::shared_ptr<SandboxRegistry> defs_;
-    std::shared_ptr<IRouter> router_;
-    std::shared_ptr<SecretResolver> secrets_;
-    std::shared_ptr<S3NodeDirectory> nodes_;
-    std::shared_ptr<Clock> clock_;
+    std::shared_ptr<cluster::IRouter> router_;
+    std::shared_ptr<s3::SecretResolver> secrets_;
+    std::shared_ptr<cluster::S3NodeDirectory> nodes_;
+    std::shared_ptr<cluster::Clock> clock_;
     std::function<void(const std::string &)> fence_hook_;
     std::atomic<bool> fenced_{false};
     std::atomic<int> inflight_{0};
@@ -202,18 +203,9 @@ class SandboxRuntime {
 };
 
 // Spec idle_timeout if set, else daemon default; clamped to daemon max (if any).
-int64_t EffectiveIdleTimeoutMs(const DaemonConfig &daemon, const SandboxSpec &spec);
+int64_t EffectiveIdleTimeoutMs(const node::DaemonConfig &daemon, const config::SandboxSpec &spec);
 std::string SandboxSummaryJson(const SandboxSummary &s); // ListSandboxes item; no spec_yaml
 
 } // namespace sandbox
-
-using sandbox::QueryOutput;
-using sandbox::ColumnSchema;
-using sandbox::TenantSandbox;
-using sandbox::SandboxSummary;
-using sandbox::SandboxListFilter;
-using sandbox::SandboxRuntime;
-using sandbox::EffectiveIdleTimeoutMs;
-using sandbox::SandboxSummaryJson;
 
 } // namespace duckbox

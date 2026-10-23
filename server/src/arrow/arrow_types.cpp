@@ -1,4 +1,4 @@
-#include "sandbox/arrow_types.hpp"
+#include "arrow/arrow_types.hpp"
 #include "common/error.hpp"
 
 #include <arrow/c/bridge.h>
@@ -8,7 +8,8 @@
 #include <mutex>
 
 namespace duckbox {
-namespace sandbox {
+namespace arrow {
+using namespace common;
 namespace {
 
 ddb::string TrimSpaces(const std::string &s) {
@@ -152,11 +153,11 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     return parsed;
 }
 
-std::shared_ptr<arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::string> &names,
+std::shared_ptr<::arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::string> &names,
                                                       const std::vector<ddb::LogicalType> &types,
                                                       ddb::ClientProperties opts) {
     if (names.empty() || types.empty()) {
-        return arrow::schema({arrow::field("_empty", arrow::null())});
+        return ::arrow::schema({::arrow::field("_empty", ::arrow::null())});
     }
     ddb::vector<ddb::LogicalType> dtypes;
     ddb::vector<ddb::string> dnames;
@@ -176,23 +177,23 @@ std::shared_ptr<arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::str
     } else {
         ddb::ArrowConverter::ToArrowSchema(&c_schema, dtypes, dnames, opts);
     }
-    auto schema_res = arrow::ImportSchema(&c_schema);
+    auto schema_res = ::arrow::ImportSchema(&c_schema);
     if (!schema_res.ok()) {
         throw Error("arrow schema import failed: " + schema_res.status().ToString());
     }
     return *schema_res;
 }
 
-std::shared_ptr<arrow::DataType> MapLogicalType(const ddb::LogicalType &type,
+std::shared_ptr<::arrow::DataType> MapLogicalType(const ddb::LogicalType &type,
                                                 ddb::ClientProperties opts) {
     return SchemaFromLogicalTypes({"col"}, {type}, std::move(opts))->field(0)->type();
 }
 
-std::shared_ptr<arrow::DataType> MapTypeName(const std::string &logical_type) {
+std::shared_ptr<::arrow::DataType> MapTypeName(const std::string &logical_type) {
     return MapLogicalType(LogicalTypeFromName(logical_type), DefaultArrowClientProperties());
 }
 
-std::shared_ptr<arrow::Schema> SchemaFromCols(const std::vector<ColumnSchema> &cols) {
+std::shared_ptr<::arrow::Schema> SchemaFromCols(const std::vector<ColumnSchema> &cols) {
     std::vector<std::string> names;
     std::vector<ddb::LogicalType> types;
     names.reserve(cols.size());
@@ -204,6 +205,6 @@ std::shared_ptr<arrow::Schema> SchemaFromCols(const std::vector<ColumnSchema> &c
     return SchemaFromLogicalTypes(names, types, DefaultArrowClientProperties());
 }
 
-} // namespace sandbox
+} // namespace arrow
 
 } // namespace duckbox

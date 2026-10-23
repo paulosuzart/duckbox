@@ -52,8 +52,4 @@ private:
 
 } // namespace flight
 
-using flight::StatementHandle;
-using flight::IHandleSigner;
-using flight::HmacHandleSigner;
-
 } // namespace duckbox

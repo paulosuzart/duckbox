@@ -262,8 +262,8 @@ set(DUCKBOX_SOURCES
   server/src/cluster/lease.cpp
   server/src/sandbox/sandbox.cpp
   server/src/sandbox/sandbox_registry.cpp
-  server/src/sandbox/arrow_ipc.cpp
-  server/src/sandbox/arrow_types.cpp
+  server/src/arrow/arrow_ipc.cpp
+  server/src/arrow/arrow_types.cpp
   server/src/flight/auth.cpp
   server/src/flight/handle.cpp
   server/src/flight/flight_sql_server.cpp
