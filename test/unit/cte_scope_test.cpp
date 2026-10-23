@@ -59,17 +59,8 @@ void ExpectHiddenAmount(const std::string &rw, const std::string &msg) {
 
 void duckbox::test::RunCteChainedTests() {
     using namespace duckbox;
-    using namespace duckbox::common;
-    using namespace duckbox::s3;
-    using namespace duckbox::node;
     using namespace duckbox::config;
     using namespace duckbox::rewriter;
-    using namespace duckbox::lake;
-    using namespace duckbox::metrics;
-    using namespace duckbox::cluster;
-    using namespace duckbox::arrow;
-    using namespace duckbox::sandbox;
-    using namespace duckbox::flight;
     auto policy = PolicyUnderTest();
     auto hidden = HiddenPolicy();
     auto key_a = Tenant21(policy);
@@ -91,17 +82,8 @@ void duckbox::test::RunCteChainedTests() {
 
 void duckbox::test::RunCteRecursiveTests() {
     using namespace duckbox;
-    using namespace duckbox::common;
-    using namespace duckbox::s3;
-    using namespace duckbox::node;
     using namespace duckbox::config;
     using namespace duckbox::rewriter;
-    using namespace duckbox::lake;
-    using namespace duckbox::metrics;
-    using namespace duckbox::cluster;
-    using namespace duckbox::arrow;
-    using namespace duckbox::sandbox;
-    using namespace duckbox::flight;
     auto policy = PolicyUnderTest();
     auto hidden = HiddenPolicy();
     auto key_a = Tenant21(policy);
@@ -130,17 +112,8 @@ void duckbox::test::RunCteRecursiveTests() {
 
 void duckbox::test::RunCteShadowTests() {
     using namespace duckbox;
-    using namespace duckbox::common;
-    using namespace duckbox::s3;
-    using namespace duckbox::node;
     using namespace duckbox::config;
     using namespace duckbox::rewriter;
-    using namespace duckbox::lake;
-    using namespace duckbox::metrics;
-    using namespace duckbox::cluster;
-    using namespace duckbox::arrow;
-    using namespace duckbox::sandbox;
-    using namespace duckbox::flight;
     auto hidden = HiddenPolicy();
     auto key_a = Tenant21(hidden);
 
@@ -179,17 +152,8 @@ void duckbox::test::RunCteShadowTests() {
 
 void duckbox::test::RunCteRewriteTests() {
     using namespace duckbox;
-    using namespace duckbox::common;
-    using namespace duckbox::s3;
-    using namespace duckbox::node;
     using namespace duckbox::config;
     using namespace duckbox::rewriter;
-    using namespace duckbox::lake;
-    using namespace duckbox::metrics;
-    using namespace duckbox::cluster;
-    using namespace duckbox::arrow;
-    using namespace duckbox::sandbox;
-    using namespace duckbox::flight;
     auto policy = PolicyUnderTest();
     auto hidden = HiddenPolicy();
     auto key_a = Tenant21(policy);

@@ -196,13 +196,9 @@ std::shared_ptr<::arrow::Schema> IncludedTableSchema(::arrow::flight::sql::Fligh
 
 void duckbox::test::RunFlightSchemaTests() {
     using namespace duckbox;
-    using namespace duckbox::common;
-    using namespace duckbox::s3;
     using namespace duckbox::node;
     using namespace duckbox::config;
     using namespace duckbox::rewriter;
-    using namespace duckbox::lake;
-    using namespace duckbox::metrics;
     using namespace duckbox::cluster;
     using namespace duckbox::arrow;
     using namespace duckbox::sandbox;

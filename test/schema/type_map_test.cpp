@@ -68,17 +68,9 @@ void ExpectSchemaMatch(const std::shared_ptr<::arrow::Schema> &advertised,
 
 void duckbox::test::RunArrowTypeMapTests() {
     using namespace duckbox;
-    using namespace duckbox::common;
-    using namespace duckbox::s3;
-    using namespace duckbox::node;
-    using namespace duckbox::config;
     using namespace duckbox::rewriter;
-    using namespace duckbox::lake;
-    using namespace duckbox::metrics;
-    using namespace duckbox::cluster;
     using namespace duckbox::arrow;
     using namespace duckbox::sandbox;
-    using namespace duckbox::flight;
 
     ExpectTypeId("TINYINT", ::arrow::Type::INT8, "TINYINT is int8");
     ExpectTypeId("SMALLINT", ::arrow::Type::INT16, "SMALLINT is int16");

@@ -27,7 +27,6 @@ void duckbox::test::RunClusterTests() {
 	using namespace duckbox::node;
 	using namespace duckbox::config;
 	using namespace duckbox::rewriter;
-	using namespace duckbox::lake;
 	using namespace duckbox::metrics;
 	using namespace duckbox::cluster;
 	using namespace duckbox::arrow;

@@ -1,5 +1,4 @@
 #include "sandbox/sandbox_registry.hpp"
-#include "common/crypto.hpp"
 #include "common/json.hpp"
 #include "config/spec_validator.hpp"
 

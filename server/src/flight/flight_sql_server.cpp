@@ -3,7 +3,6 @@
 #include "cluster/lease.hpp"
 #include "flight/auth.hpp"
 #include "common/json.hpp"
-#include "lake/lake.hpp"
 #include "metrics/metrics.hpp"
 #include "s3/secrets.hpp"
 #include "config/spec_validator.hpp"
@@ -41,7 +40,6 @@ namespace duckbox {
 namespace flight {
 using namespace cluster;
 using namespace common;
-using namespace lake;
 using namespace metrics;
 using namespace s3;
 using namespace config;

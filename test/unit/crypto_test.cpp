@@ -20,16 +20,6 @@ std::string MkJwt(const std::string &secret, const std::string &header_json, con
 void duckbox::test::RunCryptoTests() {
 	using namespace duckbox;
 	using namespace duckbox::common;
-	using namespace duckbox::s3;
-	using namespace duckbox::node;
-	using namespace duckbox::config;
-	using namespace duckbox::rewriter;
-	using namespace duckbox::lake;
-	using namespace duckbox::metrics;
-	using namespace duckbox::cluster;
-	using namespace duckbox::arrow;
-	using namespace duckbox::sandbox;
-	using namespace duckbox::flight;
 	const std::string secret = "jwt-hs256-secret";
 	auto now = static_cast<int64_t>(std::time(nullptr));
 

@@ -1,7 +1,5 @@
 #include "check.hpp"
 
-#include "common/crypto.hpp"
-
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -10,7 +8,6 @@
 
 namespace duckbox {
 namespace test {
-using namespace common;
 using namespace config;
 using namespace node;
 

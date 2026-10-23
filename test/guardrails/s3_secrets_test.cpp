@@ -23,17 +23,8 @@ void ExpectDenied(duckbox::sandbox::TenantSandbox &box, const std::string &sql, 
 
 int main() {
     using namespace duckbox;
-    using namespace duckbox::common;
-    using namespace duckbox::s3;
-    using namespace duckbox::node;
-    using namespace duckbox::config;
     using namespace duckbox::rewriter;
-    using namespace duckbox::lake;
-    using namespace duckbox::metrics;
-    using namespace duckbox::cluster;
-    using namespace duckbox::arrow;
     using namespace duckbox::sandbox;
-    using namespace duckbox::flight;
     auto daemon = TestDaemon();
     auto policy = TestPolicy();
     auto key = ParseTenantKey("tenant_21:user_sergio", policy.key);

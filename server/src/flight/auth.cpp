@@ -1,12 +1,9 @@
 #include "flight/auth.hpp"
-#include "common/crypto.hpp"
 #include "common/error.hpp"
-#include "node/daemon_config.hpp"
 
 namespace duckbox {
 namespace flight {
 using namespace common;
-using namespace node;
 using namespace config;
 using namespace rewriter;
 

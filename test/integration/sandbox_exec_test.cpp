@@ -20,7 +20,6 @@
 
 void duckbox::test::RunSandboxExecTests() {
     using namespace duckbox;
-    using namespace duckbox::common;
     using namespace duckbox::s3;
     using namespace duckbox::node;
     using namespace duckbox::config;

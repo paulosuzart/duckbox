@@ -63,13 +63,7 @@ int main() {
     using namespace duckbox::s3;
     using namespace duckbox::node;
     using namespace duckbox::config;
-    using namespace duckbox::rewriter;
     using namespace duckbox::lake;
-    using namespace duckbox::metrics;
-    using namespace duckbox::cluster;
-    using namespace duckbox::arrow;
-    using namespace duckbox::sandbox;
-    using namespace duckbox::flight;
 
     const char *static_s3 =
         "    endpoint: \"127.0.0.1:9000\"\n    url_style: path\n    use_ssl: false\n"

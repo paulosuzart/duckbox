@@ -4,7 +4,6 @@
 #include "node/daemon_config.hpp"
 #include "common/error.hpp"
 #include "common/json.hpp"
-#include "config/spec_validator.hpp"
 
 #include "httplib.h"
 
@@ -14,9 +13,7 @@ namespace duckbox {
 namespace flight {
 using namespace node;
 using namespace common;
-using namespace config;
 using namespace sandbox;
-using namespace cluster;
 namespace {
 
 std::string JsonGetString(const std::string &body, const std::string &key) {
