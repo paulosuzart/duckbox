@@ -10,6 +10,7 @@
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
+#include <aws/core/auth/SSOCredentialsProvider.h>
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/utils/memory/stl/AWSStringStream.h>
 #include <aws/s3/S3Client.h>
@@ -99,6 +100,16 @@ LeaseStaticKeys ResolveLeaseStaticKeys(const LeaseSettings &lease) {
     return out;
 }
 
+// Named profile: ProfileConfigFile then SSO. Same items as DuckDB CHAIN config;sso.
+class ProfileAndSsoCredentialChain final : public Aws::Auth::AWSCredentialsProviderChain {
+  public:
+    explicit ProfileAndSsoCredentialChain(const char *profile) {
+        AddProvider(Aws::MakeShared<Aws::Auth::ProfileConfigFileAWSCredentialsProvider>(
+            "duckbox-lease", profile));
+        AddProvider(Aws::MakeShared<Aws::Auth::SSOCredentialsProvider>("duckbox-lease", profile));
+    }
+};
+
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider>
 MakeLeaseCredentialsProvider(const LeaseSettings &lease, const Endpoint &ep) {
     auto kind = ClassifyLeaseAuth(lease);
@@ -111,7 +122,7 @@ MakeLeaseCredentialsProvider(const LeaseSettings &lease, const Endpoint &ep) {
         sts_cfg.scheme = ep.https ? Aws::Http::Scheme::HTTPS : Aws::Http::Scheme::HTTP;
         sts_cfg.verifySSL = ep.https;
         sts_cfg.disableIMDS = true;
-        // MinIO STS shares the S3 listener. Real AWS STS is sts.<region>.amazonaws.com
+        // RustFS STS shares the S3 listener. Real AWS STS is sts.<region>.amazonaws.com
         // — never the lake/control-plane S3 hostname.
         if ((!lease.endpoint.empty() || !lease.endpoint_env.empty()) && !IsAwsS3Hostname(ep.host)) {
             sts_cfg.endpointOverride = ep.host + ":" + std::to_string(ep.port);
@@ -126,12 +137,15 @@ MakeLeaseCredentialsProvider(const LeaseSettings &lease, const Endpoint &ep) {
 #endif
     }
     if (kind == LeaseAuthKind::Profile) {
-        return Aws::MakeShared<Aws::Auth::ProfileConfigFileAWSCredentialsProvider>(
-            "duckbox-lease", lease.profile.c_str());
+        // Same coverage as DuckDB CHAIN config;sso (SSO profiles need the sso item).
+        return Aws::MakeShared<ProfileAndSsoCredentialChain>("duckbox-lease",
+                                                             lease.profile.c_str());
     }
     if (kind == LeaseAuthKind::DefaultChain) {
-        // Includes Environment, profile, process, STS web identity (IRSA:
-        // AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN), SSO, and instance profile.
+        // This SDK's DefaultAWSCredentialsProviderChain (header): env, profile,
+        // process, STS web identity (IRSA), SSO — same order/coverage as DuckDB
+        // CHAIN env;config;process;web_identity;sso. Instance/IMDS is not in
+        // either chain and is also disabled process-wide below.
         return Aws::MakeShared<Aws::Auth::DefaultAWSCredentialsProviderChain>("duckbox-lease");
     }
     return nullptr;
@@ -141,6 +155,9 @@ void EnsureAwsApi() {
     struct Guard {
         Aws::SDKOptions options;
         Guard() {
+            // Lease S3 client: skip IMDS hangs on developer machines. This is
+            // process-wide, so DuckDB's aws extension cannot use instance
+            // profiles either. IMDS/k8s tuning is out of scope (not supported).
             setenv("AWS_EC2_METADATA_DISABLED", "true", 1);
             setenv("AWS_REQUEST_CHECKSUM_CALCULATION", "WHEN_REQUIRED", 1);
             setenv("AWS_RESPONSE_CHECKSUM_VALIDATION", "WHEN_REQUIRED", 1);
@@ -292,7 +309,7 @@ class AwsS3ControlClient final : public S3ControlClient {
         cfg.connectTimeoutMs = 3000;
         cfg.requestTimeoutMs = 10000;
         cfg.disableIMDS = true;
-        cfg.useVirtualAddressing = false; // path-style for RustFS / MinIO
+        cfg.useVirtualAddressing = false; // path-style for RustFS
         cfg.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Always;
         cfg.checksumConfig.requestChecksumCalculation =
             Aws::Client::RequestChecksumCalculation::WHEN_REQUIRED;

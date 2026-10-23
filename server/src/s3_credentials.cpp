@@ -30,15 +30,12 @@ bool HasAwsExtension(const std::vector<std::string> &extensions) {
 }
 
 void RequireListed(const std::vector<std::string> &allow, const std::string &value,
-                   const std::string &field, const std::string &list_name, bool insecure,
+                   const std::string &field, const std::string &list_name,
                    std::vector<SpecIssue> &issues) {
     if (value.empty()) {
         return;
     }
     if (allow.empty()) {
-        if (insecure) {
-            return;
-        }
         issues.push_back({field, "daemon " + list_name + " is required (fail closed)"});
         return;
     }
@@ -93,7 +90,7 @@ bool ValidAwsProfileName(const std::string &profile) {
 }
 
 bool ValidIamRoleArn(const std::string &arn) {
-    // arn:aws:iam::123456789012:role/name  (also aws-us-gov / aws-cn)
+    // arn:aws:iam::123456789012:role/name  (aws / aws-cn / aws-us-gov, 12-digit account)
     if (arn.size() < 20 || arn.size() > 2048) {
         return false;
     }
@@ -110,7 +107,7 @@ bool ValidIamRoleArn(const std::string &arn) {
         return false;
     }
     auto partition = rest.substr(0, colon);
-    if (partition.rfind("aws", 0) != 0) {
+    if (partition != "aws" && partition != "aws-cn" && partition != "aws-us-gov") {
         return false;
     }
     rest = rest.substr(colon + 1);
@@ -123,7 +120,7 @@ bool ValidIamRoleArn(const std::string &arn) {
         return false;
     }
     auto account = rest.substr(0, role);
-    if (account.empty()) {
+    if (account.size() != 12) {
         return false;
     }
     for (char c : account) {
@@ -227,6 +224,11 @@ void ValidateS3CredentialFields(const S3Settings &s3, LakeKind kind,
         issues.push_back({"lake.s3.role_arn",
                           "must be a concrete IAM role ARN (arn:aws:iam::<account>:role/<name>)"});
     }
+    if (!s3.profile.empty() && !s3.role_arn.empty()) {
+        issues.push_back({"lake.s3",
+                          "cannot set both profile and role_arn; DuckDB AddSTSProvider signs "
+                          "AssumeRole with the process default credentials, not PROFILE"});
+    }
     if (!HasAwsExtension(extensions)) {
         issues.push_back({"lake.extensions",
                           "provider credential_chain requires explicit aws (with httpfs, postgres, "
@@ -236,9 +238,6 @@ void ValidateS3CredentialFields(const S3Settings &s3, LakeKind kind,
 
 void ValidateS3CredentialAllowlists(const SandboxSpec &spec, const DaemonConfig &daemon,
                                     std::vector<SpecIssue> &issues) {
-    if (daemon.allow_insecure_dev && LakeAllowListsEmpty(daemon.lake_allow)) {
-        return;
-    }
     if (spec.lake.kind != LakeKind::Ducklake) {
         return;
     }
@@ -253,7 +252,7 @@ void ValidateS3CredentialAllowlists(const SandboxSpec &spec, const DaemonConfig 
             !ListedExactly(daemon.lake_allow.s3_endpoints, endpoint)) {
             add("lake.s3.endpoint", "lake.s3.endpoint is not on daemon lake_allow.s3_endpoints");
         }
-    } else if (!daemon.allow_insecure_dev) {
+    } else {
         add("lake.s3.endpoint", "daemon lake_allow.s3_endpoints is required");
     }
 
@@ -262,9 +261,7 @@ void ValidateS3CredentialAllowlists(const SandboxSpec &spec, const DaemonConfig 
             return;
         }
         if (daemon.lake_allow.secret_refs.empty()) {
-            if (!daemon.allow_insecure_dev) {
-                add(field, "daemon lake_allow.secret_refs is required");
-            }
+            add(field, "daemon lake_allow.secret_refs is required");
             return;
         }
         if (!ListedExactly(daemon.lake_allow.secret_refs, ref.Spec())) {
@@ -300,11 +297,11 @@ void ValidateS3CredentialAllowlists(const SandboxSpec &spec, const DaemonConfig 
     }
 
     RequireListed(daemon.lake_allow.aws_profiles, spec.lake.s3.profile, "lake.s3.profile",
-                  "lake_allow.aws_profiles", daemon.allow_insecure_dev, issues);
+                  "lake_allow.aws_profiles", issues);
     RequireListed(daemon.lake_allow.role_arns, spec.lake.s3.role_arn, "lake.s3.role_arn",
-                  "lake_allow.role_arns", daemon.allow_insecure_dev, issues);
+                  "lake_allow.role_arns", issues);
     if (spec.lake.s3.profile.empty() && spec.lake.s3.role_arn.empty() &&
-        !daemon.lake_allow.allow_default_credential_chain && !daemon.allow_insecure_dev) {
+        !daemon.lake_allow.allow_default_credential_chain) {
         add("lake.s3", "provider credential_chain without profile or role_arn is denied unless "
                        "lake_allow.allow_default_credential_chain is true");
     }
@@ -352,11 +349,12 @@ std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds) {
     if (creds.provider == S3CredentialProvider::CredentialChain) {
         sql << "credential_chain";
         if (!creds.role_arn.empty() && !creds.profile.empty()) {
+            // Rejected at validation; do not emit CHAIN sts + PROFILE (ignored).
             sql << ", CHAIN 'sts'";
         } else if (!creds.role_arn.empty()) {
             sql << ", CHAIN 'sts'";
         } else if (!creds.profile.empty()) {
-            sql << ", CHAIN 'config'";
+            sql << ", CHAIN '" << DuckDbProfileCredentialChain() << "'";
         } else {
             sql << ", CHAIN '" << DuckDbDefaultCredentialChain() << "'";
         }
@@ -384,9 +382,17 @@ std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds) {
 }
 
 const char *DuckDbDefaultCredentialChain() {
-    // config = env/profile files; sts = assume-role and AssumeRoleWithWebIdentity
-    // (IRSA: AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN).
-    return "config;sts";
+    // DuckDB 1.5.6 aws_secret.cpp + docs: env, config, process, web_identity,
+    // sso, sts (needs ASSUME_ROLE_ARN), instance. sts without a role errors;
+    // IRSA is web_identity. instance omitted (IMDS not supported). Same order
+    // and coverage as this SDK's DefaultAWSCredentialsProviderChain.
+    return "env;config;process;web_identity;sso";
+}
+
+const char *DuckDbProfileCredentialChain() {
+    // AddConfigProvider for PROFILE. sso is required for SSO profiles
+    // (`aws sso login` alone is not enough without the sso chain item).
+    return "config;sso";
 }
 
 bool UsesDefaultCredentialChain(const S3Settings &s3) {
@@ -449,8 +455,13 @@ void ValidateLeaseCredentialFields(const LeaseSettings &lease, bool allow_insecu
                 {"lease.role_arn",
                  "must be a concrete IAM role ARN (arn:aws:iam::<account>:role/<name>)"});
         }
-        // Default chain (no profile/role) is the IRSA / env / instance path.
-        // The operator opted in by setting provider: credential_chain.
+        if (!lease.profile.empty() && !lease.role_arn.empty()) {
+            issues.push_back({"lease", "cannot set both profile and role_arn; assume-role uses "
+                                       "the process default credentials, not the named profile"});
+        }
+        // Default chain (no profile/role) is env / profile / process / IRSA / SSO.
+        // IMDS is not supported. The operator opted in via provider: credential_chain;
+        // unlike lake specs, the lease block does not need allow_default_credential_chain.
         return;
     }
     if (!lease.profile.empty()) {

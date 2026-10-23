@@ -147,13 +147,12 @@ jobs:
           make validate
       - name: Start Postgres + RustFS
         run: docker compose up -d --wait
-      - name: Start MinIO (STS / temporary credentials)
-        run: docker compose --profile sts up -d --wait minio
-      - name: Temporary-credential suite against MinIO
+      - name: Temporary-credential suite against RustFS
         env:
-          DUCKBOX_MINIO_ENDPOINT: 127.0.0.1:19000
-          DUCKBOX_MINIO_KEY: minioadmin
-          DUCKBOX_MINIO_SECRET: minioadmin
+          DUCKBOX_S3_ENDPOINT: 127.0.0.1:9000
+          DUCKBOX_S3_KEY: rustfsadmin
+          DUCKBOX_S3_SECRET: rustfsadmin
+          DUCKBOX_OIDC_ENDPOINT: 127.0.0.1:18088
         run: ./build/duckbox_s3_sts_tests
       - name: Python deps
         run: |

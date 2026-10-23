@@ -8,9 +8,11 @@
 #include "duckbox/spec_validator.hpp"
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 
 namespace {
 
@@ -85,16 +87,30 @@ int main() {
 
     const char *chain_s3 =
         "    endpoint: \"s3.amazonaws.com\"\n    use_ssl: true\n    url_style: vhost\n"
-        "    provider: credential_chain\n    profile: lake-readonly\n"
-        "    role_arn: arn:aws:iam::123456789012:role/duckbox-lake\n    region: us-east-1\n";
+        "    provider: credential_chain\n    profile: lake-readonly\n    region: us-east-1\n";
     auto chain_spec = LoadSpecString(DucklakeYaml(chain_s3, "aws"), "<chain>");
     Expect(LakeS3Provider(chain_spec.lake.s3) == S3CredentialProvider::CredentialChain,
            "mode 2 provider");
     Expect(chain_spec.lake.s3.profile == "lake-readonly", "mode 2 profile");
-    Expect(chain_spec.lake.s3.role_arn == "arn:aws:iam::123456789012:role/duckbox-lake",
+    Expect(!UsesDefaultCredentialChain(chain_spec.lake.s3), "profile is not the default chain");
+
+    const char *role_s3 =
+        "    endpoint: \"s3.amazonaws.com\"\n    use_ssl: true\n    url_style: vhost\n"
+        "    provider: credential_chain\n"
+        "    role_arn: arn:aws:iam::123456789012:role/duckbox-lake\n    region: us-east-1\n";
+    auto role_spec = LoadSpecString(DucklakeYaml(role_s3, "aws"), "<role>");
+    Expect(role_spec.lake.s3.role_arn == "arn:aws:iam::123456789012:role/duckbox-lake",
            "mode 2 role_arn");
-    Expect(!UsesDefaultCredentialChain(chain_spec.lake.s3),
-           "profile+role is not the default chain");
+    Expect(!UsesDefaultCredentialChain(role_spec.lake.s3), "role is not the default chain");
+
+    auto both_s3 =
+        LoadSpecString(DucklakeYaml("    provider: credential_chain\n    profile: lake-readonly\n"
+                                    "    role_arn: arn:aws:iam::123456789012:role/duckbox-lake\n",
+                                    "aws"),
+                       "<both>");
+    Expect(
+        HasIssue(SpecValidator{}.ValidateStatic(both_s3), "lake.s3", "both profile and role_arn"),
+        "profile + role_arn is rejected (DuckDB ignores PROFILE on AddSTSProvider)");
 
     ExpectThrowContains([&] { ParseS3Provider("imds", "lake.s3.provider"); }, "credential_chain",
                         "unknown provider is rejected");
@@ -108,6 +124,11 @@ int main() {
            "wildcard and path profiles are rejected");
     Expect(ValidIamRoleArn("arn:aws:iam::123456789012:role/duckbox-lake"), "role ARN accepted");
     Expect(ValidIamRoleArn("arn:aws-us-gov:iam::123456789012:role/path/name"), "gov partition ARN");
+    Expect(ValidIamRoleArn("arn:aws-cn:iam::123456789012:role/lake"), "cn partition ARN");
+    Expect(!ValidIamRoleArn("arn:aws-iso:iam::123456789012:role/x") &&
+               !ValidIamRoleArn("arn:aws:iam::12345678901:role/x") &&
+               !ValidIamRoleArn("arn:aws:iam::1234567890123:role/x"),
+           "unknown partition and non-12-digit accounts are rejected");
     Expect(!ValidIamRoleArn("arn:aws:s3:::bucket") && !ValidIamRoleArn("arn:aws:iam::*:role/x") &&
                !ValidIamRoleArn("*"),
            "non-role and wildcard ARNs are rejected");
@@ -149,14 +170,15 @@ int main() {
 
     auto prod = ProdAllow();
     Expect(v.ValidateStatic(static_spec, prod).empty(), "mode 1 allowlisted refs pass");
-    Expect(v.ValidateStatic(chain_spec, prod).empty(), "mode 2 profile and role on allowlists");
+    Expect(v.ValidateStatic(chain_spec, prod).empty(), "mode 2 profile on allowlists");
+    Expect(v.ValidateStatic(role_spec, prod).empty(), "mode 2 role_arn on allowlists");
 
     auto other_profile = chain_spec;
     other_profile.lake.s3.profile = "admin";
     Expect(HasIssue(v.ValidateStatic(other_profile, prod), "lake.s3.profile", "aws_profiles"),
            "unknown profile is denied");
 
-    auto other_role = chain_spec;
+    auto other_role = role_spec;
     other_role.lake.s3.role_arn = "arn:aws:iam::123456789012:role/other";
     Expect(HasIssue(v.ValidateStatic(other_role, prod), "lake.s3.role_arn", "role_arns"),
            "unknown role_arn is denied");
@@ -169,6 +191,15 @@ int main() {
     auto chain_default = LoadSpecString(
         DucklakeYaml("    provider: credential_chain\n    region: us-east-1\n", "aws"),
         "<defchain>");
+    DaemonConfig empty_dev;
+    empty_dev.allow_insecure_dev = true;
+    Expect(HasIssue(v.ValidateStatic(static_spec, empty_dev), "lake.s3.endpoint", "s3_endpoints"),
+           "allow_insecure_dev still requires lake_allow.s3_endpoints");
+    Expect(HasIssue(v.ValidateStatic(chain_spec, empty_dev), "lake.s3.profile", "aws_profiles"),
+           "allow_insecure_dev still requires lake_allow.aws_profiles");
+    Expect(HasIssue(v.ValidateStatic(chain_default, empty_dev), "lake.s3",
+                    "allow_default_credential_chain"),
+           "allow_insecure_dev still requires allow_default_credential_chain");
     Expect(HasIssue(v.ValidateStatic(chain_default, prod), "lake.s3",
                     "allow_default_credential_chain"),
            "default credential chain is denied without an explicit allow");
@@ -196,12 +227,17 @@ int main() {
     auto sql_chain = BuildDuckDbS3SecretSql(resolved_chain);
     Expect(sql_chain.find("PROVIDER credential_chain") != std::string::npos, "mode 2 SQL provider");
     Expect(sql_chain.find("PROFILE 'lake-readonly'") != std::string::npos, "mode 2 SQL profile");
-    Expect(sql_chain.find("ASSUME_ROLE_ARN 'arn:aws:iam::123456789012:role/duckbox-lake'") !=
+    Expect(sql_chain.find(std::string("CHAIN '") + DuckDbProfileCredentialChain() + "'") !=
                std::string::npos,
-           "mode 2 SQL assume-role");
+           "mode 2 profile SQL includes sso");
     Expect(sql_chain.find("REFRESH auto") != std::string::npos,
            "mode 2 SQL refreshes via the chain");
     Expect(sql_chain.find("KEY_ID") == std::string::npos, "mode 2 SQL has no static keys");
+    auto resolved_role = ResolveLakeS3Credentials(role_spec.lake.s3, secrets);
+    auto sql_role_spec = BuildDuckDbS3SecretSql(resolved_role);
+    Expect(sql_role_spec.find("ASSUME_ROLE_ARN 'arn:aws:iam::123456789012:role/duckbox-lake'") !=
+               std::string::npos,
+           "mode 2 role SQL assume-role");
 
     ResolvedS3Credentials aws_default;
     aws_default.provider = S3CredentialProvider::CredentialChain;
@@ -226,14 +262,22 @@ int main() {
     Expect(ClassifyLeaseAuth(chain_lease) == LeaseAuthKind::DefaultChain, "lease default chain");
     chain_lease.profile = "lake-readonly";
     Expect(ClassifyLeaseAuth(chain_lease) == LeaseAuthKind::Profile, "lease profile");
-    chain_lease.role_arn = "arn:aws:iam::123456789012:role/duckbox-lake";
-    Expect(ClassifyLeaseAuth(chain_lease) == LeaseAuthKind::AssumeRole, "lease assume-role");
-    Expect(LeaseUsesCredentialChain(chain_lease), "lease chain flag");
+    LeaseSettings assume_lease;
+    assume_lease.provider = "credential_chain";
+    assume_lease.role_arn = "arn:aws:iam::123456789012:role/duckbox-lake";
+    Expect(ClassifyLeaseAuth(assume_lease) == LeaseAuthKind::AssumeRole, "lease assume-role");
+    Expect(LeaseUsesCredentialChain(assume_lease), "lease chain flag");
+    LeaseSettings both_lease = chain_lease;
+    both_lease.role_arn = assume_lease.role_arn;
+    std::vector<SpecIssue> both_lease_issues;
+    ValidateLeaseCredentialFields(both_lease, false, both_lease_issues);
+    Expect(HasIssue(both_lease_issues, "lease", "both profile and role_arn"),
+           "lease rejects profile + role_arn");
 
     std::vector<SpecIssue> lease_issues;
     ValidateLeaseCredentialFields(lease, false, lease_issues);
     Expect(lease_issues.empty(), "lease static key fields are valid");
-    LeaseSettings mixed_lease = chain_lease;
+    LeaseSettings mixed_lease = assume_lease;
     mixed_lease.access_key_env = "DUCKBOX_S3_KEY";
     lease_issues.clear();
     ValidateLeaseCredentialFields(mixed_lease, false, lease_issues);
@@ -246,7 +290,7 @@ int main() {
     Expect(LeaseUsesDefaultCredentialChain(bare_chain), "lease default-chain helper");
     lease_issues.clear();
     ValidateLeaseCredentialFields(bare_chain, false, lease_issues);
-    Expect(lease_issues.empty(), "lease default chain is allowed (IRSA / env / instance profile)");
+    Expect(lease_issues.empty(), "lease default chain is allowed (IRSA / env / SSO; no IMDS)");
 
     setenv("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/eks.amazonaws.com/serviceaccount/token",
            0);
@@ -353,8 +397,8 @@ int main() {
     Expect(IsAwsS3Hostname("s3.amazonaws.com") && IsAwsS3Hostname("s3.us-east-1.amazonaws.com") &&
                IsAwsS3Hostname("https://s3.amazonaws.com:443") && IsAwsS3Hostname(""),
            "AWS S3 hostnames are classified");
-    Expect(!IsAwsS3Hostname("127.0.0.1") && !IsAwsS3Hostname("minio.local:9000") &&
-               !IsAwsS3Hostname("http://127.0.0.1:19000"),
+    Expect(!IsAwsS3Hostname("127.0.0.1") && !IsAwsS3Hostname("rustfs.local:9000") &&
+               !IsAwsS3Hostname("http://127.0.0.1:9000"),
            "custom S3 hostnames are not AWS");
 
     Expect(IsCredentialChain(S3CredentialProvider::CredentialChain) &&
@@ -391,7 +435,7 @@ int main() {
         "empty profile allowlist fails closed");
     DaemonConfig empty_roles = ProdAllow();
     empty_roles.lake_allow.role_arns.clear();
-    Expect(HasIssue(v.ValidateStatic(chain_spec, empty_roles), "lake.s3.role_arn", "role_arns"),
+    Expect(HasIssue(v.ValidateStatic(role_spec, empty_roles), "lake.s3.role_arn", "role_arns"),
            "empty role allowlist fails closed");
 
     ResolvedS3Credentials profile_only;
@@ -401,9 +445,11 @@ int main() {
     profile_only.url_style = "vhost";
     profile_only.use_ssl = true;
     auto sql_profile = BuildDuckDbS3SecretSql(profile_only);
-    Expect(sql_profile.find("CHAIN 'config'") != std::string::npos &&
+    Expect(sql_profile.find(std::string("CHAIN '") + DuckDbProfileCredentialChain() + "'") !=
+                   std::string::npos &&
+               sql_profile.find("sso") != std::string::npos &&
                sql_profile.find("ASSUME_ROLE") == std::string::npos,
-           "profile-only chain uses CHAIN config");
+           "profile-only chain uses CHAIN config;sso (sso required; config alone is not SSO)");
     ResolvedS3Credentials role_only;
     role_only.provider = S3CredentialProvider::CredentialChain;
     role_only.role_arn = "arn:aws:iam::123456789012:role/duckbox-lake";
@@ -421,13 +467,18 @@ int main() {
     auto sql_default = BuildDuckDbS3SecretSql(default_chain_creds);
     Expect(sql_default.find(std::string("CHAIN '") + DuckDbDefaultCredentialChain() + "'") !=
                std::string::npos,
-           "default chain SQL includes config;sts for IRSA web identity");
+           "default chain SQL is env;config;process;web_identity;sso");
     Expect(sql_default.find("REFRESH auto") != std::string::npos, "default chain refreshes");
     S3Settings default_s3;
     default_s3.provider = "credential_chain";
     Expect(UsesDefaultCredentialChain(default_s3), "lake default chain helper");
-    Expect(std::string(DuckDbDefaultCredentialChain()).find("sts") != std::string::npos,
-           "DuckDB default chain includes sts (web identity)");
+    Expect(std::string(DuckDbDefaultCredentialChain()).find("web_identity") != std::string::npos &&
+               std::string(DuckDbDefaultCredentialChain()).find("env") != std::string::npos &&
+               std::string(DuckDbDefaultCredentialChain()).find("sso") != std::string::npos,
+           "DuckDB default chain includes env, web_identity (IRSA), and sso");
+    Expect(std::string(DuckDbDefaultCredentialChain()).find("sts") == std::string::npos &&
+               std::string(DuckDbDefaultCredentialChain()).find("instance") == std::string::npos,
+           "DuckDB default chain omits sts-without-ARN and instance/IMDS");
 
     LeaseSettings lease_cfg_profile;
     lease_cfg_profile.access_key_env = "DUCKBOX_S3_KEY";
@@ -506,6 +557,67 @@ int main() {
     Expect(v.ValidateStatic(two_a, ProdAllow()).empty() &&
                v.ValidateStatic(two_b, ProdAllow()).empty(),
            "two sandboxes on one node can use different allowlisted creds");
+    ResolvedS3Credentials iso_a = resolved_static;
+    ResolvedS3Credentials iso_b = resolved_static;
+    iso_b.key_id = "other-key";
+    iso_b.secret = "other-secret";
+    auto sql_iso_a = BuildDuckDbS3SecretSql(iso_a);
+    auto sql_iso_b = BuildDuckDbS3SecretSql(iso_b);
+    Expect(sql_iso_a.find("KEY_ID 'id'") != std::string::npos &&
+               sql_iso_a.find("other-key") == std::string::npos &&
+               sql_iso_b.find("KEY_ID 'other-key'") != std::string::npos &&
+               sql_iso_b.find("KEY_ID 'id'") == std::string::npos,
+           "two static secrets stay isolated");
+    ResolvedS3Credentials iso_p1;
+    iso_p1.provider = S3CredentialProvider::CredentialChain;
+    iso_p1.profile = "lake-readonly";
+    iso_p1.region = "us-east-1";
+    iso_p1.url_style = "vhost";
+    iso_p1.use_ssl = true;
+    ResolvedS3Credentials iso_p2 = iso_p1;
+    iso_p2.profile = "other-profile";
+    auto sql_iso_p1 = BuildDuckDbS3SecretSql(iso_p1);
+    auto sql_iso_p2 = BuildDuckDbS3SecretSql(iso_p2);
+    Expect(sql_iso_p1.find("PROFILE 'lake-readonly'") != std::string::npos &&
+               sql_iso_p1.find("other-profile") == std::string::npos &&
+               sql_iso_p2.find("PROFILE 'other-profile'") != std::string::npos &&
+               sql_iso_p2.find("lake-readonly") == std::string::npos,
+           "two profile secrets stay isolated");
+
+    auto sso_dir = std::string("/tmp/duckbox-aws-sso-") + std::to_string(getpid());
+    {
+        std::filesystem::create_directories(sso_dir);
+        std::ofstream cfg(sso_dir + "/config");
+        cfg << "[profile lake-sso]\n"
+               "sso_start_url = https://example.awsapps.com/start\n"
+               "sso_region = us-east-1\n"
+               "sso_account_id = 123456789012\n"
+               "sso_role_name = duckbox-lake\n"
+               "region = us-east-1\n";
+        std::ofstream creds(sso_dir + "/credentials");
+        creds << "# no static keys; SSO cache only\n";
+    }
+    setenv("AWS_CONFIG_FILE", (sso_dir + "/config").c_str(), 1);
+    setenv("AWS_SHARED_CREDENTIALS_FILE", (sso_dir + "/credentials").c_str(), 1);
+    unsetenv("AWS_PROFILE");
+    LeaseSettings sso_lease;
+    sso_lease.endpoint = "http://127.0.0.1:1";
+    sso_lease.bucket = "control";
+    sso_lease.provider = "credential_chain";
+    sso_lease.profile = "lake-sso";
+    auto sso_cli = MakeS3ControlClient(sso_lease);
+    Expect(sso_cli->bucket() == "control",
+           "lease profile provider-selection includes SSOCredentialsProvider");
+    S3Settings sso_s3;
+    sso_s3.provider = "credential_chain";
+    sso_s3.profile = "lake-sso";
+    sso_s3.region = "us-east-1";
+    sso_s3.url_style = "vhost";
+    sso_s3.use_ssl = true;
+    auto sql_sso_lake = BuildDuckDbS3SecretSql(ResolveLakeS3Credentials(sso_s3, secrets));
+    Expect(sql_sso_lake.find("CHAIN 'config;sso'") != std::string::npos &&
+               sql_sso_lake.find("PROFILE 'lake-sso'") != std::string::npos,
+           "lake SSO profile SQL is CHAIN config;sso + PROFILE");
 
     return duckbox::test::ReportAndExit("s3_credentials");
 }

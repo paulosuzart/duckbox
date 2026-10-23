@@ -46,7 +46,7 @@ bool AllowlistHasWildcard(const std::vector<std::string> &items);
 bool LakeAllowListsEmpty(const LakeAllow &allow);
 std::string CanonicalS3Endpoint(const std::string &endpoint); // empty → s3.amazonaws.com
 // True for s3.amazonaws.com / s3.<region>.amazonaws.com (optional port). Custom
-// stores (MinIO, RustFS) are false so STS can share that endpoint.
+// stores (RustFS) are false so STS can share that endpoint.
 bool IsAwsS3Hostname(const std::string &host);
 
 // Mode consistency (no daemon). Field paths under lake.s3 / lake.extensions.
@@ -63,10 +63,20 @@ void RejectS3CredentialAllowlistIssues(const SandboxSpec &spec, const DaemonConf
 ResolvedS3Credentials ResolveLakeS3Credentials(const S3Settings &s3, const SecretResolver &secrets);
 std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds);
 
-// DuckDB CHAIN for provider credential_chain with no profile/role: config then
-// sts. sts includes AssumeRoleWithWebIdentity (IRSA: AWS_WEB_IDENTITY_TOKEN_FILE
-// + AWS_ROLE_ARN). The lease client uses DefaultAWSCredentialsProviderChain.
+// DuckDB 1.5.6 aws extension CHAIN items (docs + aws_secret.cpp):
+//   env, config, process, web_identity, sso, sts, instance.
+// Default (no profile/role): env;config;process;web_identity;sso
+//   — same order/coverage as this SDK's DefaultAWSCredentialsProviderChain.
+//   — IRSA is web_identity (sts without ASSUME_ROLE_ARN is an error).
+//   — instance/IMDS omitted; AWS_EC2_METADATA_DISABLED is process-wide.
+//     Instance profiles are not supported yet.
+// Profile only: config;sso (lease: ProfileConfigFile + SSOCredentialsProvider).
+//   `aws sso login` is not enough without the sso item.
+// Role only: sts (requires ASSUME_ROLE_ARN).
+// profile + role_arn is rejected: AddSTSProvider signs with process default
+// creds and ignores PROFILE.
 const char *DuckDbDefaultCredentialChain();
+const char *DuckDbProfileCredentialChain();
 bool UsesDefaultCredentialChain(const S3Settings &s3);
 bool LeaseUsesDefaultCredentialChain(const LeaseSettings &lease);
 

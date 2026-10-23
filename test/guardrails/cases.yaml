@@ -215,6 +215,40 @@ cases:
     expect: deny
     reason: table functions
 
+  - id: read_proc_environ
+    sql: "SELECT * FROM read_text('/proc/self/environ')"
+    expect: deny
+    reason: table functions
+
+  - id: read_aws_credentials
+    sql: "SELECT * FROM read_text('/root/.aws/credentials')"
+    expect: deny
+    reason: table functions
+
+  - id: read_web_identity_token
+    sql: "SELECT * FROM read_text('/var/run/secrets/eks.amazonaws.com/serviceaccount/token')"
+    expect: deny
+    reason: table functions
+
+  - id: create_persistent_secret
+    sql: "CREATE PERSISTENT SECRET sneak (TYPE s3, KEY_ID 'x', SECRET 'y')"
+    expect: deny
+
+  - id: set_s3_access_key
+    sql: "SET s3_access_key_id='stolen'"
+    expect: deny
+    reason: only SELECT
+
+  - id: set_s3_secret_key
+    sql: "SET s3_secret_access_key='stolen'"
+    expect: deny
+    reason: only SELECT
+
+  - id: set_s3_session_token
+    sql: "SET s3_session_token='stolen'"
+    expect: deny
+    reason: only SELECT
+
   - id: copy_out
     sql: "COPY deals TO 'out.csv'"
     expect: deny

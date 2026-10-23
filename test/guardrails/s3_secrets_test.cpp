@@ -52,6 +52,30 @@ int main() {
                  "current_setting cannot read s3 secrets");
     ExpectDenied(box, "SELECT current_setting('s3_session_token')", "function not allowlisted",
                  "current_setting cannot read session tokens");
+    try {
+        (void)box.Execute("CREATE PERSISTENT SECRET sneak (TYPE s3, KEY_ID 'x', SECRET 'y')");
+        Expect(false, "CREATE PERSISTENT SECRET must be denied");
+    } catch (const std::exception &e) {
+        auto w = std::string(e.what());
+        Expect(w.find("only SELECT") != std::string::npos ||
+                   w.find("denied") != std::string::npos || w.find("Parser") != std::string::npos,
+               "CREATE PERSISTENT SECRET is denied after warmup");
+    }
+    ExpectDenied(box, "SELECT * FROM read_text('/proc/self/environ')", "table functions",
+                 "read_text of /proc/self/environ is denied");
+    ExpectDenied(box, "SELECT * FROM read_text('/root/.aws/credentials')", "table functions",
+                 "read_text of ~/.aws credentials is denied");
+    ExpectDenied(
+        box, "SELECT * FROM read_text('/var/run/secrets/eks.amazonaws.com/serviceaccount/token')",
+        "table functions", "read_text of the web identity token file is denied");
+
+    TenantSandbox box_b(daemon, policy, key, duckbox::test::MemorySpecDir());
+    box_b.Warmup(true);
+    Expect(box.Warm() && box_b.Warm(), "two sandboxes on one node warm independently");
+    ExpectDenied(box_b, "SELECT * FROM duckdb_secrets()", "denied",
+                 "second sandbox cannot list secrets either");
+    ExpectDenied(box, "SELECT * FROM duckdb_secrets()", "denied",
+                 "first sandbox secrets stay hidden after a second warmup");
 
     try {
         auto parser = ParseSql("DROP SECRET duckbox_s3");

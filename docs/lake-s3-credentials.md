@@ -6,8 +6,8 @@ on S3. There are **exactly two** modes, for both `lake.s3` and the daemon
 
 1. **Static keys** — `access_key_env` + `secret_key_env` (service-account style).
 2. **Refreshable credentials** — `provider: credential_chain`, with optional
-   `profile` and/or `role_arn`, or the default AWS chain (IRSA / env / instance
-   profile).
+   `profile` **or** `role_arn` (not both), or the default AWS chain (IRSA /
+   env / process / SSO). Instance profiles / IMDS are not supported yet.
 
 Two sandboxes on the same node can use different keys, profiles, or roles. The
 daemon never stores secret values — only references — and `lake_allow` is
@@ -63,16 +63,14 @@ allowlists.
 
 Use this when the node has **no** long-lived IAM user: SSO profiles, assumed
 roles, IRSA / web identity, or a process that already exported AWS credentials.
-DuckDB's `aws` extension refreshes via the chain (`REFRESH auto`). The lease
-client uses the matching AWS SDK providers (`DefaultAWSCredentialsProviderChain`,
-a named profile, or `STSAssumeRoleCredentialsProvider`). Mid-session expiry is
-handled by the provider; a refresh failure is returned as the DuckDB/S3 error
-(re-warmup after fixing the profile/role/SSO login).
+DuckDB's `aws` extension (1.5.6) refreshes via `REFRESH auto`. The lease client
+uses AWS SDK providers. Mid-session expiry is the provider's job; a refresh
+failure is returned as the DuckDB/S3 error.
 
-`profile` and `role_arn` are optional, but a **sandbox spec** with **neither**
-is denied unless the daemon sets `lake_allow.allow_default_credential_chain: true`
-(or `auth.allow_insecure_dev`). That flag is off by default so a spec cannot
-silently pick up arbitrary node credentials.
+`profile` and `role_arn` are mutually exclusive. A **sandbox spec** with
+**neither** is denied unless the daemon sets
+`lake_allow.allow_default_credential_chain: true`. `auth.allow_insecure_dev`
+does **not** skip `lake_allow`. Empty profile/role lists deny those fields.
 
 ```yaml
 lake:
@@ -83,7 +81,7 @@ lake:
   s3:
     provider: credential_chain
     profile: lake-readonly          # optional; must be on lake_allow.aws_profiles
-    role_arn: arn:aws:iam::123456789012:role/duckbox-lake  # optional
+    # role_arn: arn:aws:iam::123456789012:role/duckbox-lake  # optional; not with profile
     region: us-east-1
     use_ssl: true
     url_style: vhost
@@ -109,18 +107,32 @@ deny those fields. Wildcards are rejected at daemon load.
 
 ### Default chain and IRSA (web identity)
 
-A credential_chain with **no** `profile` and **no** `role_arn` uses the default
-AWS provider order. That is the supported path for Kubernetes IRSA (and any
-other STS web-identity setup):
+A credential_chain with **no** `profile` and **no** `role_arn` uses this
+DuckDB 1.5.6 `CHAIN` (from `aws_secret.cpp`):
+
+`env;config;process;web_identity;sso`
+
+`sts` without `ASSUME_ROLE_ARN` is an error. `config` without `PROFILE` is
+only the default profile file (no env, no IMDS, no SSO). IRSA is the
+`web_identity` item. `instance` is omitted: the lease SDK sets
+`AWS_EC2_METADATA_DISABLED=true` for the whole process, so instance profiles
+are **not supported yet**.
+
+The lease client uses this SDK's `DefaultAWSCredentialsProviderChain` (env,
+profile, process, STS web identity, SSO — documented on the class). That is
+the **same order and coverage** as the DuckDB `CHAIN` above. They are not
+the same object: DuckDB builds the chain from the `CHAIN` string; the lease
+uses the SDK class. Instance/IMDS is in neither, and
+`AWS_EC2_METADATA_DISABLED=true` is set for the process so DuckDB cannot
+use `instance` either.
 
 - The node (or pod) must have `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`
   (IRSA injects both; `AWS_ROLE_SESSION_NAME` is optional).
 - The sandbox spec sets only `provider: credential_chain`.
 - The daemon sets `lake_allow.allow_default_credential_chain: true`.
-- DuckDB warmup uses `CHAIN 'config;sts'` and `REFRESH auto`. The `sts` provider
-  includes `AssumeRoleWithWebIdentity`.
-- The lease client uses `DefaultAWSCredentialsProviderChain`, which includes
-  `STSAssumeRoleWebIdentityCredentialsProvider`.
+- DuckDB warmup uses the chain above and `REFRESH auto`.
+- The lease default chain does **not** need that flag: the operator opted in
+  by setting `lease.provider: credential_chain` with no profile/role.
 
 ```yaml
 # spec
@@ -141,14 +153,20 @@ lake_allow:
 Do not put the web-identity token or role ARN in the spec. The SDK reads them
 from the process environment.
 
+A named **profile** uses `CHAIN 'config;sso'` plus `PROFILE`. The `sso` item
+is required for SSO profiles: `aws sso login --profile lake-readonly` is not
+enough without it. A **role_arn** uses `CHAIN 'sts'` plus `ASSUME_ROLE_ARN`.
+Do not set both: DuckDB's `AddSTSProvider` signs AssumeRole with the process
+default credentials and ignores `PROFILE`.
+
 ## Target path: DuckLake on AWS S3 (no IAM user)
 
 Postgres catalog + Parquet on S3 in `us-east-1`, authenticated only with
 SSO, assume-role, or IRSA:
 
-1. On the node, either log in so a named profile can assume the lake role
-   (`aws sso login --profile lake-readonly`), or run under IRSA so
-   `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN` are set.
+1. On the node, either use a named profile that already holds keys or an SSO
+   cache (`CHAIN config;sso` after `aws sso login --profile lake-readonly`),
+   or run under IRSA so `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN` are set.
 2. Allowlist that profile and/or role on the daemon, **or** set
    `allow_default_credential_chain: true` for IRSA / the default chain.
 3. Use mode 2 on the sandbox spec. Omit `endpoint` (or set
@@ -163,8 +181,11 @@ SSO, assume-role, or IRSA:
 The daemon `lease` block (registry + ownership) accepts the same two modes.
 Use static key refs, or `provider: credential_chain` with a named profile,
 an assume-role ARN (`STSAssumeRoleCredentialsProvider`, fail closed if the
-STS SDK is not linked), or the default chain (IRSA / env / instance). There
-is no silent profile fallback when `role_arn` is set.
+STS SDK is not linked), or the default chain (IRSA / env / process / SSO).
+A named lease profile uses `ProfileConfigFile` then `SSO` (same as DuckDB
+`CHAIN config;sso`). Instance profiles are not supported. There is no silent
+profile fallback when `role_arn` is set. `profile` and `role_arn` are
+mutually exclusive.
 
 ```yaml
 lease:
@@ -192,18 +213,21 @@ lease:
 A lease default chain is allowed when the operator sets
 `provider: credential_chain` with no profile/role.
 
-## Local STS (MinIO)
+## Local STS (RustFS)
 
 ```bash
-docker compose --profile sts up -d --wait minio
-# MinIO-compatible API: 127.0.0.1:19000  (root minioadmin / minioadmin)
+docker compose up -d --wait
+# RustFS S3/STS: 127.0.0.1:9000  (root rustfsadmin / rustfsadmin)
+# OIDC mock:     127.0.0.1:18088
 ./build/duckbox_s3_sts_tests
 ```
 
-Compose pins `docker.io/pgsty/silo:RELEASE.2026-10-18T00-00-00Z` (digest in
-`docker-compose.yml`). Official `minio/minio` and `quay.io/minio/minio` images
-are no longer publicly pullable; Silo keeps the MinIO S3/STS wire and
-`MINIO_*` env. `AssumeRole` can mint temporary creds for local tests. DuckDB's
-`sts` chain talks to AWS STS; against this emulator, prefer a named profile
-(mode 2 `CHAIN config`). `AssumeRoleWithWebIdentity` is not exercised here —
-IRSA is covered by default-chain provider-selection tests.
+Compose pins `docker.io/rustfs/rustfs:1.0.3` (digest in `docker-compose.yml`).
+That is the only S3-compatible store in the repo. The STS suite creates an IAM
+user, a policy with explicit `sts:AssumeRole`, and the binding through the
+RustFS admin API (`/rustfs/admin/v3/...`, SigV4, no `mc`). Root cannot call
+`AssumeRole`; `RoleArn` is a placeholder. `AssumeRoleWithWebIdentity` uses the
+compose OIDC mock (`scripts/oidc_mock.py`).
+
+Warmup logs `profile=` / `role_arn=` and secret **refs** (`env:NAME`). Secret
+values are never logged.
