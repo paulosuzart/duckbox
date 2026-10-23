@@ -18,6 +18,7 @@
 #include <thread>
 
 namespace duckbox {
+namespace sandbox {
 
 TenantSandbox::TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key,
                              std::string spec_dir, std::string sandbox_id, int version,
@@ -921,5 +922,7 @@ size_t SandboxRuntime::WarmCount() const {
     }
     return n;
 }
+
+} // namespace sandbox
 
 } // namespace duckbox

@@ -17,6 +17,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace metrics {
 
 const char *ClassifyRejection(const std::exception &e); // bounded reason label; never the SQL text
 const char *ClassifyLimit(const std::exception &e);
@@ -197,5 +198,21 @@ void ObserveFailure(IMetrics &m, const Policy *policy, const TenantKey *key, con
 
 void StartMetricsHttp(const std::string &listen, std::shared_ptr<IMetrics> metrics);
 void StopMetricsHttp();
+
+} // namespace metrics
+
+using metrics::ClassifyRejection;
+using metrics::ClassifyLimit;
+using metrics::SanitizeMetricValue;
+using metrics::IMetrics;
+using metrics::MetricsRegistry;
+using metrics::NoopMetrics;
+using metrics::Metrics;
+using metrics::SetMetrics;
+using metrics::WriteAuditLog;
+using metrics::WriteSandboxAudit;
+using metrics::ObserveFailure;
+using metrics::StartMetricsHttp;
+using metrics::StopMetricsHttp;
 
 } // namespace duckbox

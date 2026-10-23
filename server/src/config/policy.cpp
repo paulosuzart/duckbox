@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 namespace duckbox {
+namespace config {
 namespace {
 
 std::string Lower(std::string s) {
@@ -839,5 +840,7 @@ SandboxSpec LoadSpecFile(const std::string &path) {
     }
     return spec;
 }
+
+} // namespace config
 
 } // namespace duckbox

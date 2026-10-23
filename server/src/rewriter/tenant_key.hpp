@@ -10,6 +10,7 @@
 #include <string>
 
 namespace duckbox {
+namespace rewriter {
 
 // Parsed sandbox key. tenant_id_i64 is the typed bind value; never substring-match it.
 struct TenantKey {
@@ -26,5 +27,10 @@ struct TenantKey {
 // Default extractor used only when a spec omits auth.key (LoadSpecFile rejects that).
 TenantKey ParseTenantKey(const std::string &raw); // AuthError if unparseable
 TenantKey ParseTenantKey(const std::string &raw, const KeySpec &spec);
+
+} // namespace rewriter
+
+using rewriter::TenantKey;
+using rewriter::ParseTenantKey;
 
 } // namespace duckbox

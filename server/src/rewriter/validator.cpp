@@ -4,6 +4,7 @@
 #include "duckdb/parser/tableref/pivotref.hpp"
 
 namespace duckbox {
+namespace rewriter {
 namespace {
 
 std::string Lower(const std::string &s) {
@@ -260,5 +261,7 @@ void ValidateStatements(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &s
     ctx.policy = &policy;
     ValidateSelect(stmts[0]->Cast<ddb::SelectStatement>(), ctx);
 }
+
+} // namespace rewriter
 
 } // namespace duckbox

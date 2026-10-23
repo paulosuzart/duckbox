@@ -8,6 +8,7 @@
 #include <mutex>
 
 namespace duckbox {
+namespace sandbox {
 namespace {
 
 ddb::string TrimSpaces(const std::string &s) {
@@ -202,5 +203,7 @@ std::shared_ptr<arrow::Schema> SchemaFromCols(const std::vector<ColumnSchema> &c
     }
     return SchemaFromLogicalTypes(names, types, DefaultArrowClientProperties());
 }
+
+} // namespace sandbox
 
 } // namespace duckbox

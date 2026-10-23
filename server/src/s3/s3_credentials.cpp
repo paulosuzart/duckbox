@@ -8,6 +8,7 @@
 #include <sstream>
 
 namespace duckbox {
+namespace s3 {
 namespace {
 
 std::string LowerCopy(std::string s) {
@@ -469,5 +470,7 @@ void ValidateLeaseCredentialFields(const LeaseSettings &lease, bool allow_insecu
             {"lease.role_arn", "role_arn is only valid with provider credential_chain"});
     }
 }
+
+} // namespace s3
 
 } // namespace duckbox

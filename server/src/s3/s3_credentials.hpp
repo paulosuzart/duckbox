@@ -11,6 +11,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace s3 {
 
 enum class S3CredentialProvider {
     Config,          // DuckDB PROVIDER config (static access key + secret)
@@ -85,5 +86,32 @@ LeaseAuthKind ClassifyLeaseAuth(const LeaseSettings &lease);
 bool LeaseUsesCredentialChain(const LeaseSettings &lease);
 void ValidateLeaseCredentialFields(const LeaseSettings &lease, bool allow_insecure_dev,
                                    std::vector<SpecIssue> &issues);
+
+} // namespace s3
+
+using s3::S3CredentialProvider;
+using s3::LeaseAuthKind;
+using s3::ResolvedS3Credentials;
+using s3::ParseS3Provider;
+using s3::LakeS3Provider;
+using s3::IsCredentialChain;
+using s3::ValidAwsProfileName;
+using s3::ValidIamRoleArn;
+using s3::AllowlistHasWildcard;
+using s3::LakeAllowListsEmpty;
+using s3::CanonicalS3Endpoint;
+using s3::IsAwsS3Hostname;
+using s3::ValidateS3CredentialFields;
+using s3::ValidateS3CredentialAllowlists;
+using s3::RejectS3CredentialAllowlistIssues;
+using s3::ResolveLakeS3Credentials;
+using s3::BuildDuckDbS3SecretSql;
+using s3::DuckDbDefaultCredentialChain;
+using s3::DuckDbProfileCredentialChain;
+using s3::UsesDefaultCredentialChain;
+using s3::LeaseUsesDefaultCredentialChain;
+using s3::ClassifyLeaseAuth;
+using s3::LeaseUsesCredentialChain;
+using s3::ValidateLeaseCredentialFields;
 
 } // namespace duckbox

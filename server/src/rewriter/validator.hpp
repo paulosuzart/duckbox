@@ -14,6 +14,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace rewriter {
 
 struct ValidationContext {
 	const Policy *policy = nullptr;
@@ -39,5 +40,17 @@ void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx); // qualified 
 void ValidateExpression(ddb::ParsedExpression &expr, ValidationContext &ctx);
 
 std::unique_ptr<ddb::Parser> ParseSql(const std::string &sql);
+
+} // namespace rewriter
+
+using rewriter::ValidationContext;
+using rewriter::ISqlValidator;
+using rewriter::SqlValidator;
+using rewriter::ValidateStatements;
+using rewriter::ValidateSelect;
+using rewriter::ValidateQueryNode;
+using rewriter::ValidateTableRef;
+using rewriter::ValidateExpression;
+using rewriter::ParseSql;
 
 } // namespace duckbox

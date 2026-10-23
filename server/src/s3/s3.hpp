@@ -16,6 +16,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace s3 {
 
 struct S3Object { // HTTP status + body; error is a transport message, never a secret
     int status = 0;
@@ -73,5 +74,16 @@ class FaultyS3ControlClient final : public S3ControlClient {
 };
 // Conditional PUT If-None-Match:*. Empty string = ok (200/204/412); else error.
 std::string ProbeControlPlaneS3(const LeaseSettings &lease);
+
+} // namespace s3
+
+using s3::S3Object;
+using s3::S3ControlClient;
+using s3::MakeS3ControlClient;
+using s3::LeaseStsAssumeRoleAvailable;
+using s3::LeaseStsAssumeRoleUnavailableMessage;
+using s3::MakeMemoryS3ControlClient;
+using s3::FaultyS3ControlClient;
+using s3::ProbeControlPlaneS3;
 
 } // namespace duckbox

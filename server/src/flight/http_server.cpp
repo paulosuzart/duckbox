@@ -10,6 +10,7 @@
 #include <iostream>
 
 namespace duckbox {
+namespace flight {
 namespace {
 
 std::string JsonGetString(const std::string &body, const std::string &key) {
@@ -90,5 +91,7 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
 	std::clog << "debug HTTP listening on " << host << ":" << port << "\n";
 	svr.listen(host, port);
 }
+
+} // namespace flight
 
 } // namespace duckbox

@@ -15,6 +15,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace sandbox {
 
 ddb::ClientProperties DefaultArrowClientProperties();
 
@@ -35,5 +36,14 @@ std::shared_ptr<arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::str
                                                       const std::vector<ddb::LogicalType> &types,
                                                       ddb::ClientProperties opts);
 std::shared_ptr<arrow::Schema> SchemaFromCols(const std::vector<ColumnSchema> &cols);
+
+} // namespace sandbox
+
+using sandbox::DefaultArrowClientProperties;
+using sandbox::LogicalTypeFromName;
+using sandbox::MapLogicalType;
+using sandbox::MapTypeName;
+using sandbox::SchemaFromLogicalTypes;
+using sandbox::SchemaFromCols;
 
 } // namespace duckbox

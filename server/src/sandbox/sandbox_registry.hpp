@@ -17,6 +17,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace sandbox {
 
 // One version of a named sandbox. spec_yaml is the registry body; secret values never appear.
 struct SandboxRecord {
@@ -120,5 +121,20 @@ SandboxRecord ResolveHandleVersion(SandboxRegistry &defs, const SandboxRecord &c
 void EnsureCurrentVersion(const SandboxRecord &current, int handle_version, const std::string &sandbox_id);
 bool IsExpired(const SandboxRecord &rec, int64_t now_ms = 0); // uses WallNowMs when now_ms <= 0
 void ApplyLifecycleTimes(SandboxRecord &rec, int64_t now_ms = 0);
+
+} // namespace sandbox
+
+using sandbox::SandboxRecord;
+using sandbox::SandboxRegistry;
+using sandbox::MemorySandboxRegistry;
+using sandbox::S3SandboxRegistry;
+using sandbox::MakeSandboxRegistry;
+using sandbox::RecordFromSpec;
+using sandbox::RejectSandboxKeyChange;
+using sandbox::WallNowMs;
+using sandbox::ResolveHandleVersion;
+using sandbox::EnsureCurrentVersion;
+using sandbox::IsExpired;
+using sandbox::ApplyLifecycleTimes;
 
 } // namespace duckbox

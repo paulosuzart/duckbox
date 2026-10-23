@@ -5,6 +5,7 @@
 #include <cctype>
 
 namespace duckbox {
+namespace rewriter {
 namespace {
 
 std::string Lower(const std::string &s) {
@@ -496,5 +497,7 @@ RewriteResult SqlRewriter::Rewrite(const std::string &sql, const Policy &policy,
                                    const TenantKey &key) const {
     return RewriteUserSqlDetailed(sql, policy, key);
 }
+
+} // namespace rewriter
 
 } // namespace duckbox

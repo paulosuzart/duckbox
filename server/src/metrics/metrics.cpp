@@ -15,6 +15,7 @@
 #include <thread>
 
 namespace duckbox {
+namespace metrics {
 namespace {
 
 std::shared_ptr<IMetrics> g_metrics = std::make_shared<NoopMetrics>();
@@ -674,5 +675,7 @@ void StopMetricsHttp() {
     }
     g_metrics_http.reset();
 }
+
+} // namespace metrics
 
 } // namespace duckbox

@@ -8,6 +8,7 @@
 #include <sstream>
 
 namespace duckbox {
+namespace lake {
 
 std::string EscapeSqlString(const std::string &s) {
     std::string out;
@@ -206,5 +207,7 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
     ExecOrThrow(con, attach.str());
     ExecOrThrow(con, "USE " + alias);
 }
+
+} // namespace lake
 
 } // namespace duckbox

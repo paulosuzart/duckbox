@@ -13,6 +13,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace config {
 
 class ISpecValidator {
   public:
@@ -52,5 +53,15 @@ void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string
 // MACRO_ENTRY / TABLE_MACRO_ENTRY in every attached catalog and schema.
 // Does not run SQL through search_path (so a duckdb_functions() shadow cannot hide macros).
 void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con);
+
+} // namespace config
+
+using config::ISpecValidator;
+using config::SpecValidator;
+using config::RunValidateCommand;
+using config::MacroNotAllowlistedMessage;
+using config::IsAllowlistedMacroException;
+using config::CollectCreatedMacros;
+using config::RejectAllowlistedMacros;
 
 } // namespace duckbox

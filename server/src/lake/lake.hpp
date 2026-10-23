@@ -11,6 +11,7 @@
 #include <string>
 
 namespace duckbox {
+namespace lake {
 
 std::string EscapeSqlString(const std::string &s); // single-quote doubling for SQL literals
 std::string ResolvePath(const std::string &base_dir, const std::string &path);
@@ -27,5 +28,15 @@ std::string ResolveLakeCatalog(const SandboxSpec &spec, const SecretResolver &se
 // LOAD then INSTALL-on-miss. Does not disable external access (sandbox does after attach).
 void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std::string &spec_dir,
                         const SecretResolver &secrets, const DaemonConfig &daemon = {});
+
+} // namespace lake
+
+using lake::EscapeSqlString;
+using lake::ResolvePath;
+using lake::ExecOrThrow;
+using lake::CheckBootstrapSql;
+using lake::ConstrainLakeAgainstDaemon;
+using lake::ResolveLakeCatalog;
+using lake::AttachLakeFromSpec;
 
 } // namespace duckbox

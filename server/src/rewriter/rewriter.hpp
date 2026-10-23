@@ -17,6 +17,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace rewriter {
 
 // Walk state. cte_scope is a stack of declaration-order frames: a body sees
 // earlier names only (recursive arm also sees itself). Nested WITH names do
@@ -67,5 +68,22 @@ void BindParsedExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr,
 std::string RewriteUserSql(const std::string &sql, const Policy &policy, const TenantKey &key);
 RewriteResult RewriteUserSqlDetailed(const std::string &sql, const Policy &policy,
                                      const TenantKey &key);
+
+} // namespace rewriter
+
+using rewriter::RewriteContext;
+using rewriter::RewriteResult;
+using rewriter::ISqlRewriter;
+using rewriter::SqlRewriter;
+using rewriter::RewriteSelect;
+using rewriter::ApplyMaxRows;
+using rewriter::BindNamedParameters;
+using rewriter::BindNamedParametersInStatement;
+using rewriter::ParsePolicyFilter;
+using rewriter::ColonParamsToDollar;
+using rewriter::ValueFromKeyVar;
+using rewriter::BindParsedExpression;
+using rewriter::RewriteUserSql;
+using rewriter::RewriteUserSqlDetailed;
 
 } // namespace duckbox

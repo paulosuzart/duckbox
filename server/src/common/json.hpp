@@ -12,6 +12,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace common {
 
 using Json = nlohmann::json;
 
@@ -87,5 +88,15 @@ inline int64_t JsonRequireInt(const Json &j, const char *key, const char *what) 
 	}
 	return j.at(key).get<int64_t>();
 }
+
+} // namespace common
+
+using common::Json;
+using common::ParseJsonObject;
+using common::JsonRejectUnknown;
+using common::JsonHas;
+using common::JsonRequireString;
+using common::JsonRequireBool;
+using common::JsonRequireInt;
 
 } // namespace duckbox

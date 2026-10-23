@@ -8,6 +8,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace common {
 
 std::string Base64UrlEncode(const void *data, size_t len);
 std::string Base64UrlEncode(const std::string &s);
@@ -34,5 +35,19 @@ std::string AesGcmDecrypt(const std::string &key, const std::string &blob, const
 // alg == "HS256" exactly, a numeric `exp` (60s leeway), and optional `nbf`.
 // Rejects alg=none, alg confusion (e.g. RS256), and bad signatures.
 std::string VerifyJwtHs256(const std::string &token, const std::string &secret);
+
+} // namespace common
+
+using common::Base64UrlEncode;
+using common::Base64UrlDecode;
+using common::HmacSha256;
+using common::Sha256Raw;
+using common::Sha256Hex;
+using common::HexEncode;
+using common::RandomHex;
+using common::ConstTimeEquals;
+using common::AesGcmEncrypt;
+using common::AesGcmDecrypt;
+using common::VerifyJwtHs256;
 
 } // namespace duckbox

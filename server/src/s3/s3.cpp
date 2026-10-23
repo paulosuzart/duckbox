@@ -33,6 +33,7 @@
 #include <utility>
 
 namespace duckbox {
+namespace s3 {
 namespace {
 
 std::string UnquoteEtag(std::string e) {
@@ -535,5 +536,7 @@ std::string ProbeControlPlaneS3(const LeaseSettings &lease) {
         return e.what();
     }
 }
+
+} // namespace s3
 
 } // namespace duckbox

@@ -14,6 +14,7 @@
 #include <system_error>
 
 namespace duckbox {
+namespace common {
 
 std::string Base64UrlEncode(const void *data, size_t len) {
 	// cppcodec base64_url_unpadded: JWT/handle alphabet, no homemade +/=/_ map.
@@ -283,5 +284,7 @@ std::string VerifyJwtHs256(const std::string &token, const std::string &secret) 
 		throw AuthError("malformed JWT");
 	}
 }
+
+} // namespace common
 
 } // namespace duckbox

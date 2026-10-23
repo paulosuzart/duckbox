@@ -23,6 +23,7 @@
 #include <unordered_map>
 
 namespace duckbox {
+namespace flight {
 
 struct ServerOptions {
 	DaemonConfig daemon;
@@ -244,5 +245,22 @@ private:
 	DaemonConfig daemon_;
 	ListenerPlane plane_ = ListenerPlane::Public;
 };
+
+} // namespace flight
+
+using flight::ServerOptions;
+using flight::DuckboxFlightSqlServer;
+using flight::DuckboxFlightServer;
+using flight::BlockTerminationSignals;
+using flight::RunServer;
+using flight::RunLocalQuery;
+using flight::SandboxCliRequest;
+using flight::RunSandboxCli;
+using flight::NodeCliRequest;
+using flight::RunNodeDrain;
+using flight::ParseFlightLocation;
+using flight::StartDebugHttp;
+using flight::PeerFlight;
+using flight::HandshakeAuthHandler;
 
 } // namespace duckbox

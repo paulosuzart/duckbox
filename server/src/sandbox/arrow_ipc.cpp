@@ -11,6 +11,7 @@
 #include <cstring>
 
 namespace duckbox {
+namespace sandbox {
 
 std::vector<uint8_t> MaterializedToArrowIpc(ddb::MaterializedQueryResult &result) {
 	auto opts = result.client_properties;
@@ -105,5 +106,7 @@ std::shared_ptr<arrow::Schema> SchemaFromArrowIpc(const std::vector<uint8_t> &ip
 	}
 	return (*br)->schema();
 }
+
+} // namespace sandbox
 
 } // namespace duckbox

@@ -6,6 +6,7 @@
 #include <cstring>
 
 namespace duckbox {
+namespace flight {
 namespace {
 
 void PutU32(std::string &s, uint32_t v) {
@@ -157,5 +158,7 @@ StatementHandle HmacHandleSigner::Verify(const std::string &token) const {
 	}
 	return h;
 }
+
+} // namespace flight
 
 } // namespace duckbox

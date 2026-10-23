@@ -10,6 +10,7 @@
 #include <utility>
 
 namespace duckbox {
+namespace cluster {
 namespace {
 
 constexpr int kMaxCasAttempts = 8;
@@ -937,5 +938,7 @@ std::vector<NodeRecord> S3NodeDirectory::ListUncached() {
 std::vector<NodeRecord> S3NodeDirectory::List() {
 	return ListUncached();
 }
+
+} // namespace cluster
 
 } // namespace duckbox

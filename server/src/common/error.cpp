@@ -3,6 +3,7 @@
 #include <sstream>
 
 namespace duckbox {
+namespace common {
 
 RedirectError::RedirectError(std::string owner_id, std::string flight)
     : Error("duckbox redirect owner=" + owner_id + " location=" + flight), owner_id_(std::move(owner_id)),
@@ -20,5 +21,7 @@ std::string SpecError::Format(const std::vector<SpecIssue> &issues) {
 
 SpecError::SpecError(std::vector<SpecIssue> issues) : PolicyError(Format(issues)), issues_(std::move(issues)) {
 }
+
+} // namespace common
 
 } // namespace duckbox

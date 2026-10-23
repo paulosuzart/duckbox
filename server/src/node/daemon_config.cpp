@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 
 namespace duckbox {
+namespace node {
 namespace {
 
 std::vector<std::string> StringList(const YamlNode *n, const std::string &path) {
@@ -530,5 +531,7 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
         throw SpecError(std::move(issues));
     }
 }
+
+} // namespace node
 
 } // namespace duckbox

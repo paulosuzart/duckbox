@@ -9,6 +9,7 @@
 #include <string>
 
 namespace duckbox {
+namespace flight {
 
 // Headers taken from Flight metadata or debug HTTP. spec_header is unused
 // (named sandboxes load the definition by id; clients do not send a spec).
@@ -26,5 +27,11 @@ TenantKey Authenticate(const Policy &policy, const AuthRequest &req);
 // Always returns the definition's bound key. A per-query x-duckbox-key must
 // match the bound key exactly or is rejected (no tenant_id-only compare).
 TenantKey AuthenticateSandbox(const Policy &policy, const std::string &bound_key, const AuthRequest &req);
+
+} // namespace flight
+
+using flight::AuthRequest;
+using flight::Authenticate;
+using flight::AuthenticateSandbox;
 
 } // namespace duckbox

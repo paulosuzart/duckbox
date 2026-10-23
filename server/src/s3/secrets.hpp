@@ -9,6 +9,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace s3 {
 
 struct SecretRef {
 	enum class Scheme { None, Env, File };
@@ -43,5 +44,15 @@ void ValidateSecretRefSyntax(const SecretRef &ref, const std::string &field_path
 std::string ResolveSecret(const std::string &env_name, const std::string &inline_value, const std::string &field_path);
 
 std::string TrimCopy(const std::string &s);
+
+} // namespace s3
+
+using s3::SecretRef;
+using s3::SecretResolver;
+using s3::EnvFileSecretResolver;
+using s3::ParseSecretRef;
+using s3::ValidateSecretRefSyntax;
+using s3::ResolveSecret;
+using s3::TrimCopy;
 
 } // namespace duckbox

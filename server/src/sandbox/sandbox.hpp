@@ -25,6 +25,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace sandbox {
 
 // One query result. arrow_ipc is produced from the same materialized result as text_table (query
 // runs once).
@@ -203,5 +204,16 @@ class SandboxRuntime {
 // Spec idle_timeout if set, else daemon default; clamped to daemon max (if any).
 int64_t EffectiveIdleTimeoutMs(const DaemonConfig &daemon, const SandboxSpec &spec);
 std::string SandboxSummaryJson(const SandboxSummary &s); // ListSandboxes item; no spec_yaml
+
+} // namespace sandbox
+
+using sandbox::QueryOutput;
+using sandbox::ColumnSchema;
+using sandbox::TenantSandbox;
+using sandbox::SandboxSummary;
+using sandbox::SandboxListFilter;
+using sandbox::SandboxRuntime;
+using sandbox::EffectiveIdleTimeoutMs;
+using sandbox::SandboxSummaryJson;
 
 } // namespace duckbox

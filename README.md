@@ -274,7 +274,7 @@ The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl 
 | --- | --- |
 | `daemons/` | Control-plane YAML (listen, limits, optional lease) |
 | `policies/` | Sandbox specs (lake + tables + key + functions) |
-| `server/` | C++ daemon + enforcement |
+| `server/src/<area>/` | C++ node + enforcement, headers next to sources |
 | `examples/python/` | Quickstart notebook/script, `duckbox_client`, CLI utility |
 | `test/` | CTest suites: `unit`, `guardrails` (YAML SQL corpus), `integration` |
 

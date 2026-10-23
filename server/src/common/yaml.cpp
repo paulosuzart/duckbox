@@ -12,6 +12,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace common {
 namespace {
 
 std::string ChildPath(const std::string &parent, const std::string &key) {
@@ -299,5 +300,7 @@ YamlNode LoadYamlFile(const std::string &path) {
 	os << in.rdbuf();
 	return ParseYaml(os.str());
 }
+
+} // namespace common
 
 } // namespace duckbox

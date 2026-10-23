@@ -8,6 +8,7 @@
 #include <sstream>
 
 namespace duckbox {
+namespace sandbox {
 namespace {
 
 std::string VersionKey(const std::string &id, int version) {
@@ -594,5 +595,7 @@ std::shared_ptr<SandboxRegistry> MakeSandboxRegistry(const DaemonConfig &daemon)
 	}
 	return std::make_shared<MemorySandboxRegistry>();
 }
+
+} // namespace sandbox
 
 } // namespace duckbox

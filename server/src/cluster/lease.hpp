@@ -18,6 +18,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace cluster {
 
 // Writer fence. epoch lives on the S3 lease object only — it is not written into
 // the lake. Steal / re-create after a tombstone bumps epoch; renew and steal
@@ -291,5 +292,25 @@ private:
 	bool healthy_ = true;
 	std::string instance_id_;
 };
+
+} // namespace cluster
+
+using cluster::Lease;
+using cluster::SelfFence;
+using cluster::Clock;
+using cluster::SystemClock;
+using cluster::FakeClock;
+using cluster::ILeaseManager;
+using cluster::LeaseManager;
+using cluster::RouteDecision;
+using cluster::IRouter;
+using cluster::LeaseTelemetry;
+using cluster::SingleNodeLeaseManager;
+using cluster::LocalRouter;
+using cluster::S3LeaseOptions;
+using cluster::LeaseOptionsFromDaemon;
+using cluster::NodeRecord;
+using cluster::S3NodeDirectory;
+using cluster::S3ConditionalLeaseManager;
 
 } // namespace duckbox

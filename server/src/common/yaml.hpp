@@ -11,6 +11,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace common {
 
 struct YamlNode {
 	enum class Kind { Null, Scalar, Map, Seq };
@@ -51,5 +52,13 @@ YamlNode LoadYamlFile(const std::string &path);
 std::vector<std::string> YamlStringList(const YamlNode *n, const std::string &path);
 // Present mapping may only contain `allowed` keys (`path.key: unknown key`).
 void YamlRejectUnknownKeys(const YamlNode &n, std::initializer_list<const char *> allowed);
+
+} // namespace common
+
+using common::YamlNode;
+using common::ParseYaml;
+using common::LoadYamlFile;
+using common::YamlStringList;
+using common::YamlRejectUnknownKeys;
 
 } // namespace duckbox

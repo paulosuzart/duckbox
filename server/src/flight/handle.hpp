@@ -10,6 +10,7 @@
 #include <string>
 
 namespace duckbox {
+namespace flight {
 
 // Payload sealed inside the token. rewritten_sql is already tenant-filtered.
 struct StatementHandle {
@@ -48,5 +49,11 @@ private:
 	std::string secret_;
 	int64_t ttl_seconds_ = 300;
 };
+
+} // namespace flight
+
+using flight::StatementHandle;
+using flight::IHandleSigner;
+using flight::HmacHandleSigner;
 
 } // namespace duckbox

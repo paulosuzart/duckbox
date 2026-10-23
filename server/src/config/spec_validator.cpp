@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 namespace duckbox {
+namespace config {
 namespace {
 
 void CollectParamsFromQuery(ddb::QueryNode &node, std::unordered_set<std::string> &out);
@@ -615,5 +616,7 @@ int RunValidateCommand(const DaemonConfig &daemon, const std::string &spec_path)
         return 1;
     }
 }
+
+} // namespace config
 
 } // namespace duckbox

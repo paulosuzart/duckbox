@@ -15,6 +15,7 @@
 #include <vector>
 
 namespace duckbox {
+namespace config {
 
 enum class LakeKind { Memory, Ducklake };
 
@@ -229,5 +230,45 @@ bool ParseDurationMs(const std::string &raw, int64_t *out_ms);
 bool ParseExpiresAtMs(const std::string &raw, int64_t *out_ms);
 // Earlier of created+ttl and absolute expires_at; 0 if neither is set.
 int64_t ComputeExpiresAtMs(int64_t created_at_ms, const SandboxSpec &spec);
+
+} // namespace config
+
+using config::ApplyTableDefaults;
+using config::Attachment;
+using config::CanonicalAllowedPrefix;
+using config::CatalogTableSelectSql;
+using config::ColumnMeta;
+using config::ComputeExpiresAtMs;
+using config::ContentHash;
+using config::DeclaredAllowedPaths;
+using config::DecodeSpecPayload;
+using config::DefaultTableCatalog;
+using config::DefaultTableSchema;
+using config::FingerprintSpec;
+using config::HandleSettings;
+using config::IsAlwaysDeniedTableFunction;
+using config::KeySpec;
+using config::kMaxStaleVersionGraceMs;
+using config::LakeKind;
+using config::LakeSettings;
+using config::LifecycleSettings;
+using config::LoadPolicyFile;
+using config::LoadSpecFile;
+using config::LoadSpecString;
+using config::LocationContributesAllowedPath;
+using config::ParseDurationMs;
+using config::ParseExpiresAtMs;
+using config::Policy;
+using config::QualifiedTable;
+using config::QualifyTable;
+using config::QuoteSqlIdent;
+using config::Resources;
+using config::S3Settings;
+using config::SafeSqlIdent;
+using config::SandboxSpec;
+using config::TableMapKey;
+using config::TablePolicy;
+using config::ValidSandboxId;
+using config::ValidSqlIdent;
 
 } // namespace duckbox

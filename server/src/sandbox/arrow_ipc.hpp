@@ -13,11 +13,18 @@
 #include <vector>
 
 namespace duckbox {
+namespace sandbox {
 
 std::vector<uint8_t> MaterializedToArrowIpc(ddb::MaterializedQueryResult &result); // in-memory; no /tmp file
 std::vector<uint8_t> QueryToArrowIpc(ddb::Connection &con, const std::string &select_sql);
 std::vector<uint8_t> QueryToArrowIpc(ddb::Connection &con, const std::string &select_sql,
                                     std::vector<ddb::Value> &params);
 std::shared_ptr<arrow::Schema> SchemaFromArrowIpc(const std::vector<uint8_t> &ipc);
+
+} // namespace sandbox
+
+using sandbox::MaterializedToArrowIpc;
+using sandbox::QueryToArrowIpc;
+using sandbox::SchemaFromArrowIpc;
 
 } // namespace duckbox

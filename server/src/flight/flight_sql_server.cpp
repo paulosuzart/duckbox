@@ -36,6 +36,7 @@
 #include <thread>
 
 namespace duckbox {
+namespace flight {
 namespace {
 
 using arrow::Status;
@@ -1624,5 +1625,7 @@ int RunLocalQuery(const DaemonConfig &daemon, const std::string &spec_path, cons
     std::cout << out.text_table << std::endl;
     return 0;
 }
+
+} // namespace flight
 
 } // namespace duckbox

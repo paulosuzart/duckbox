@@ -6,6 +6,7 @@
 #include <sstream>
 
 namespace duckbox {
+namespace s3 {
 namespace {
 
 bool ValidEnvName(const std::string &s) {
@@ -146,5 +147,7 @@ std::string ResolveSecret(const std::string &env_name, const std::string &inline
 	}
 	return inline_value;
 }
+
+} // namespace s3
 
 } // namespace duckbox
