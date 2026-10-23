@@ -14,6 +14,7 @@ concurrency:
 
 # Pin Arrow so the APT .deb cache key stays stable. 26.0.0 is what CI installs today.
 # One shared Linux key (version + install_arrow.sh package list + runner image).
+# Save right after install so the first Linux job warms the others before tests finish.
 # Pushes to main write it; PR-branch caches are invisible to main and to other PRs.
 env:
   ARROW_VERSION: "26.0.0"
