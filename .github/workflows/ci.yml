@@ -12,6 +12,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Pin Arrow so the APT .deb cache key stays stable. 26.0.0 is what CI installs today.
+env:
+  ARROW_VERSION: "26.0.0"
+  ARROW_APT_VERSION: "26.0.0-1"
+  ARROW_APT_CACHE: ${{ github.workspace }}/.cache/duckbox-apt
+
 jobs:
   enforcement:
     name: Build and tests
@@ -23,6 +29,11 @@ jobs:
       CXX: g++
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Arrow APT archives
+        uses: actions/cache@v4
+        with:
+          path: .cache/duckbox-apt
+          key: arrow-apt-${{ env.ARROW_VERSION }}-1-${{ runner.os }}-${{ runner.arch }}-noble
       - name: Install Arrow Flight SQL + build tools
         run: bash scripts/install_arrow.sh
       - name: Cache DuckDB deps
@@ -38,6 +49,13 @@ jobs:
             duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
       - name: Install AWS SDK C++ (S3+STS, vcpkg)
         run: bash scripts/install_aws_sdk.sh
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          create-symlink: true
+          max-size: 500M
+          append-timestamp: false
       - name: Build
         run: make build CXX=g++
       - name: Unit tests
@@ -93,6 +111,11 @@ jobs:
       CXX: g++
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Arrow APT archives
+        uses: actions/cache@v4
+        with:
+          path: .cache/duckbox-apt
+          key: arrow-apt-${{ env.ARROW_VERSION }}-1-${{ runner.os }}-${{ runner.arch }}-noble
       - name: Install Arrow Flight SQL + build tools
         run: bash scripts/install_arrow.sh
       - name: Cache DuckDB deps
@@ -108,6 +131,13 @@ jobs:
             duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
       - name: Install AWS SDK C++ (S3+STS, vcpkg)
         run: bash scripts/install_aws_sdk.sh
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          create-symlink: true
+          max-size: 500M
+          append-timestamp: false
       - name: Coverage (gcovr, server/src >= 75%)
         run: make coverage
 
@@ -120,6 +150,11 @@ jobs:
       CXX: g++
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Arrow APT archives
+        uses: actions/cache@v4
+        with:
+          path: .cache/duckbox-apt
+          key: arrow-apt-${{ env.ARROW_VERSION }}-1-${{ runner.os }}-${{ runner.arch }}-noble
       - name: Install Arrow Flight SQL + build tools
         run: bash scripts/install_arrow.sh
       - name: Cache DuckDB deps
@@ -213,6 +248,11 @@ jobs:
       DUCKBOX_S3_SECRET: rustfsadmin
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Arrow APT archives
+        uses: actions/cache@v4
+        with:
+          path: .cache/duckbox-apt
+          key: arrow-apt-${{ env.ARROW_VERSION }}-1-${{ runner.os }}-${{ runner.arch }}-noble
       - name: Install Arrow Flight SQL + build tools
         run: bash scripts/install_arrow.sh
       - name: Cache DuckDB deps
