@@ -13,6 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 # Pin Arrow so the APT .deb cache key stays stable. 26.0.0 is what CI installs today.
+# One shared Linux key (version + install_arrow.sh package list + runner image).
+# Pushes to main write it; PR-branch caches are invisible to main and to other PRs.
 env:
   ARROW_VERSION: "26.0.0"
   ARROW_APT_VERSION: "26.0.0-1"
@@ -30,12 +32,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Cache Arrow APT archives
-        uses: actions/cache@v4
+        id: arrow-apt-cache
+        uses: actions/cache/restore@v4
         with:
           path: .cache/duckbox-apt
-          key: arrow-apt-${{ env.ARROW_VERSION }}-1-${{ runner.os }}-${{ runner.arch }}-noble
+          key: arrow-apt-${{ env.ARROW_VERSION }}-${{ hashFiles('scripts/install_arrow.sh') }}-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04
+          restore-keys: |
+            arrow-apt-${{ env.ARROW_VERSION }}-${{ hashFiles('scripts/install_arrow.sh') }}-
       - name: Install Arrow Flight SQL + build tools
         run: bash scripts/install_arrow.sh
+      - name: Save Arrow APT archives
+        if: always() && steps.arrow-apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/duckbox-apt
+          key: ${{ steps.arrow-apt-cache.outputs.cache-primary-key }}
       - name: Cache DuckDB deps
         uses: actions/cache@v4
         with:
@@ -112,12 +123,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Cache Arrow APT archives
-        uses: actions/cache@v4
+        id: arrow-apt-cache
+        uses: actions/cache/restore@v4
         with:
           path: .cache/duckbox-apt
-          key: arrow-apt-${{ env.ARROW_VERSION }}-1-${{ runner.os }}-${{ runner.arch }}-noble
+          key: arrow-apt-${{ env.ARROW_VERSION }}-${{ hashFiles('scripts/install_arrow.sh') }}-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04
+          restore-keys: |
+            arrow-apt-${{ env.ARROW_VERSION }}-${{ hashFiles('scripts/install_arrow.sh') }}-
       - name: Install Arrow Flight SQL + build tools
         run: bash scripts/install_arrow.sh
+      - name: Save Arrow APT archives
+        if: always() && steps.arrow-apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/duckbox-apt
+          key: ${{ steps.arrow-apt-cache.outputs.cache-primary-key }}
       - name: Cache DuckDB deps
         uses: actions/cache@v4
         with:
@@ -151,12 +171,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Cache Arrow APT archives
-        uses: actions/cache@v4
+        id: arrow-apt-cache
+        uses: actions/cache/restore@v4
         with:
           path: .cache/duckbox-apt
-          key: arrow-apt-${{ env.ARROW_VERSION }}-1-${{ runner.os }}-${{ runner.arch }}-noble
+          key: arrow-apt-${{ env.ARROW_VERSION }}-${{ hashFiles('scripts/install_arrow.sh') }}-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04
+          restore-keys: |
+            arrow-apt-${{ env.ARROW_VERSION }}-${{ hashFiles('scripts/install_arrow.sh') }}-
       - name: Install Arrow Flight SQL + build tools
         run: bash scripts/install_arrow.sh
+      - name: Save Arrow APT archives
+        if: always() && steps.arrow-apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/duckbox-apt
+          key: ${{ steps.arrow-apt-cache.outputs.cache-primary-key }}
       - name: Cache DuckDB deps
         uses: actions/cache@v4
         with:
@@ -249,12 +278,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Cache Arrow APT archives
-        uses: actions/cache@v4
+        id: arrow-apt-cache
+        uses: actions/cache/restore@v4
         with:
           path: .cache/duckbox-apt
-          key: arrow-apt-${{ env.ARROW_VERSION }}-1-${{ runner.os }}-${{ runner.arch }}-noble
+          key: arrow-apt-${{ env.ARROW_VERSION }}-${{ hashFiles('scripts/install_arrow.sh') }}-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04
+          restore-keys: |
+            arrow-apt-${{ env.ARROW_VERSION }}-${{ hashFiles('scripts/install_arrow.sh') }}-
       - name: Install Arrow Flight SQL + build tools
         run: bash scripts/install_arrow.sh
+      - name: Save Arrow APT archives
+        if: always() && steps.arrow-apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/duckbox-apt
+          key: ${{ steps.arrow-apt-cache.outputs.cache-primary-key }}
       - name: Cache DuckDB deps
         uses: actions/cache@v4
         with:
