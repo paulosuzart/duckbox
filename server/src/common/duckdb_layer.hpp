@@ -111,7 +111,7 @@ inline ddb::vector<ddb::Value> ToDuckValues(const std::vector<ddb::Value> &in) {
     return out;
 }
 
-inline const std::string &IdentName(const ddb::Identifier &id) {
+inline std::string IdentName(const ddb::Identifier &id) {
     return id.GetIdentifierName();
 }
 

@@ -16,6 +16,7 @@ using namespace common;
 
 std::vector<uint8_t> MaterializedToArrowIpc(ddb::QueryResult &result) {
     result.Complete();
+    result.ThrowIfError();
     auto opts = result.client_properties;
     ddb::vector<ddb::string> names;
     for (auto &id : result.GetNames()) {
