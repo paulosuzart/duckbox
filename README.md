@@ -56,13 +56,13 @@ Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (c
 - Docker Engine with Compose v2 (Postgres + RustFS)
 - Python 3.10+
 - CMake 3.20+ and a C++17 compiler (`g++` on Linux, Apple Clang or `g++` on macOS)
-- **Linux:** `sudo` for the Arrow APT source
+- **Linux:** `sudo` for the Arrow APT source on Ubuntu 24.04 (noble) or 22.04 (jammy). GitHub Actions rewrites the runner's Ubuntu mirrors with `archive.ubuntu.com` / `security.ubuntu.com` at priority 1 and Azure at priority 9. A local run does not, unless you set `DUCKBOX_APT_MIRRORS=1`.
 - **macOS:** Homebrew
 
 ### 1. C++ dependencies and Arrow
 
 ```bash
-# Linux
+# Linux — Apache APT Arrow 26.0.0 (noble/jammy). CI sets Ubuntu mirror priorities; local does not unless DUCKBOX_APT_MIRRORS=1.
 bash scripts/install_arrow.sh
 
 # macOS — Homebrew Arrow (Flight SQL) + aws-sdk-cpp + openssl@4

@@ -1,17 +1,11 @@
 #!/usr/bin/env bash
 # Arrow C++ with Flight SQL. Linux: Apache APT. macOS: Homebrew.
-# Pin Arrow 26.0.0 (the version CI installs today) so the APT cache key is stable.
-#
-# Linux CI downloads every .deb (Arrow and transitive Ubuntu deps) into
-# ARROW_APT_CACHE via Dir::Cache::Archives, then installs from that directory.
-# The workflow caches the directory so warm jobs skip the Ubuntu mirror.
+# Pin Arrow 26.0.0 (the version CI installs today). DuckDB stays 1.5.6.
 set -euo pipefail
 
 ARROW_VERSION="${ARROW_VERSION:-26.0.0}"
 ARROW_APT_VERSION="${ARROW_APT_VERSION:-${ARROW_VERSION}-1}"
-ARROW_APT_CACHE="${ARROW_APT_CACHE:-${HOME}/.cache/duckbox-apt}"
 
-# Package list is part of the CI cache key (hash of this file).
 ARROW_BUILD_PACKAGES=(
   ca-certificates lsb-release wget g++ cmake unzip curl zip tar
   pkg-config ninja-build git libssl-dev libcurl4-openssl-dev zlib1g-dev
@@ -21,6 +15,16 @@ ARROW_DEV_PACKAGES=(
   "libarrow-flight-dev=${ARROW_APT_VERSION}"
   "libarrow-flight-sql-dev=${ARROW_APT_VERSION}"
 )
+
+# SHA256 of the versioned apache-arrow-apt-source_${ARROW_APT_VERSION} package
+# (keyring + sources). Update these pins together with ARROW_VERSION.
+arrow_apt_source_sha256() {
+  case "$1" in
+    noble) echo "89ff33c409ef0e5f0ed7ba117fb1bd5db7c5cc937f46f0baae482a30acb4972d" ;;
+    jammy) echo "382b9c75f18e5870f2d706c9790f81f550bcdad08817da2eb0951da15a8ebfc1" ;;
+    *) return 1 ;;
+  esac
+}
 
 os="$(uname -s)"
 if [[ "$os" == "Linux" ]]; then
@@ -32,8 +36,11 @@ if [[ "$os" == "Linux" ]]; then
 
   # GitHub-hosted runners use azure.archive.ubuntu.com. When that mirror
   # stalls at 15-100 kB/s (run 40016321532), cmake / libgrpc / protobuf take
-  # 13-15 minutes. Prefer archive.ubuntu.com via mirror+file: and fail over
-  # with Acquire::Retries + Acquire::http::Timeout instead of crawling Azure.
+  # 13-15 minutes. apt's mirror+file: picks a URI at random unless each line
+  # has a TAB + priority:N (lower wins). Prefer archive/security at priority 1;
+  # Azure is priority 9 and is used only when a preferred mirror errors.
+  # Acquire::http::Timeout does not catch a slow-but-working transfer.
+  # Local machines are left alone unless DUCKBOX_APT_MIRRORS=1.
   configure_apt_mirrors() {
     $SUDO tee /etc/apt/apt.conf.d/80-duckbox-acquire >/dev/null <<'EOF'
 Acquire::Retries "5";
@@ -44,13 +51,13 @@ EOF
     $SUDO mkdir -p /etc/apt/mirrors
     local list
     list="$(mktemp)"
-    cat >"${list}" <<'EOF'
-http://archive.ubuntu.com/ubuntu/
-http://security.ubuntu.com/ubuntu/
-http://azure.archive.ubuntu.com/ubuntu/
-EOF
+    {
+      printf '%s\t%s\n' 'http://archive.ubuntu.com/ubuntu/' 'priority:1'
+      printf '%s\t%s\n' 'http://security.ubuntu.com/ubuntu/' 'priority:1'
+      printf '%s\t%s\n' 'http://azure.archive.ubuntu.com/ubuntu/' 'priority:9'
+    } >"${list}"
     $SUDO cp "${list}" /etc/apt/mirrors/ubuntu.list
-    # ubuntu-latest already reads this mirror list; put the public archive first.
+    # ubuntu-24.04 runners already read this mirror list.
     if [[ -f /etc/apt/apt-mirrors.txt ]]; then
       $SUDO cp "${list}" /etc/apt/apt-mirrors.txt
     fi
@@ -68,56 +75,33 @@ EOF
     done
   }
 
-  prepare_apt_cache() {
-    mkdir -p "${ARROW_APT_CACHE}/partial"
-    chmod -R a+rwX "${ARROW_APT_CACHE}"
-    $SUDO rm -f "${ARROW_APT_CACHE}/lock" "${ARROW_APT_CACHE}/partial/lock"
-    local n
-    n="$(find "${ARROW_APT_CACHE}" -maxdepth 1 -name '*.deb' | wc -l)"
-    if [[ "${n}" -gt 0 ]]; then
-      echo "Arrow APT cache warm (${n} debs, $(du -sh "${ARROW_APT_CACHE}" | awk '{print $1}')) at ${ARROW_APT_CACHE}"
-    else
-      echo "Arrow APT cache empty (cold download into ${ARROW_APT_CACHE})"
-    fi
-  }
+  if [[ "${GITHUB_ACTIONS:-}" == "true" || "${DUCKBOX_APT_MIRRORS:-}" == "1" ]]; then
+    configure_apt_mirrors
+  fi
 
-  finish_apt_cache() {
-    $SUDO rm -f "${ARROW_APT_CACHE}/lock" "${ARROW_APT_CACHE}/partial/lock"
-    $SUDO chmod -R a+rX "${ARROW_APT_CACHE}"
-    $SUDO chown -R "$(id -u):$(id -g)" "${ARROW_APT_CACHE}" || true
-    echo "Arrow APT archives in ${ARROW_APT_CACHE} ($(find "${ARROW_APT_CACHE}" -maxdepth 1 -name '*.deb' | wc -l) debs, $(du -sh "${ARROW_APT_CACHE}" | awk '{print $1}'))"
-  }
-
-  # Every apt-get that fetches packages writes .debs here, including transitive deps.
-  apt_get() {
-    $SUDO apt-get \
-      -o "Dir::Cache::Archives=${ARROW_APT_CACHE}" \
-      -o "APT::Keep-Downloaded-Packages=true" \
-      "$@"
-  }
-
-  # Download-only first so the cached directory holds the full closure, then install.
-  apt_download_and_install() {
-    apt_get install -y -d "$@"
-    apt_get install -y "$@"
-  }
-
-  configure_apt_mirrors
-  prepare_apt_cache
-
-  apt_get update -qq
-  apt_download_and_install --no-install-recommends "${ARROW_BUILD_PACKAGES[@]}"
+  $SUDO apt-get update -qq
+  $SUDO apt-get install -y --no-install-recommends "${ARROW_BUILD_PACKAGES[@]}"
 
   codename="$(lsb_release --codename --short)"
-  deb="apache-arrow-apt-source-latest-${codename}.deb"
-  if [[ -f "${ARROW_APT_CACHE}/${deb}" ]]; then
-    echo "Using cached Apache apt source ${deb}"
-  else
-    wget -q "https://packages.apache.org/artifactory/arrow/ubuntu/${deb}" -O "${ARROW_APT_CACHE}/${deb}"
+  expected="$(arrow_apt_source_sha256 "${codename}")" || {
+    echo "No pinned SHA256 for apache-arrow-apt-source on ${codename} (supported: noble, jammy). Update the pin together with ARROW_VERSION." >&2
+    exit 1
+  }
+  url="https://packages.apache.org/artifactory/arrow/ubuntu/pool/${codename}/main/a/apache-arrow-apt-source/apache-arrow-apt-source_${ARROW_APT_VERSION}_all.deb"
+  # apt-get install requires a .deb suffix; a bare mktemp path is "Unsupported file".
+  tmp="$(mktemp --suffix=.deb)"
+  trap 'rm -f "${tmp}"' EXIT
+  wget -q "${url}" -O "${tmp}"
+  got="$(sha256sum "${tmp}" | awk '{print $1}')"
+  if [[ "${got}" != "${expected}" ]]; then
+    echo "SHA256 mismatch for ${url}: got ${got} want ${expected}. Update the pin together with ARROW_VERSION." >&2
+    exit 1
   fi
-  apt_get install -y "${ARROW_APT_CACHE}/${deb}"
-  apt_get update -qq
-  apt_download_and_install "${ARROW_DEV_PACKAGES[@]}"
+  # Readable by apt's _apt sandbox user so install is not "unsandboxed as root".
+  chmod 644 "${tmp}"
+  $SUDO apt-get install -y "${tmp}"
+  $SUDO apt-get update -qq
+  $SUDO apt-get install -y "${ARROW_DEV_PACKAGES[@]}"
 
   installed="$(pkg-config --modversion arrow)"
   if [[ "${installed}" != "${ARROW_VERSION}" ]]; then
@@ -125,7 +109,6 @@ EOF
     exit 1
   fi
   echo "Arrow ${installed} with Flight SQL (pinned ${ARROW_APT_VERSION})"
-  finish_apt_cache
 elif [[ "$os" == "Darwin" ]]; then
   brew install apache-arrow aws-sdk-cpp openssl@4 cmake ninja
   echo "Arrow + aws-sdk-cpp via Homebrew (openssl@4; Flight SQL enabled in recent formulae)"
