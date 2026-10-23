@@ -1,8 +1,9 @@
 #include "config/policy.hpp"
 #include "common/crypto.hpp"
 #include "common/duckdb_layer.hpp"
-#include "lake/lake.hpp"
 #include "common/yaml.hpp"
+#include "lake/lake.hpp"
+#include "s3/secrets.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -843,7 +844,6 @@ SandboxSpec LoadSpecFile(const std::string &path) {
     }
     return spec;
 }
-
 
 std::vector<std::string> KeySpec::VariableNames() const {
     std::vector<std::string> names;
