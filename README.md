@@ -143,7 +143,7 @@ print(db.query("SELECT id, title, amount FROM deals"))
 
 `lake.bootstrap_sql` file paths are **relative to the spec file**, not the working directory (`policies/memory/analyst.yaml` uses `../../examples/sql/memory_init.sql`). Inlined SQL is also accepted. The daemon never re-reads that host path at warmup — LoadSpecFile inlines the file first. That SQL is trusted SaaS seed input (it can `read_csv` / `query()` via `CREATE TABLE AS SELECT` or `INSERT … SELECT` before external access is disabled). Agent queries stay tenant-wrapped. On DuckLake the field is a validation error.
 
-**RustFS** is the emulator in `docker-compose.yml` to match the product S3 target; if the image is unusable, MinIO is the fallback (same path-style endpoint). Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads — that client is **aws-sdk-cpp S3Client** (vcpkg, S3 component only) with endpoint override and path-style addressing. Arrow `S3FileSystem` has no conditional-write headers, so it is not used for the control plane. Tests inject an in-memory `S3ControlClient`.
+**RustFS** is the only S3-compatible store in `docker-compose.yml` (pinned `rustfs/rustfs:1.0.3`). The README runbook, STS suite, and multi-node e2e all use it at `127.0.0.1:9000`. Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads — that client is **aws-sdk-cpp S3Client** (vcpkg: S3, STS, identity-management) with endpoint override and path-style addressing. Arrow `S3FileSystem` has no conditional-write headers, so it is not used for the control plane. Tests inject an in-memory `S3ControlClient`.
 
 ## Named sandboxes
 
@@ -156,7 +156,40 @@ The **daemon is a control plane**. It has **no data access**. It owns:
 - routing of calls to warm instances
 - S3 **ownership leases** (its only credential is the lease/registry prefix)
 
-**Lake attach, attachments, and credentials belong on the sandbox definition** and are used only by that sandbox’s DuckDB instance, at create/warmup (before `lock_configuration`). The registry stores **credential references only** (`env:DUCKBOX_S3_KEY`, `file:/run/secrets/x`) — never values. Values are resolved inside the sandbox at each warmup. Refs are checked syntactically at create; resolvability is checked at warmup. Values are never logged.
+**Lake attach, attachments, and credentials belong on the sandbox definition** and are used only by that sandbox’s DuckDB instance, at create/warmup (before `lock_configuration`). The registry stores **credential references only** (`env:DUCKBOX_S3_KEY`, `file:/run/secrets/x`) — never values. Values are resolved inside the sandbox at each warmup. Refs are checked syntactically at create; every env/file ref and every `profile` / `role_arn` must be on the node's `lake_allow` lists (fail closed). Resolvability is checked at warmup. Values are never logged.
+
+Lake S3 supports two modes: static keys, or DuckDB `PROVIDER credential_chain` (refresh via profile / assume-role / the default chain, including IRSA web identity). Full examples and the AWS-only (no IAM user) path: [docs/lake-s3-credentials.md](docs/lake-s3-credentials.md).
+
+Mode 1 — static keys (refs only; every env name must appear on `lake_allow.secret_refs`):
+
+```yaml
+lake:
+  s3:
+    access_key_env: DUCKBOX_S3_KEY
+    secret_key_env: DUCKBOX_S3_SECRET
+    region: us-east-1
+```
+
+Mode 2 — credential chain (refreshable; no IAM user). List each profile and role on the daemon, or set `allow_default_credential_chain` for IRSA / the default chain. Do not use `*`:
+
+```yaml
+# spec
+lake:
+  extensions: [httpfs, postgres, ducklake, aws]
+  s3:
+    provider: credential_chain
+    profile: lake-readonly
+    # role_arn: arn:aws:iam::123456789012:role/duckbox-lake  # not with profile
+    region: us-east-1
+    use_ssl: true
+    url_style: vhost
+# daemon
+lake_allow:
+  s3_endpoints: ["s3.amazonaws.com"]
+  secret_refs: ["env:DUCKBOX_LAKE_CATALOG"]
+  aws_profiles: [lake-readonly]
+  role_arns: ["arn:aws:iam::123456789012:role/duckbox-lake"]
+```
 
 A definition is: **id**, **key**, **policy** (with a bounded `policy_class` name), lake, attachments, credential refs, limits.
 
@@ -197,7 +230,7 @@ Each node also serves Prometheus **text** on `/metrics` (default `127.0.0.1:9477
 
 ### Validation
 
-1. **Static** (create/update): schema, types, key extractors, filters, `:vars`, function names, secret-ref syntax, `handles.stale_version_grace` (duration, cap 1h). Table names, column names, and `tenant_column` must be unquoted ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`, not a SQL keyword). **All** errors, with field paths (`tables.deals.filters[0]: …`). Tables are keyed by `catalog.schema.name` after lake defaults; an exact duplicate is rejected. Memory `lake.bootstrap_sql` is checked with `CheckBootstrapSql` here (not only at warmup / `duckbox validate`): only `CREATE TABLE` / `CREATE SCHEMA` / `INSERT`. DuckLake `lake.bootstrap_sql` is a field-path error (`only valid when lake.kind=memory`). Every allowlisted name that is a macro (`MACRO_ENTRY` / `TABLE_MACRO_ENTRY`, built-in or user) is rejected (`macro is not allowlisted: <name>`) unless it is on the tested exception list (`count`, `count_star`, `sum`, `avg`, `min`, `max`, `lower`, `upper`, `length`, `coalesce`, `round`, `abs`) and that catalog entry is internal in the `system` catalog.
+1. **Static** (create/update): schema, types, key extractors, filters, `:vars`, function names, secret-ref syntax, lake S3 credential mode, `lake_allow` (secret refs, profiles, roles; fail closed), `handles.stale_version_grace` (duration, cap 1h). Table names, column names, and `tenant_column` must be unquoted ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`, not a SQL keyword). **All** errors, with field paths (`tables.deals.filters[0]: …`). Tables are keyed by `catalog.schema.name` after lake defaults; an exact duplicate is rejected. Memory `lake.bootstrap_sql` is checked with `CheckBootstrapSql` here (not only at warmup / `duckbox validate`): only `CREATE TABLE` / `CREATE SCHEMA` / `INSERT`. DuckLake `lake.bootstrap_sql` is a field-path error (`only valid when lake.kind=memory`). Every allowlisted name that is a macro (`MACRO_ENTRY` / `TABLE_MACRO_ENTRY`, built-in or user) is rejected (`macro is not allowlisted: <name>`) unless it is on the tested exception list (`count`, `count_star`, `sum`, `avg`, `min`, `max`, `lower`, `upper`, `length`, `coalesce`, `round`, `abs`) and that catalog entry is internal in the `system` catalog.
 2. **Lake** (inside the sandbox on first warmup for that **(id, version)**): whitelisted tables/columns exist. Cached on the registry record so later warmups skip it. `duckbox validate` uses a throwaway sandbox.
 
 Daemon startup validates **only** daemon config (listen, limits, optional lease prefix reachability / If-None-Match probe). Not the lake.

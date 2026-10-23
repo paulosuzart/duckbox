@@ -26,6 +26,9 @@ struct S3Settings {
     bool use_ssl = false;
     SecretRef access_key;
     SecretRef secret_key;
+    std::string provider; // empty / config / credential_chain
+    std::string profile;
+    std::string role_arn;
     std::string region = "us-east-1";
     std::string region_env;
 };

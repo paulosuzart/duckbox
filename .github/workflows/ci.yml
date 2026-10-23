@@ -31,11 +31,12 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
+            duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
             duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
             duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
-      - name: Install AWS SDK C++ (S3, vcpkg)
+      - name: Install AWS SDK C++ (S3+STS, vcpkg)
         run: bash scripts/install_aws_sdk.sh
       - name: Build
         run: make build CXX=g++
@@ -76,7 +77,7 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)"
           JOBS="$(sysctl -n hw.ncpu)"
-          cmake --build build --parallel "$JOBS" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests duckbox_schema_tests
+          cmake --build build --parallel "$JOBS" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests duckbox_schema_tests duckbox_s3_credentials_tests duckbox_s3_secret_guardrail_tests duckbox_s3_sts_tests
       - name: Unit, guardrail, and integration tests
         env:
           DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
@@ -100,11 +101,12 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
+            duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
             duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
             duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
-      - name: Install AWS SDK C++ (S3, vcpkg)
+      - name: Install AWS SDK C++ (S3+STS, vcpkg)
         run: bash scripts/install_aws_sdk.sh
       - name: Coverage (gcovr, server/src >= 75%)
         run: make coverage
@@ -126,8 +128,9 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
+            duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
             duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
             duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-ducklake-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch deps and build
@@ -144,6 +147,13 @@ jobs:
           make validate
       - name: Start Postgres + RustFS
         run: docker compose up -d --wait
+      - name: Temporary-credential suite against RustFS
+        env:
+          DUCKBOX_S3_ENDPOINT: 127.0.0.1:9000
+          DUCKBOX_S3_KEY: rustfsadmin
+          DUCKBOX_S3_SECRET: rustfsadmin
+          DUCKBOX_OIDC_ENDPOINT: 127.0.0.1:18088
+        run: ./build/duckbox_s3_sts_tests
       - name: Python deps
         run: |
           python3 -m venv .venv
@@ -211,7 +221,7 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
             duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch deps and build

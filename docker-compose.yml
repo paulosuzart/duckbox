@@ -13,8 +13,34 @@ services:
       timeout: 5s
       retries: 20
 
+  # Mock OIDC issuer for RustFS AssumeRoleWithWebIdentity. Not an S3 store.
+  oidc:
+    image: docker.io/library/python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
+    command:
+      - bash
+      - -lc
+      - apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssl ca-certificates >/dev/null && exec python3 /mock/oidc_mock.py
+    environment:
+      OIDC_ISSUER: http://oidc:8088
+      OIDC_CLIENT_ID: duckbox-sts
+    ports:
+      - "18088:8088"
+    volumes:
+      - ./scripts/oidc_mock.py:/mock/oidc_mock.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/health')"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 45s
+
+  # Single S3-compatible store for the README runbook, STS suite, and
+  # multi-node e2e. Pin is the 1.0.3 tag plus the multi-arch index digest.
   rustfs:
-    image: rustfs/rustfs:latest
+    image: docker.io/rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
+    depends_on:
+      oidc:
+        condition: service_healthy
     environment:
       RUSTFS_VOLUMES: /data
       RUSTFS_ADDRESS: 0.0.0.0:9000
@@ -23,6 +49,17 @@ services:
       RUSTFS_ACCESS_KEY: rustfsadmin
       RUSTFS_SECRET_KEY: rustfsadmin
       RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true"
+      # Compose service names are private; OIDC discovery/JWKS need an exact
+      # origin allowlist or RustFS skips the provider (SSRF egress policy).
+      RUSTFS_OUTBOUND_ALLOW_ORIGINS: http://oidc:8088
+      RUSTFS_IDENTITY_OPENID_ENABLE: "on"
+      RUSTFS_IDENTITY_OPENID_CONFIG_URL: http://oidc:8088
+      RUSTFS_IDENTITY_OPENID_ISSUER: http://oidc:8088
+      RUSTFS_IDENTITY_OPENID_CLIENT_ID: duckbox-sts
+      RUSTFS_IDENTITY_OPENID_CLIENT_SECRET: duckbox-oidc-secret
+      RUSTFS_IDENTITY_OPENID_ROLE_POLICY: readwrite
+      RUSTFS_IDENTITY_OPENID_GROUPS_CLAIM: groups
+      RUSTFS_IDENTITY_OPENID_ROLES_CLAIM: roles
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -33,7 +70,7 @@ services:
       interval: 3s
       timeout: 5s
       retries: 20
-      start_period: 10s
+      start_period: 20s
 
 volumes:
   rustfs_data:

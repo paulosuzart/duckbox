@@ -1,6 +1,7 @@
 #include "duckbox/spec_validator.hpp"
 #include "duckbox/lake.hpp"
 #include "duckbox/rewriter.hpp"
+#include "duckbox/s3_credentials.hpp"
 #include "duckbox/sandbox.hpp"
 #include "duckbox/tenant_key.hpp"
 
@@ -187,6 +188,9 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         spec.lake.bootstrap_sql_path.empty()) {
         add("lake.bootstrap_sql", "required when lake.kind=memory");
     }
+    if (spec.lake.kind != LakeKind::Ducklake) {
+        ValidateS3CredentialFields(spec.lake.s3, spec.lake.kind, spec.lake.extensions, issues);
+    }
     if (spec.lake.kind == LakeKind::Ducklake) {
         if (!spec.lake.bootstrap_sql.empty() || !spec.lake.bootstrap_sql_path.empty()) {
             add("lake.bootstrap_sql", "only valid when lake.kind=memory");
@@ -199,13 +203,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         if (spec.lake.data_path.empty()) {
             add("lake.data_path", "required when lake.kind=ducklake");
         }
-        if (spec.lake.s3.access_key.Empty() || spec.lake.s3.secret_key.Empty()) {
-            add("lake.s3", "access_key and secret_key must be references (env:NAME or file:/path); "
-                           "never values");
-        } else {
-            ValidateSecretRefSyntax(spec.lake.s3.access_key, "lake.s3.access_key", issues);
-            ValidateSecretRefSyntax(spec.lake.s3.secret_key, "lake.s3.secret_key", issues);
-        }
+        ValidateS3CredentialFields(spec.lake.s3, spec.lake.kind, spec.lake.extensions, issues);
         if (!spec.lake.catalog_ref.Empty()) {
             ValidateSecretRefSyntax(spec.lake.catalog_ref, "lake.catalog", issues);
         }
@@ -395,6 +393,13 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
     if (!spec.lifecycle.expires_at_raw.empty() && spec.lifecycle.expires_at_ms < 0) {
         add("lifecycle.expires_at", "expected unix timestamp or RFC3339 like 2026-10-19T12:00:00Z");
     }
+    return issues;
+}
+
+std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec,
+                                                     const DaemonConfig &daemon) const {
+    auto issues = ValidateStatic(spec);
+    ValidateS3CredentialAllowlists(spec, daemon, issues);
     return issues;
 }
 
@@ -593,7 +598,7 @@ int RunValidateCommand(const DaemonConfig &daemon, const std::string &spec_path)
         namespace fs = std::filesystem;
         auto dir = fs::path(spec_path).parent_path().string();
         SpecValidator v;
-        auto st = v.ValidateStatic(spec);
+        auto st = v.ValidateStatic(spec, daemon);
         if (!st.empty()) {
             std::cerr << spec_path << ": " << SpecError::Format(st) << "\n";
             return 1;

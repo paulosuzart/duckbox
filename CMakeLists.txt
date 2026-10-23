@@ -189,14 +189,23 @@ if(DUCKBOX_VCPKG_LIB)
   set(AWSSDK_ROOT_DIR "${DUCKBOX_VCPKG_LIB}/.." CACHE PATH "vcpkg aws-sdk-cpp prefix")
 endif()
 find_package(aws-cpp-sdk-s3 CONFIG QUIET)
+find_package(aws-cpp-sdk-sts CONFIG QUIET)
+find_package(aws-cpp-sdk-identity-management CONFIG QUIET)
+find_package(aws-cpp-sdk-cognito-identity CONFIG QUIET)
 if(NOT aws-cpp-sdk-s3_FOUND)
-  find_package(AWSSDK QUIET COMPONENTS s3)
+  find_package(AWSSDK QUIET COMPONENTS s3 sts identity-management)
+endif()
+set(_duckbox_aws_sts_ok FALSE)
+if(TARGET aws-cpp-sdk-sts AND TARGET aws-cpp-sdk-identity-management)
+  set(_duckbox_aws_sts_ok TRUE)
+elseif(AWSSDK_FOUND)
+  set(_duckbox_aws_sts_ok TRUE)
 endif()
 if(NOT aws-cpp-sdk-s3_FOUND AND NOT AWSSDK_FOUND)
   if(APPLE)
     message(FATAL_ERROR "Homebrew aws-sdk-cpp not found. brew install aws-sdk-cpp openssl@4")
   endif()
-  message(STATUS "AWS SDK C++ (S3) not found; running scripts/install_aws_sdk.sh")
+  message(STATUS "AWS SDK C++ (S3/STS) not found; running scripts/install_aws_sdk.sh")
   execute_process(
     COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/install_aws_sdk.sh"
     RESULT_VARIABLE _aws_rv)
@@ -206,6 +215,25 @@ if(NOT aws-cpp-sdk-s3_FOUND AND NOT AWSSDK_FOUND)
   duckbox_find_vcpkg_aws()
   set(AWSSDK_ROOT_DIR "${DUCKBOX_VCPKG_LIB}/.." CACHE PATH "vcpkg aws-sdk-cpp prefix" FORCE)
   find_package(aws-cpp-sdk-s3 CONFIG REQUIRED)
+  find_package(aws-cpp-sdk-sts CONFIG REQUIRED)
+  find_package(aws-cpp-sdk-identity-management CONFIG REQUIRED)
+  set(_duckbox_aws_sts_ok TRUE)
+elseif(NOT APPLE AND NOT _duckbox_aws_sts_ok)
+  message(STATUS "AWS SDK C++ STS/identity-management missing; running scripts/install_aws_sdk.sh")
+  execute_process(
+    COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/install_aws_sdk.sh"
+    RESULT_VARIABLE _aws_rv)
+  if(NOT _aws_rv EQUAL 0)
+    message(FATAL_ERROR "scripts/install_aws_sdk.sh failed")
+  endif()
+  duckbox_find_vcpkg_aws()
+  set(AWSSDK_ROOT_DIR "${DUCKBOX_VCPKG_LIB}/.." CACHE PATH "vcpkg aws-sdk-cpp prefix" FORCE)
+  find_package(aws-cpp-sdk-sts CONFIG REQUIRED)
+  find_package(aws-cpp-sdk-identity-management CONFIG REQUIRED)
+  set(_duckbox_aws_sts_ok TRUE)
+endif()
+if(NOT APPLE AND NOT _duckbox_aws_sts_ok)
+  message(FATAL_ERROR "aws-sdk-cpp sts + identity-management are required for lease assume-role")
 endif()
 if(DUCKBOX_VCPKG_LIB)
   set(CMAKE_BUILD_RPATH "${DUCKBOX_VCPKG_LIB}")
@@ -232,6 +260,7 @@ set(DUCKBOX_SOURCES
   server/src/spec_validator.cpp
   server/src/sandbox.cpp
   server/src/s3.cpp
+  server/src/s3_credentials.cpp
   server/src/sandbox_registry.cpp
   server/src/arrow_ipc.cpp
   server/src/arrow_types.cpp
@@ -274,9 +303,24 @@ if(TARGET aws-cpp-sdk-s3)
     target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-core)
   endif()
   target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-s3)
+  if(TARGET aws-cpp-sdk-identity-management)
+    target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-identity-management)
+  endif()
+  if(TARGET aws-cpp-sdk-cognito-identity)
+    target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-cognito-identity)
+  endif()
+  if(TARGET aws-cpp-sdk-sts)
+    target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-sts)
+  endif()
+  if(TARGET aws-cpp-sdk-sts AND TARGET aws-cpp-sdk-identity-management)
+    target_compile_definitions(duckbox_core PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
+  endif()
 else()
   target_include_directories(duckbox_core PUBLIC ${AWSSDK_INCLUDE_DIRS})
   target_link_libraries(duckbox_core PUBLIC ${AWSSDK_LIBRARIES})
+  if(_duckbox_aws_sts_ok)
+    target_compile_definitions(duckbox_core PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
+  endif()
 endif()
 if(APPLE)
   target_link_libraries(duckbox_core PUBLIC
@@ -388,13 +432,31 @@ duckbox_add_test(duckbox_schema_tests
   test/schema/flight_schema_test.cpp)
 target_include_directories(duckbox_schema_tests BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/test/schema)
 
+duckbox_add_test(duckbox_s3_credentials_tests
+  test/support/check.cpp
+  test/unit/s3_credentials_test.cpp)
+
+duckbox_add_test(duckbox_s3_secret_guardrail_tests
+  test/support/check.cpp
+  test/guardrails/s3_secrets_test.cpp)
+
+duckbox_add_test(duckbox_s3_sts_tests
+  test/support/check.cpp
+  test/integration/s3_sts_test.cpp)
+
 enable_testing()
 add_test(NAME unit COMMAND duckbox_unit_tests)
 add_test(NAME guardrails COMMAND duckbox_guardrail_tests)
 add_test(NAME integration COMMAND duckbox_integration_tests)
 add_test(NAME schema COMMAND duckbox_schema_tests)
+add_test(NAME s3_credentials COMMAND duckbox_s3_credentials_tests)
+add_test(NAME s3_secret_guardrails COMMAND duckbox_s3_secret_guardrail_tests)
+add_test(NAME s3_sts COMMAND duckbox_s3_sts_tests)
 set_tests_properties(unit PROPERTIES LABELS "unit")
 set_tests_properties(guardrails PROPERTIES LABELS "guardrails")
 set_tests_properties(integration PROPERTIES LABELS "integration")
 # Also labeled unit so macOS `ctest -L unit|guardrails` runs it.
 set_tests_properties(schema PROPERTIES LABELS "schema;unit")
+set_tests_properties(s3_credentials PROPERTIES LABELS "unit")
+set_tests_properties(s3_secret_guardrails PROPERTIES LABELS "guardrails")
+set_tests_properties(s3_sts PROPERTIES LABELS "integration")
