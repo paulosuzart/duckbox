@@ -1,6 +1,6 @@
 #include "check.hpp"
 
-#include "duckbox/crypto.hpp"
+#include "common/crypto.hpp"
 
 #include <cstdlib>
 #include <fstream>

@@ -245,34 +245,34 @@ find_package(ArrowFlight CONFIG REQUIRED)
 find_package(ArrowFlightSql CONFIG REQUIRED)
 
 set(DUCKBOX_SOURCES
-  server/src/yaml.cpp
-  server/src/error.cpp
-  server/src/crypto.cpp
-  server/src/secrets.cpp
-  server/src/policy.cpp
-  server/src/daemon_config.cpp
-  server/src/tenant_key.cpp
-  server/src/validator.cpp
-  server/src/rewriter.cpp
-  server/src/lease.cpp
-  server/src/metrics.cpp
-  server/src/lake.cpp
-  server/src/spec_validator.cpp
-  server/src/sandbox.cpp
-  server/src/s3.cpp
-  server/src/s3_credentials.cpp
-  server/src/sandbox_registry.cpp
-  server/src/arrow_ipc.cpp
-  server/src/arrow_types.cpp
-  server/src/auth.cpp
-  server/src/handle.cpp
-  server/src/flight_sql_server.cpp
-  server/src/http_server.cpp)
+  server/src/common/yaml.cpp
+  server/src/common/error.cpp
+  server/src/common/crypto.cpp
+  server/src/s3/secrets.cpp
+  server/src/s3/s3.cpp
+  server/src/s3/s3_credentials.cpp
+  server/src/node/daemon_config.cpp
+  server/src/config/policy.cpp
+  server/src/config/spec_validator.cpp
+  server/src/rewriter/tenant_key.cpp
+  server/src/rewriter/validator.cpp
+  server/src/rewriter/rewriter.cpp
+  server/src/lake/lake.cpp
+  server/src/metrics/metrics.cpp
+  server/src/cluster/lease.cpp
+  server/src/sandbox/sandbox.cpp
+  server/src/sandbox/sandbox_registry.cpp
+  server/src/sandbox/arrow_ipc.cpp
+  server/src/sandbox/arrow_types.cpp
+  server/src/flight/auth.cpp
+  server/src/flight/handle.cpp
+  server/src/flight/flight_sql_server.cpp
+  server/src/flight/http_server.cpp)
 
 add_library(duckbox_core STATIC ${DUCKBOX_SOURCES})
 target_include_directories(duckbox_core
   PUBLIC
-    ${CMAKE_SOURCE_DIR}/server/include
+    ${CMAKE_SOURCE_DIR}/server/src
     ${DUCKBOX_DEPS}/duckdb/include
     ${DUCKBOX_DEPS}/httplib
     ${DUCKBOX_DEPS}/nlohmann

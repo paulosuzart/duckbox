@@ -1,7 +1,7 @@
 #include "suite.hpp"
 #include "check.hpp"
 
-#include "duckbox/crypto.hpp"
+#include "common/crypto.hpp"
 
 #include <ctime>
 #include <string>

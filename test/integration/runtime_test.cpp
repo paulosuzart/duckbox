@@ -1,11 +1,11 @@
 #include "suite.hpp"
 #include "check.hpp"
 
-#include "duckbox/lease.hpp"
-#include "duckbox/policy.hpp"
-#include "duckbox/sandbox.hpp"
-#include "duckbox/sandbox_registry.hpp"
-#include "duckbox/tenant_key.hpp"
+#include "cluster/lease.hpp"
+#include "config/policy.hpp"
+#include "sandbox/sandbox.hpp"
+#include "sandbox/sandbox_registry.hpp"
+#include "rewriter/tenant_key.hpp"
 
 #include <chrono>
 #include <memory>

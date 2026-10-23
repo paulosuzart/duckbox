@@ -1,9 +1,9 @@
 #include "suite.hpp"
 #include "check.hpp"
 
-#include "duckbox/lease.hpp"
-#include "duckbox/metrics.hpp"
-#include "duckbox/s3.hpp"
+#include "cluster/lease.hpp"
+#include "metrics/metrics.hpp"
+#include "s3/s3.hpp"
 
 #include <atomic>
 #include <memory>

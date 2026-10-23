@@ -1,10 +1,10 @@
 #include "check.hpp"
 #include "suite.hpp"
 
-#include "duckbox/error.hpp"
-#include "duckbox/lake.hpp"
-#include "duckbox/policy.hpp"
-#include "duckbox/spec_validator.hpp"
+#include "common/error.hpp"
+#include "lake/lake.hpp"
+#include "config/policy.hpp"
+#include "config/spec_validator.hpp"
 
 #include <filesystem>
 

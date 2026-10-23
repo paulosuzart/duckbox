@@ -1,7 +1,7 @@
 #include "suite.hpp"
 #include "check.hpp"
 
-#include "duckbox/s3.hpp"
+#include "s3/s3.hpp"
 
 #include <cstdlib>
 #include <string>

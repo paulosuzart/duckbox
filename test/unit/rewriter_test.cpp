@@ -1,8 +1,8 @@
 #include "check.hpp"
 #include "suite.hpp"
 
-#include "duckbox/rewriter.hpp"
-#include "duckbox/tenant_key.hpp"
+#include "rewriter/rewriter.hpp"
+#include "rewriter/tenant_key.hpp"
 
 void duckbox::test::RunRewriterTests() {
     using namespace duckbox;

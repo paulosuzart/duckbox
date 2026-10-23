@@ -1,8 +1,8 @@
 #include "check.hpp"
 
-#include "duckbox/sandbox.hpp"
-#include "duckbox/tenant_key.hpp"
-#include "duckbox/validator.hpp"
+#include "sandbox/sandbox.hpp"
+#include "rewriter/tenant_key.hpp"
+#include "rewriter/validator.hpp"
 
 #include <string>
 #include <vector>

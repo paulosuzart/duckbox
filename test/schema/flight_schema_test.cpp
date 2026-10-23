@@ -1,13 +1,13 @@
 #include "check.hpp"
 #include "suite.hpp"
 
-#include "duckbox/flight_sql_server.hpp"
-#include "duckbox/handle.hpp"
-#include "duckbox/lease.hpp"
-#include "duckbox/policy.hpp"
-#include "duckbox/rewriter.hpp"
-#include "duckbox/sandbox.hpp"
-#include "duckbox/sandbox_registry.hpp"
+#include "flight/flight_sql_server.hpp"
+#include "flight/handle.hpp"
+#include "cluster/lease.hpp"
+#include "config/policy.hpp"
+#include "rewriter/rewriter.hpp"
+#include "sandbox/sandbox.hpp"
+#include "sandbox/sandbox_registry.hpp"
 
 #include <arrow/array.h>
 #include <arrow/buffer.h>

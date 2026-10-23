@@ -1,11 +1,11 @@
 #include "check.hpp"
 
-#include "duckbox/daemon_config.hpp"
-#include "duckbox/lake.hpp"
-#include "duckbox/policy.hpp"
-#include "duckbox/s3.hpp"
-#include "duckbox/s3_credentials.hpp"
-#include "duckbox/spec_validator.hpp"
+#include "node/daemon_config.hpp"
+#include "lake/lake.hpp"
+#include "config/policy.hpp"
+#include "s3/s3.hpp"
+#include "s3/s3_credentials.hpp"
+#include "config/spec_validator.hpp"
 
 #include <cstdlib>
 #include <filesystem>

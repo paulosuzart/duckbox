@@ -1,11 +1,11 @@
 #include "check.hpp"
 
-#include "duckbox/policy.hpp"
-#include "duckbox/rewriter.hpp"
-#include "duckbox/sandbox.hpp"
-#include "duckbox/spec_validator.hpp"
-#include "duckbox/tenant_key.hpp"
-#include "duckbox/yaml.hpp"
+#include "config/policy.hpp"
+#include "rewriter/rewriter.hpp"
+#include "sandbox/sandbox.hpp"
+#include "config/spec_validator.hpp"
+#include "rewriter/tenant_key.hpp"
+#include "common/yaml.hpp"
 
 #include <iostream>
 #include <map>

@@ -1,9 +1,9 @@
 #include "check.hpp"
 #include "suite.hpp"
 
-#include "duckbox/rewriter.hpp"
-#include "duckbox/sandbox.hpp"
-#include "duckbox/tenant_key.hpp"
+#include "rewriter/rewriter.hpp"
+#include "sandbox/sandbox.hpp"
+#include "rewriter/tenant_key.hpp"
 
 namespace {
 

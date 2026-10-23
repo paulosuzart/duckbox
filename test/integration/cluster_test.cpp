@@ -1,15 +1,15 @@
 #include "suite.hpp"
 #include "check.hpp"
 
-#include "duckbox/error.hpp"
-#include "duckbox/flight_sql_server.hpp"
-#include "duckbox/handle.hpp"
-#include "duckbox/lease.hpp"
-#include "duckbox/metrics.hpp"
-#include "duckbox/rewriter.hpp"
-#include "duckbox/sandbox.hpp"
-#include "duckbox/sandbox_registry.hpp"
-#include "duckbox/s3.hpp"
+#include "common/error.hpp"
+#include "flight/flight_sql_server.hpp"
+#include "flight/handle.hpp"
+#include "cluster/lease.hpp"
+#include "metrics/metrics.hpp"
+#include "rewriter/rewriter.hpp"
+#include "sandbox/sandbox.hpp"
+#include "sandbox/sandbox_registry.hpp"
+#include "s3/s3.hpp"
 
 #include <arrow/flight/client.h>
 #include <arrow/flight/sql/client.h>

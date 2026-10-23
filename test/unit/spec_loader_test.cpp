@@ -1,14 +1,14 @@
 #include "check.hpp"
 #include "suite.hpp"
 
-#include "duckbox/crypto.hpp"
-#include "duckbox/daemon_config.hpp"
-#include "duckbox/flight_sql_server.hpp"
-#include "duckbox/lake.hpp"
-#include "duckbox/policy.hpp"
-#include "duckbox/secrets.hpp"
-#include "duckbox/spec_validator.hpp"
-#include "duckbox/yaml.hpp"
+#include "common/crypto.hpp"
+#include "node/daemon_config.hpp"
+#include "flight/flight_sql_server.hpp"
+#include "lake/lake.hpp"
+#include "config/policy.hpp"
+#include "s3/secrets.hpp"
+#include "config/spec_validator.hpp"
+#include "common/yaml.hpp"
 
 #include <algorithm>
 #include <cstdlib>
