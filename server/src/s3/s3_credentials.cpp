@@ -385,7 +385,7 @@ std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds) {
 }
 
 const char *DuckDbDefaultCredentialChain() {
-    // DuckDB 1.5.6 aws_secret.cpp + docs: env, config, process, web_identity,
+    // DuckDB 2.0.0 aws_secret.cpp + docs: env, config, process, web_identity,
     // sso, sts (needs ASSUME_ROLE_ARN), instance. sts without a role errors;
     // IRSA is web_identity. instance omitted (IMDS not supported). Same order
     // and coverage as this SDK's DefaultAWSCredentialsProviderChain.

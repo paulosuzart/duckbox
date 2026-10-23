@@ -1,9 +1,9 @@
 #include "config/spec_validator.hpp"
 #include "lake/lake.hpp"
 #include "rewriter/rewriter.hpp"
+#include "rewriter/tenant_key.hpp"
 #include "s3/s3_credentials.hpp"
 #include "sandbox/sandbox.hpp"
-#include "rewriter/tenant_key.hpp"
 
 #include <cctype>
 #include <filesystem>
@@ -30,14 +30,14 @@ void CollectParamsFromTableRef(ddb::TableRef &ref, std::unordered_set<std::strin
 void CollectParams(const ddb::ParsedExpression &expr, std::unordered_set<std::string> &out) {
     if (expr.GetExpressionClass() == ddb::ExpressionClass::PARAMETER) {
         auto &p = expr.Cast<ddb::ParameterExpression>();
-        if (!p.identifier.empty()) {
-            out.insert(ddb::StringUtil::Lower(p.identifier));
+        if (!p.Identifier().empty()) {
+            out.insert(ddb::StringUtil::Lower(IdentName(p.Identifier())));
         }
     }
     if (expr.GetExpressionClass() == ddb::ExpressionClass::SUBQUERY) {
         auto &sq = expr.Cast<ddb::SubqueryExpression>();
-        if (sq.subquery && sq.subquery->node) {
-            CollectParamsFromQuery(*sq.subquery->node, out);
+        if (sq.Subquery() && sq.Subquery()->node) {
+            CollectParamsFromQuery(*sq.Subquery()->node, out);
         }
     }
     ddb::ParsedExpressionIterator::EnumerateChildren(
@@ -88,8 +88,8 @@ void CollectParamsFromTableRef(ddb::TableRef &ref, std::unordered_set<std::strin
 
 void CollectParamsFromQuery(ddb::QueryNode &node, std::unordered_set<std::string> &out) {
     for (auto &kv : node.cte_map.map) {
-        if (kv.second && kv.second->query && kv.second->query->node) {
-            CollectParamsFromQuery(*kv.second->query->node, out);
+        if (kv.second && kv.second->query_node) {
+            CollectParamsFromQuery(*kv.second->query_node, out);
         }
     }
     if (node.type == ddb::QueryNodeType::SELECT_NODE) {
@@ -122,8 +122,8 @@ void CollectParamsFromQuery(ddb::QueryNode &node, std::unordered_set<std::string
 void CollectColumns(const ddb::ParsedExpression &expr, std::unordered_set<std::string> &out) {
     if (expr.GetExpressionClass() == ddb::ExpressionClass::COLUMN_REF) {
         auto &c = expr.Cast<ddb::ColumnRefExpression>();
-        if (!c.column_names.empty()) {
-            out.insert(ddb::StringUtil::Lower(c.column_names.back()));
+        if (!c.ColumnNames().empty()) {
+            out.insert(ddb::StringUtil::Lower(IdentName(c.ColumnNames().back())));
         }
     }
     ddb::ParsedExpressionIterator::EnumerateChildren(
@@ -283,19 +283,21 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
                             return false;
                         }
                         auto &c = e.Cast<ddb::ColumnRefExpression>();
-                        return !c.column_names.empty() &&
-                               ddb::StringUtil::Lower(c.column_names.back()) == tenant_col;
+                        return !c.ColumnNames().empty() &&
+                               ddb::StringUtil::Lower(IdentName(c.ColumnNames().back())) ==
+                                   tenant_col;
                     };
                     auto is_param = [&](ddb::ParsedExpression &e) -> std::string {
                         if (e.GetExpressionClass() != ddb::ExpressionClass::PARAMETER) {
                             return "";
                         }
                         return ddb::StringUtil::Lower(
-                            e.Cast<ddb::ParameterExpression>().identifier);
+                            IdentName(e.Cast<ddb::ParameterExpression>().Identifier()));
                     };
-                    if (cmp.left && cmp.right && (is_tenant(*cmp.left) || is_tenant(*cmp.right))) {
-                        auto other =
-                            is_tenant(*cmp.left) ? is_param(*cmp.right) : is_param(*cmp.left);
+                    if (cmp.LeftMutable() && cmp.RightMutable() &&
+                        (is_tenant(*cmp.LeftMutable()) || is_tenant(*cmp.RightMutable()))) {
+                        auto other = is_tenant(*cmp.LeftMutable()) ? is_param(*cmp.RightMutable())
+                                                                   : is_param(*cmp.LeftMutable());
                         if (other.empty()) {
                             add(path, "tenant column '" + kv.second.tenant_column +
                                           "' must use a key variable (:" + kv.second.tenant_column +
@@ -375,6 +377,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
     }
     if (!spec.functions.empty()) {
         try {
+            EnsureLinkedDuckDb();
             ddb::DuckDB db(nullptr);
             ddb::Connection con(db);
             RejectAllowlistedMacros(spec, con);
@@ -499,11 +502,11 @@ bool IsAllowlistedMacroException(const std::string &name) {
 }
 
 static bool IsTrustedSystemMacroException(const ddb::CatalogEntry &entry) {
-    if (!IsAllowlistedMacroException(entry.name) || !entry.internal) {
+    if (!IsAllowlistedMacroException(IdentName(entry.name)) || !entry.internal) {
         return false;
     }
     try {
-        return ddb::StringUtil::Lower(entry.ParentCatalog().GetName()) == "system";
+        return ddb::StringUtil::Lower(IdentName(entry.ParentCatalog().GetName())) == "system";
     } catch (...) {
         return false;
     }
@@ -514,7 +517,7 @@ void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string
         return;
     }
     try {
-        ddb::Parser parser;
+        auto parser = ddb::Parser::GetBuiltinParser();
         parser.ParseQuery(sql);
         for (auto &st : parser.statements) {
             if (!st || st->type != ddb::StatementType::CREATE_STATEMENT) {
@@ -529,8 +532,8 @@ void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string
                 continue;
             }
             auto &mi = cs.info->Cast<ddb::CreateMacroInfo>();
-            if (!mi.name.empty()) {
-                out.insert(ddb::StringUtil::Lower(mi.name));
+            if (!mi.GetFunctionName().empty()) {
+                out.insert(ddb::StringUtil::Lower(IdentName(mi.GetFunctionName())));
             }
         }
     } catch (...) {
@@ -551,7 +554,7 @@ void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con) {
     }
     try {
         auto reject_if_listed = [&](const ddb::CatalogEntry &entry) {
-            auto n = ddb::StringUtil::Lower(entry.name);
+            auto n = ddb::StringUtil::Lower(IdentName(entry.name));
             if (spec.functions.count(n) && !IsTrustedSystemMacroException(entry)) {
                 throw PolicyError(MacroNotAllowlistedMessage(n));
             }
@@ -569,7 +572,7 @@ void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con) {
                 auto txn = schema.GetCatalogTransaction(ctx);
                 for (auto type :
                      {ddb::CatalogType::MACRO_ENTRY, ddb::CatalogType::TABLE_MACRO_ENTRY}) {
-                    if (auto found = schema.GetEntry(txn, type, fn)) {
+                    if (auto found = schema.GetEntry(txn, type, ddb::Identifier(fn))) {
                         reject_if_listed(*found);
                     }
                 }

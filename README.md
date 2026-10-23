@@ -2,7 +2,7 @@
 
 A **deny-by-default SQL sandbox** for untrusted, often AI-generated, SQL over a shared DuckLake (Parquet on S3, catalog in Postgres or a DuckDB file). In the spirit of smolvm/microVM CLIs: a sandbox sees **nothing** except what its spec hands it.
 
-This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/src/common/duckdb_layer.hpp` for a later DuckDB 2.0 upgrade. Development is DuckDB **1.5.6**.
+This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/src/common/duckdb_layer.hpp`. Development is DuckDB **2.0.0**.
 
 ## Actors and trust model
 
@@ -71,7 +71,7 @@ brew install apache-arrow aws-sdk-cpp openssl@4 cmake
 ```
 
 ```bash
-bash scripts/fetch_deps.sh          # DuckDB 1.5.6 headers + static libs + yaml-cpp + nlohmann/json + jwt-cpp + CLI11 + cppcodec
+bash scripts/fetch_deps.sh          # DuckDB 2.0.0 headers + static libs + yaml-cpp + nlohmann/json + jwt-cpp + CLI11 + cppcodec
 
 # Linux only — AWS SDK for C++ (S3, vcpkg). First run takes several minutes.
 bash scripts/install_aws_sdk.sh

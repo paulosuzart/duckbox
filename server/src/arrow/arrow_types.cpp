@@ -36,7 +36,37 @@ bool HasControlChars(const std::string &s) {
 // DuckDB Tokenize truncates on lexical errors instead of throwing, so this
 // check alone must not be relied on. ParseExpressionList is what fails closed
 // (unclosed comments, leftover after a closer, catalog-qualified names, …).
-// Tokenize also does not emit COMMENT tokens in 1.5.6. Only `(` / `)` balance.
+// Tokenize also does not emit COMMENT tokens in 2.0.0. Only `(` / `)` balance.
+// Catalog-qualified names (memory.main.INTEGER) must not become a type.
+// Dots inside parentheses are nested type args (none today); top-level dots
+// are catalog.schema.type and stay fail-closed.
+bool HasTopLevelDot(const std::string &s) {
+    int depth = 0;
+    bool in_quote = false;
+    for (unsigned char c : s) {
+        if (in_quote) {
+            if (c == '\'') {
+                in_quote = false;
+            }
+            continue;
+        }
+        if (c == '\'') {
+            in_quote = true;
+            continue;
+        }
+        if (c == '(') {
+            depth++;
+        } else if (c == ')') {
+            if (depth > 0) {
+                depth--;
+            }
+        } else if (c == '.' && depth == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool UnbalancedParens(const std::string &s) {
     auto toks = ddb::Parser::Tokenize(s);
     int depth = 0;
@@ -64,6 +94,7 @@ struct TypeParser {
 
     ddb::Connection &Con() {
         if (!db) {
+            EnsureLinkedDuckDb();
             db = std::make_unique<ddb::DuckDB>(nullptr);
             con = std::make_unique<ddb::Connection>(*db);
         }
@@ -106,8 +137,9 @@ NullCastShape(const ddb::vector<ddb::unique_ptr<ddb::ParsedExpression>> &exprs) 
         return nullptr;
     }
     auto &cast = exprs[0]->Cast<ddb::CastExpression>();
-    return (cast.child && cast.child->GetExpressionClass() == ddb::ExpressionClass::CONSTANT &&
-            cast.child->Cast<ddb::ConstantExpression>().value.IsNull())
+    return (cast.ChildMutable() &&
+            cast.ChildMutable()->GetExpressionClass() == ddb::ExpressionClass::CONSTANT &&
+            cast.ChildMutable()->Cast<ddb::ConstantExpression>().GetLiteral().IsNull())
                ? &cast
                : nullptr;
 }
@@ -122,7 +154,8 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     constexpr size_t kMaxTypeNameBytes = 64 * 1024;
     auto name = TrimSpaces(logical_type);
     if (logical_type.empty() || name.empty() || logical_type.size() > kMaxTypeNameBytes ||
-        HasControlChars(logical_type) || UnbalancedParens(std::string(name))) {
+        HasControlChars(logical_type) || UnbalancedParens(std::string(name)) ||
+        HasTopLevelDot(std::string(name))) {
         throw Error("invalid logical type name");
     }
     // Leftover / injection via the parser (not Query). Require a single
@@ -130,7 +163,8 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     // `INTEGER leftover` and `INTEGER) OR (1=1` cannot sneak through.
     ddb::vector<ddb::unique_ptr<ddb::ParsedExpression>> exprs;
     try {
-        exprs = ddb::Parser::ParseExpressionList("CAST(NULL AS " + std::string(name) + ")");
+        auto parser = ddb::Parser::GetBuiltinParser();
+        exprs = parser.ParseExpressionList("CAST(NULL AS " + std::string(name) + ")");
     } catch (...) {
         throw Error("invalid logical type name");
     }
@@ -147,15 +181,15 @@ ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     // Parser CAST types are not operator== with TransformStringToLogicalType.
     // Re-parse ToString() through the same wrapper so a catalog-qualified
     // cast_type cannot leak DuckDB's raw exception.
-    if (ParseOrReject(cast->cast_type.ToString()) != parsed) {
+    if (ParseOrReject(cast->TargetType().ToString()) != parsed) {
         throw Error("invalid logical type name");
     }
     return parsed;
 }
 
 std::shared_ptr<::arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::string> &names,
-                                                      const std::vector<ddb::LogicalType> &types,
-                                                      ddb::ClientProperties opts) {
+                                                        const std::vector<ddb::LogicalType> &types,
+                                                        ddb::ClientProperties opts) {
     if (names.empty() || types.empty()) {
         return ::arrow::schema({::arrow::field("_empty", ::arrow::null())});
     }
@@ -185,7 +219,7 @@ std::shared_ptr<::arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::s
 }
 
 std::shared_ptr<::arrow::DataType> MapLogicalType(const ddb::LogicalType &type,
-                                                ddb::ClientProperties opts) {
+                                                  ddb::ClientProperties opts) {
     return SchemaFromLogicalTypes({"col"}, {type}, std::move(opts))->field(0)->type();
 }
 

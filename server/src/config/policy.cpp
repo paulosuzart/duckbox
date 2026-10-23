@@ -541,7 +541,7 @@ bool SafeSqlIdent(const std::string &s) {
 }
 
 std::string QuoteSqlIdent(const std::string &s) {
-    return ddb::KeywordHelper::WriteOptionallyQuoted(s);
+    return ddb::SQLIdentifier::ToString(s);
 }
 
 std::string CatalogTableSelectSql(const TablePolicy &table) {

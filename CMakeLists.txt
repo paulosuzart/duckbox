@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(DUCKBOX_DUCKDB_VERSION "v1.5.6")
+set(DUCKBOX_DUCKDB_VERSION "v2.0.0")
 
 if(NOT DEFINED ENV{DUCKBOX_DEPS})
   set(DUCKBOX_DEPS "${CMAKE_SOURCE_DIR}/.deps")
@@ -248,6 +248,7 @@ set(DUCKBOX_SOURCES
   server/src/common/yaml.cpp
   server/src/common/error.cpp
   server/src/common/crypto.cpp
+  server/src/common/duckdb_layer.cpp
   server/src/s3/secrets.cpp
   server/src/s3/s3.cpp
   server/src/s3/s3_credentials.cpp
@@ -330,27 +331,17 @@ if(APPLE)
 endif()
 
 set(_duckdb_libdir "${DUCKBOX_DEPS}/duckdb/lib")
+# DuckDB 2.0 static-lib archives are flattened: libduckdb_static.a plus
+# parquet/core_functions/json/icu/autocomplete. Do not link the extra bundled
+# extensions (httpfs/fts/inet/tpch/tpcds); those stay INSTALL/LOAD.
 set(_duckdb_libs
   duckdb_static
   parquet_extension
   core_functions_extension
   json_extension
   icu_extension
-  autocomplete_extension
-  duckdb_generated_extension_loader
-  duckdb_fmt
-  duckdb_pg_query
-  duckdb_re2
-  duckdb_zstd
-  duckdb_miniz
-  duckdb_utf8proc
-  duckdb_hyperloglog
-  duckdb_fastpforlib
-  duckdb_skiplistlib
-  duckdb_yyjson
-  duckdb_mbedtls
-  duckdb_fsst)
-# Official macOS static-libs zip does not include libduckdb_jemalloc.a.
+  autocomplete_extension)
+# Official macOS static-libs tarball does not include libduckdb_jemalloc.a.
 if(EXISTS "${_duckdb_libdir}/libduckdb_jemalloc.a")
   list(APPEND _duckdb_libs duckdb_jemalloc)
 endif()
@@ -360,13 +351,30 @@ foreach(_lib ${_duckdb_libs})
   list(APPEND _duckdb_link_files "${_duckdb_libdir}/lib${_lib}.a")
 endforeach()
 
+# Capabilities registered via describe + force-load: INSTALL/LOAD provider and
+# the builtin HTTP client used to fetch community extensions (nanoarrow).
+# --start-group will not pull these unless a symbol is referenced.
+set(_duckdb_forced_libs
+  "${_duckdb_libdir}/libduckdb_loadable_extensions.a"
+  "${_duckdb_libdir}/libduckdb_httplib.a")
+
 function(duckbox_link_duckdb target)
   if(APPLE)
-    target_link_libraries(${target} PRIVATE ${_duckdb_link_files} pthread dl)
+    set(_forced)
+    foreach(_lib ${_duckdb_forced_libs})
+      list(APPEND _forced "-Wl,-force_load,${_lib}")
+    endforeach()
+    target_link_libraries(${target} PRIVATE
+      ${_duckdb_link_files}
+      ${_forced}
+      pthread dl)
+    target_link_options(${target} PRIVATE "-Wl,-u,_duckbox_ensure_linked_duckdb")
   else()
     target_link_libraries(${target} PRIVATE
       -Wl,--start-group ${_duckdb_link_files} -Wl,--end-group
+      -Wl,--whole-archive ${_duckdb_forced_libs} -Wl,--no-whole-archive
       pthread dl)
+    target_link_options(${target} PRIVATE "-Wl,-u,duckbox_ensure_linked_duckdb")
   endif()
 endfunction()
 

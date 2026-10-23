@@ -11,6 +11,7 @@ int main() {
     RunCteRecursiveTests();
     RunCteShadowTests();
     RunCteRewriteTests();
+    RunCteDmlFailClosedTests();
     RunInitSqlTests();
     RunHandleTests();
     RunCryptoTests();

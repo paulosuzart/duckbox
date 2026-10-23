@@ -2,9 +2,9 @@
 #include "suite.hpp"
 
 #include "common/error.hpp"
-#include "lake/lake.hpp"
 #include "config/policy.hpp"
 #include "config/spec_validator.hpp"
+#include "lake/lake.hpp"
 
 #include <filesystem>
 
@@ -176,7 +176,7 @@ void duckbox::test::RunValidatorTests() {
         Expect(!SafeSqlIdent("t--x") && !SafeSqlIdent("t space") && !SafeSqlIdent("t;drop") &&
                    !SafeSqlIdent("t\"q") && !SafeSqlIdent("select") && !SafeSqlIdent("SELECT"),
                "comment, space, punctuation, and keyword names are not safe unquoted");
-        Expect(QuoteSqlIdent("deals") == "deals", "WriteOptionallyQuoted leaves deals unquoted");
+        Expect(QuoteSqlIdent("deals") == "deals", "SQLIdentifier leaves deals unquoted");
         Expect(QuoteSqlIdent("select").find('"') != std::string::npos, "keyword select is quoted");
 
         TablePolicy ok;

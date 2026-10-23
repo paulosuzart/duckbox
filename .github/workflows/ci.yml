@@ -12,7 +12,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Pin Arrow 26.0.0 (what CI installs today). DuckDB stays 1.5.6.
+# Pin Arrow 26.0.0 (what CI installs today). DuckDB stays 2.0.0.
 # Linux jobs run on ubuntu-24.04 so the Apache apt-source SHA256 pin stays valid.
 env:
   ARROW_VERSION: "26.0.0"
@@ -37,11 +37,11 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
-            duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
-            duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
-            duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
       - name: Install AWS SDK C++ (S3+STS, vcpkg)
         run: bash scripts/install_aws_sdk.sh
       - name: ccache
@@ -79,9 +79,9 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-jwtcli11cppcodec-brewaws-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-jwtcli11cppcodec-brewaws-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
-            duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch DuckDB and C++ headers
         run: bash scripts/fetch_deps.sh
       - name: Build (AppleClang; omit -DCMAKE_CXX_COMPILER=g++)
@@ -113,11 +113,11 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
-            duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
-            duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
-            duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
       - name: Install AWS SDK C++ (S3+STS, vcpkg)
         run: bash scripts/install_aws_sdk.sh
       - name: ccache
@@ -146,11 +146,11 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
-            duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
-            duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
-            duckdb-v1.5.6-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-ducklake-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-jwtcli11cppcodec-ducklake-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-ducklake-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch deps and build
         run: |
           bash scripts/fetch_deps.sh
@@ -239,9 +239,9 @@ jobs:
           path: |
             .deps
             ~/.duckdb
-          key: duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+          key: duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-sts-id-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
           restore-keys: |
-            duckdb-v1.5.6-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+            duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch deps and build
         run: |
           bash scripts/fetch_deps.sh

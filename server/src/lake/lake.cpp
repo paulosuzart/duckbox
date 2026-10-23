@@ -37,6 +37,7 @@ std::string ResolvePath(const std::string &base_dir, const std::string &path) {
 }
 
 void ExecOrThrow(ddb::Connection &con, const std::string &sql) {
+    EnsureLinkedDuckDb();
     auto r = con.Query(sql);
     if (r->HasError()) {
         throw Error(r->GetError());
@@ -52,7 +53,7 @@ void CheckBootstrapSql(const std::string &sql, const SandboxSpec &spec) {
     if (sql.empty()) {
         return;
     }
-    ddb::Parser parser;
+    auto parser = ddb::Parser::GetBuiltinParser();
     try {
         parser.ParseQuery(sql);
     } catch (const std::exception &e) {
