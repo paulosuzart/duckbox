@@ -1,6 +1,6 @@
-#include "duckbox/daemon_config.hpp"
-#include "duckbox/flight_sql_server.hpp"
-#include "duckbox/spec_validator.hpp"
+#include "node/daemon_config.hpp"
+#include "flight/flight_sql_server.hpp"
+#include "config/spec_validator.hpp"
 
 #include <CLI/CLI.hpp>
 

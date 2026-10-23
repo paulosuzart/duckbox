@@ -1,14 +1,14 @@
 #include "suite.hpp"
 #include "check.hpp"
 
-#include "duckbox/auth.hpp"
-#include "duckbox/daemon_config.hpp"
-#include "duckbox/handle.hpp"
-#include "duckbox/json.hpp"
-#include "duckbox/policy.hpp"
-#include "duckbox/sandbox.hpp"
-#include "duckbox/sandbox_registry.hpp"
-#include "duckbox/tenant_key.hpp"
+#include "flight/auth.hpp"
+#include "node/daemon_config.hpp"
+#include "flight/handle.hpp"
+#include "common/json.hpp"
+#include "config/policy.hpp"
+#include "sandbox/sandbox.hpp"
+#include "sandbox/sandbox_registry.hpp"
+#include "rewriter/tenant_key.hpp"
 
 void duckbox::test::RunRegistryTests() {
 	using namespace duckbox;

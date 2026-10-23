@@ -1,7 +1,7 @@
 #include "check.hpp"
 #include "suite.hpp"
 
-#include "duckbox/lake.hpp"
+#include "lake/lake.hpp"
 
 void duckbox::test::RunInitSqlTests() {
     using namespace duckbox;

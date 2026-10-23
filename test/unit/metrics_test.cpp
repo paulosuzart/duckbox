@@ -1,8 +1,8 @@
 #include "suite.hpp"
 #include "check.hpp"
 
-#include "duckbox/error.hpp"
-#include "duckbox/metrics.hpp"
+#include "common/error.hpp"
+#include "metrics/metrics.hpp"
 
 void duckbox::test::RunMetricsTests() {
 	using namespace duckbox;

@@ -2,7 +2,7 @@
 
 A **deny-by-default SQL sandbox** for untrusted, often AI-generated, SQL over a shared DuckLake (Parquet on S3, catalog in Postgres or a DuckDB file). In the spirit of smolvm/microVM CLIs: a sandbox sees **nothing** except what its spec hands it.
 
-This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/include/duckbox/duckdb_layer.hpp` for a later DuckDB 2.0 upgrade. Development is DuckDB **1.5.6**.
+This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/src/common/duckdb_layer.hpp` for a later DuckDB 2.0 upgrade. Development is DuckDB **1.5.6**.
 
 ## Actors and trust model
 
@@ -274,7 +274,7 @@ The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl 
 | --- | --- |
 | `daemons/` | Control-plane YAML (listen, limits, optional lease) |
 | `policies/` | Sandbox specs (lake + tables + key + functions) |
-| `server/` | C++ daemon + enforcement |
+| `server/src/<area>/` | C++ node + enforcement, headers next to sources |
 | `examples/python/` | Quickstart notebook/script, `duckbox_client`, CLI utility |
 | `test/` | CTest suites: `unit`, `guardrails` (YAML SQL corpus), `integration` |
 

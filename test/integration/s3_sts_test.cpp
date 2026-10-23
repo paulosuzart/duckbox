@@ -1,11 +1,11 @@
 #include "check.hpp"
 
-#include "duckbox/lake.hpp"
-#include "duckbox/s3.hpp"
-#include "duckbox/s3_credentials.hpp"
-#include "duckbox/secrets.hpp"
+#include "lake/lake.hpp"
+#include "s3/s3.hpp"
+#include "s3/s3_credentials.hpp"
+#include "s3/secrets.hpp"
 
-#include "duckbox/duckdb_layer.hpp"
+#include "common/duckdb_layer.hpp"
 #include "httplib.h"
 
 #include <aws/core/Aws.h>

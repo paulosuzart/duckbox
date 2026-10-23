@@ -1,8 +1,8 @@
 #include "suite.hpp"
 #include "check.hpp"
 
-#include "duckbox/handle.hpp"
-#include "duckbox/policy.hpp"
+#include "flight/handle.hpp"
+#include "config/policy.hpp"
 
 void duckbox::test::RunHandleTests() {
 	using namespace duckbox;

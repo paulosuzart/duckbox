@@ -1,9 +1,9 @@
 #include "check.hpp"
 #include "suite.hpp"
 
-#include "duckbox/arrow_ipc.hpp"
-#include "duckbox/arrow_types.hpp"
-#include "duckbox/sandbox.hpp"
+#include "sandbox/arrow_ipc.hpp"
+#include "sandbox/arrow_types.hpp"
+#include "sandbox/sandbox.hpp"
 
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>

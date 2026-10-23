@@ -1,7 +1,7 @@
 #include "suite.hpp"
 #include "check.hpp"
 
-#include "duckbox/tenant_key.hpp"
+#include "rewriter/tenant_key.hpp"
 
 void duckbox::test::RunTenantKeyTests() {
 	using namespace duckbox;

@@ -1,10 +1,10 @@
 #include "suite.hpp"
 #include "check.hpp"
 
-#include "duckbox/policy.hpp"
-#include "duckbox/s3.hpp"
-#include "duckbox/sandbox_registry.hpp"
-#include "duckbox/tenant_key.hpp"
+#include "config/policy.hpp"
+#include "s3/s3.hpp"
+#include "sandbox/sandbox_registry.hpp"
+#include "rewriter/tenant_key.hpp"
 
 void duckbox::test::RunS3RegistryTests() {
 	using namespace duckbox;

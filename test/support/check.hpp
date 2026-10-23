@@ -2,10 +2,10 @@
 
 // Shared assertions and fixtures for unit / guardrail / integration suites.
 
-#include "duckbox/daemon_config.hpp"
-#include "duckbox/duckdb_layer.hpp"
-#include "duckbox/policy.hpp"
-#include "duckbox/tenant_key.hpp"
+#include "node/daemon_config.hpp"
+#include "common/duckdb_layer.hpp"
+#include "config/policy.hpp"
+#include "rewriter/tenant_key.hpp"
 
 #include <functional>
 #include <string>

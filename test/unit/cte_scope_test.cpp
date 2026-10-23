@@ -1,9 +1,9 @@
 #include "check.hpp"
 #include "suite.hpp"
 
-#include "duckbox/rewriter.hpp"
-#include "duckbox/tenant_key.hpp"
-#include "duckbox/validator.hpp"
+#include "rewriter/rewriter.hpp"
+#include "rewriter/tenant_key.hpp"
+#include "rewriter/validator.hpp"
 
 #include "duckdb/parser/query_node/cte_node.hpp"
 
