@@ -37,8 +37,12 @@ services:
 
   # Optional STS emulator. Started only with `--profile sts`.
   # Root user can AssumeRole for local temporary-credential tests.
+  # Official minio/minio (Docker Hub) and quay.io/minio/minio are no longer
+  # publicly pullable. pgsty/silo is a MinIO-compatible fork: same command,
+  # MINIO_* env, /data volume, and /minio/health routes. Pin is an immutable
+  # RELEASE tag plus the multi-arch index digest.
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: docker.io/pgsty/silo:RELEASE.2026-10-18T00-00-00Z@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7
     command: server /data --console-address ":19001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -50,7 +54,7 @@ services:
     volumes:
       - minio_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      test: ["CMD", "silo", "healthcheck", "ready"]
       interval: 3s
       timeout: 5s
       retries: 20

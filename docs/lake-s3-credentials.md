@@ -196,11 +196,14 @@ A lease default chain is allowed when the operator sets
 
 ```bash
 docker compose --profile sts up -d --wait minio
-# MinIO console/API: 127.0.0.1:19000  (root minioadmin / minioadmin)
+# MinIO-compatible API: 127.0.0.1:19000  (root minioadmin / minioadmin)
 ./build/duckbox_s3_sts_tests
 ```
 
-MinIO `AssumeRole` can mint temporary creds for local tests. DuckDB's `sts`
-chain talks to AWS STS; against MinIO, prefer a named profile (mode 2
-`CHAIN config`). `AssumeRoleWithWebIdentity` is not exercised here — IRSA
-is covered by default-chain provider-selection tests.
+Compose pins `docker.io/pgsty/silo:RELEASE.2026-10-18T00-00-00Z` (digest in
+`docker-compose.yml`). Official `minio/minio` and `quay.io/minio/minio` images
+are no longer publicly pullable; Silo keeps the MinIO S3/STS wire and
+`MINIO_*` env. `AssumeRole` can mint temporary creds for local tests. DuckDB's
+`sts` chain talks to AWS STS; against this emulator, prefer a named profile
+(mode 2 `CHAIN config`). `AssumeRoleWithWebIdentity` is not exercised here —
+IRSA is covered by default-chain provider-selection tests.
