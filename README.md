@@ -56,13 +56,13 @@ Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (c
 - Docker Engine with Compose v2 (Postgres + RustFS)
 - Python 3.10+
 - CMake 3.20+ and a C++17 compiler (`g++` on Linux, Apple Clang or `g++` on macOS)
-- **Linux:** `sudo` for the Arrow APT source
+- **Linux:** `sudo` for the Arrow APT source. GitHub Actions also rewrites the runner's Ubuntu mirrors (`archive.ubuntu.com` first); a local run does not.
 - **macOS:** Homebrew
 
 ### 1. C++ dependencies and Arrow
 
 ```bash
-# Linux
+# Linux — Apache APT Arrow 26.0.0 (CI applies Ubuntu mirror fallback; local does not)
 bash scripts/install_arrow.sh
 
 # macOS — Homebrew Arrow (Flight SQL) + aws-sdk-cpp + openssl@4
