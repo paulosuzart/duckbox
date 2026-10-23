@@ -224,10 +224,13 @@ docker compose up -d --wait
 
 Compose pins `docker.io/rustfs/rustfs:1.0.3` (digest in `docker-compose.yml`).
 That is the only S3-compatible store in the repo. The STS suite creates an IAM
-user, a policy with explicit `sts:AssumeRole`, and the binding through the
-RustFS admin API (`/rustfs/admin/v3/...`, SigV4, no `mc`). Root cannot call
-`AssumeRole`; `RoleArn` is a placeholder. `AssumeRoleWithWebIdentity` uses the
-compose OIDC mock (`scripts/oidc_mock.py`).
+user, a canned policy with explicit `sts:AssumeRole` (no `Resource`; RustFS
+rejects `*`), and the binding through the RustFS admin API
+(`/rustfs/admin/v3/...`, SigV4, no `mc`). Root cannot call `AssumeRole`;
+`RoleArn` is a placeholder. `AssumeRoleWithWebIdentity` uses the compose OIDC
+mock (`scripts/oidc_mock.py`). RustFS egress policy requires
+`RUSTFS_OUTBOUND_ALLOW_ORIGINS=http://oidc:8088` so discovery/JWKS can reach
+the mock.
 
 Warmup logs `profile=` / `role_arn=` and secret **refs** (`env:NAME`). Secret
 values are never logged.
