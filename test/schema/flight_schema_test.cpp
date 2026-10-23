@@ -16,6 +16,7 @@
 #include <arrow/flight/sql/client.h>
 #include <arrow/io/memory.h>
 #include <arrow/ipc/dictionary.h>
+#include <arrow/ipc/options.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
@@ -249,6 +250,11 @@ void duckbox::test::RunFlightSchemaTests() {
         std::shared_ptr<::arrow::flight::FlightClient>(std::move(client_res).ValueOrDie());
 
     ::arrow::flight::FlightCallOptions opt;
+    // Flight DoGet zero-copies gRPC bodies; table_name offsets can land at
+    // align=1. GetString then SIGSEGV's on ARM64 (UBSan misaligned load on x86)
+    // after the nested-views query. IdentName-by-value / ThrowIfError are not
+    // on this path — copy into type-aligned buffers before reading.
+    opt.read_options.ensure_alignment = ::arrow::ipc::Alignment::kDataTypeSpecificAlignment;
     opt.headers.emplace_back("x-duckbox-caller", "analyst-svc");
     opt.headers.emplace_back("x-duckbox-sandbox", "schema-int");
     opt.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");

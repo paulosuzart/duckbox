@@ -15,6 +15,7 @@
 #include <arrow/flight/client_auth.h>
 #include <arrow/io/memory.h>
 #include <arrow/ipc/dictionary.h>
+#include <arrow/ipc/options.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
 #include <arrow/record_batch.h>
@@ -278,6 +279,9 @@ PeerFlight::PeerFlight(std::string secret, int64_t timeout_ms)
 ::arrow::flight::FlightCallOptions PeerFlight::CallOpt(const std::string &sandbox_id,
                                                      const std::string &key) const {
     ::arrow::flight::FlightCallOptions opt;
+    // Flight gRPC can hand the client StringArray offset buffers at align=1.
+    // ARM64 SIGSEGV'd in GetTables include_schema; copy to type-aligned memory.
+    opt.read_options.ensure_alignment = ::arrow::ipc::Alignment::kDataTypeSpecificAlignment;
     opt.timeout = ::arrow::flight::TimeoutDuration(static_cast<double>(timeout_ms_) / 1000.0);
     opt.headers.emplace_back("authorization", "Bearer " + secret_);
     opt.headers.emplace_back("x-duckbox-sandbox", sandbox_id);
@@ -549,8 +553,18 @@ DuckboxFlightSqlServer::StreamIpc(const std::vector<uint8_t> &ipc) const {
 
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::StreamBatch(const std::shared_ptr<::arrow::RecordBatch> &batch) const {
-    ARROW_ASSIGN_OR_RAISE(auto reader, ::arrow::RecordBatchReader::Make({batch}, batch->schema()));
-    return std::make_unique<RecordBatchStream>(reader);
+    // Builder-backed RecordBatchStream can emit StringArray offsets at align=1.
+    // Re-encode through StreamIpc (same as query DoGet) so server arrays are
+    // reconstructed from an aligned IPC buffer. Clients still set
+    // IpcReadOptions::ensure_alignment — Flight gRPC zero-copy can still
+    // deliver unaligned bodies (ARM64 SIGSEGV / x86 UBSan after nested views).
+    ARROW_ASSIGN_OR_RAISE(auto sink, ::arrow::io::BufferOutputStream::Create());
+    ARROW_ASSIGN_OR_RAISE(auto writer, ::arrow::ipc::MakeStreamWriter(sink, batch->schema()));
+    ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+    ARROW_RETURN_NOT_OK(writer->Close());
+    ARROW_ASSIGN_OR_RAISE(auto buf, sink->Finish());
+    std::vector<uint8_t> ipc(buf->data(), buf->data() + buf->size());
+    return StreamIpc(ipc);
 }
 
 ::arrow::Result<std::unique_ptr<FlightInfo>>
