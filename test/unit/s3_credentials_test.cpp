@@ -315,14 +315,19 @@ int main() {
     assume_only.bucket = "control";
     assume_only.provider = "credential_chain";
     assume_only.role_arn = "arn:aws:iam::123456789012:role/duckbox-lake";
-    try {
+    Expect(LeaseStsAssumeRoleUnavailableMessage().find("STSAssumeRoleCredentialsProvider") !=
+               std::string::npos,
+           "assume-role unavailable message names the SDK provider");
+    if (LeaseStsAssumeRoleAvailable()) {
         auto assume_cli = MakeS3ControlClient(assume_only);
         Expect(assume_cli->bucket() == "control",
-               "lease assume-role provider constructs when STS is linked");
-    } catch (const PolicyError &e) {
-        Expect(std::string(e.what()).find("STS") != std::string::npos ||
-                   std::string(e.what()).find("profile") != std::string::npos,
-               "lease assume-role without STS asks for the SDK provider or a profile");
+               "lease assume-role uses STSAssumeRoleCredentialsProvider");
+    } else {
+        ExpectThrowContains([&] { (void)MakeS3ControlClient(assume_only); },
+                            "STSAssumeRoleCredentialsProvider",
+                            "lease assume-role fails closed when the STS provider is not linked");
+        Expect(LeaseStsAssumeRoleUnavailableMessage().find("not a substitute") != std::string::npos,
+               "unavailable-provider message refuses a profile fallback");
     }
 
     auto path = "/tmp/duckbox-daemon-sts.yaml";
@@ -491,14 +496,14 @@ int main() {
     aws_assume.bucket = "control";
     aws_assume.provider = "credential_chain";
     aws_assume.role_arn = "arn:aws:iam::123456789012:role/duckbox-lake";
-    try {
+    if (LeaseStsAssumeRoleAvailable()) {
         auto aws_cli = MakeS3ControlClient(aws_assume);
         Expect(aws_cli->bucket() == "control",
                "lease assume-role against AWS S3 hostname constructs");
-    } catch (const PolicyError &e) {
-        Expect(std::string(e.what()).find("STS") != std::string::npos ||
-                   std::string(e.what()).find("profile") != std::string::npos,
-               "AWS assume-role without STS still asks for the SDK provider");
+    } else {
+        ExpectThrowContains([&] { (void)MakeS3ControlClient(aws_assume); },
+                            "STSAssumeRoleCredentialsProvider",
+                            "AWS assume-role fails closed without the STS provider");
     }
 
     auto two_a = static_spec;

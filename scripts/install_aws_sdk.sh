@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# AWS SDK for C++ — S3 component only, via vcpkg (manifest: vcpkg.json).
+# AWS SDK for C++ — S3 + STS + identity-management via vcpkg (vcpkg.json).
 # Linux only. macOS uses Homebrew aws-sdk-cpp + openssl@4 (Arrow/gRPC already
 # load openssl@4; a second vcpkg OpenSSL 3.5 in the same binary aborts).
-# Arrow S3FileSystem has no If-Match / If-None-Match; registry/leases need those.
+# Lease assume-role needs STSAssumeRoleCredentialsProvider (identity-management)
+# and STSClient (sts). Arrow S3FileSystem has no If-Match / If-None-Match.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,14 +33,15 @@ export VCPKG_DEFAULT_TRIPLET="$TRIPLET"
 
 aws_config() {
   local root="$1"
-  [[ -f "$root/$TRIPLET/share/aws-cpp-sdk-s3/aws-cpp-sdk-s3-config.cmake" ]] ||
-    [[ -f "$root/$TRIPLET/share/awssdk/AWSSDKConfig.cmake" ]] ||
-    [[ -f "$root/$TRIPLET/share/aws-sdk-cpp/AWSSDKConfig.cmake" ]] ||
-    [[ -f "$root/$TRIPLET/share/AWSSDK/AWSSDKConfig.cmake" ]]
+  local prefix="$root/$TRIPLET/share"
+  # S3 alone is not enough — assume-role needs STS + identity-management.
+  [[ -f "$prefix/aws-cpp-sdk-s3/aws-cpp-sdk-s3-config.cmake" &&
+     -f "$prefix/aws-cpp-sdk-sts/aws-cpp-sdk-sts-config.cmake" &&
+     -f "$prefix/aws-cpp-sdk-identity-management/aws-cpp-sdk-identity-management-config.cmake" ]]
 }
 
 if aws_config "$INSTALL_ROOT" || aws_config "$VCPKG_ROOT/installed"; then
-  echo "aws-sdk-cpp[s3] already installed ($TRIPLET)"
+  echo "aws-sdk-cpp[s3,sts,identity-management] already installed ($TRIPLET)"
   exit 0
 fi
 
@@ -71,9 +73,9 @@ fi
 export CC="${CC:-gcc}"
 export CXX="${CXX:-g++}"
 
-echo "Installing aws-sdk-cpp[s3] from vcpkg.json ($TRIPLET) CC=${CC:-} CXX=${CXX:-}"
+echo "Installing aws-sdk-cpp[s3,sts,identity-management] from vcpkg.json ($TRIPLET) CC=${CC:-} CXX=${CXX:-}"
 "$VCPKG_ROOT/vcpkg" install --vcpkg-root="$VCPKG_ROOT" --triplet="$TRIPLET" \
   --x-install-root="$INSTALL_ROOT" --x-manifest-root="$ROOT" \
   --clean-after-build
 
-echo "AWS SDK C++ S3 ready in $INSTALL_ROOT/$TRIPLET"
+echo "AWS SDK C++ S3+STS ready in $INSTALL_ROOT/$TRIPLET"

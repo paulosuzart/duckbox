@@ -19,6 +19,10 @@
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/PutObjectRequest.h>
+#ifdef DUCKBOX_HAS_STS_ASSUME_ROLE
+#include <aws/identity-management/auth/STSAssumeRoleCredentialsProvider.h>
+#include <aws/sts/STSClient.h>
+#endif
 
 #include <cstdlib>
 #include <map>
@@ -76,19 +80,6 @@ Endpoint ParseLeaseEndpoint(const LeaseSettings &lease) {
     return out;
 }
 
-#if defined(__has_include)
-#if __has_include(<aws/identity-management/auth/STSAssumeRoleCredentialsProvider.h>) && \
-    __has_include(<aws/sts/STSClient.h>)
-#define DUCKBOX_HAS_STS_ASSUME_ROLE 1
-#include <aws/identity-management/auth/STSAssumeRoleCredentialsProvider.h>
-#include <aws/sts/STSClient.h>
-#endif
-#endif
-
-#ifndef DUCKBOX_HAS_STS_ASSUME_ROLE
-#define DUCKBOX_HAS_STS_ASSUME_ROLE 0
-#endif
-
 struct LeaseStaticKeys {
     std::string access_key;
     std::string secret_key;
@@ -133,16 +124,11 @@ MakeLeaseCredentialsProvider(const LeaseSettings &lease, const Endpoint &ep) {
         }
         auto sts = Aws::MakeShared<Aws::STS::STSClient>("duckbox-lease", chain, sts_cfg);
         return Aws::MakeShared<Aws::Auth::STSAssumeRoleCredentialsProvider>(
-            "duckbox-lease", lease.role_arn.c_str(), "duckbox-lease", "", sts);
+            "duckbox-lease", lease.role_arn.c_str(), "duckbox-lease", Aws::String(),
+            Aws::Auth::DEFAULT_CREDS_LOAD_FREQ_SECONDS, sts);
 #else
         (void)ep;
-        if (!lease.profile.empty()) {
-            return Aws::MakeShared<Aws::Auth::ProfileConfigFileAWSCredentialsProvider>(
-                "duckbox-lease", lease.profile.c_str());
-        }
-        throw PolicyError(
-            "lease.role_arn requires aws-sdk-cpp STS, or lease.profile pointing at a profile that "
-            "assumes the role");
+        throw PolicyError(LeaseStsAssumeRoleUnavailableMessage());
 #endif
     }
     if (kind == LeaseAuthKind::Profile) {
@@ -424,6 +410,20 @@ class AwsS3ControlClient final : public S3ControlClient {
 };
 
 } // namespace
+
+bool LeaseStsAssumeRoleAvailable() {
+#ifdef DUCKBOX_HAS_STS_ASSUME_ROLE
+    return true;
+#else
+    return false;
+#endif
+}
+
+std::string LeaseStsAssumeRoleUnavailableMessage() {
+    return "lease.role_arn requires STSAssumeRoleCredentialsProvider "
+           "(aws-sdk-cpp sts + identity-management); rebuild with those features. "
+           "A named profile is not a substitute for assume-role";
+}
 
 std::shared_ptr<S3ControlClient> MakeS3ControlClient(LeaseSettings lease) {
     return std::make_shared<AwsS3ControlClient>(std::move(lease));

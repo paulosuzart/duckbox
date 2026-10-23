@@ -118,7 +118,7 @@ Under `lease:` in the daemon YAML (all optional except the S3 endpoint block you
 | `access_key_env` / `secret_key_env` | required for static keys | Refs only. Not used with `provider: credential_chain`. |
 | `session_token_env` | optional | Pre-fetched STS token next to key/secret. |
 | `provider` | `config` | `config` (static keys) or `credential_chain` (SDK profile / assume-role / default chain). |
-| `profile` / `role_arn` | optional | Only with `credential_chain`. `role_arn` uses the SDK STS provider when linked, otherwise a profile that assumes the role. |
+| `profile` / `role_arn` | optional | Only with `credential_chain`. `role_arn` always uses `STSAssumeRoleCredentialsProvider` (fail closed if the STS SDK is not linked). A named profile is not a substitute. |
 | `skip_probe` | `false` | Skip If-None-Match startup probe. |
 | `node_id` | daemon `name` | Must be unique in the cluster. |
 | `advertise` | `grpc://` + `internal_listen` | **Internal** URL peers dial. Use a reachable private host, not `0.0.0.0`. |

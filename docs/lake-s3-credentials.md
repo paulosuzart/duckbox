@@ -140,8 +140,9 @@ Plan to re-warmup before the token's expiry.
 ## Lease / control-plane S3
 
 The daemon `lease` block (registry + ownership) accepts the same options.
-Use the AWS SDK default chain, a named profile, or STS assume-role — not a
-hand-rolled signer.
+Use the AWS SDK default chain, a named profile, or STS assume-role
+(`STSAssumeRoleCredentialsProvider`) — not a hand-rolled signer and not a
+silent profile fallback when `role_arn` is set.
 
 ```yaml
 lease:

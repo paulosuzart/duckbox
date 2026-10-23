@@ -42,7 +42,10 @@ class S3ControlClient {
 // aws-sdk-cpp S3Client. Path-style + endpoint override. Static keys, optional
 // session token, or the SDK credential chain / profile / STS assume-role.
 // Throws PolicyError if bucket/credentials/endpoint are missing or unparseable.
+// role_arn always uses STSAssumeRoleCredentialsProvider; never a profile fallback.
 std::shared_ptr<S3ControlClient> MakeS3ControlClient(LeaseSettings lease);
+bool LeaseStsAssumeRoleAvailable();
+std::string LeaseStsAssumeRoleUnavailableMessage();
 // In-memory If-Match / If-None-Match client for tests.
 std::shared_ptr<S3ControlClient> MakeMemoryS3ControlClient(std::string bucket = "control");
 
