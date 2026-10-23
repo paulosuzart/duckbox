@@ -6,6 +6,8 @@
 
 namespace duckbox {
 namespace rewriter {
+using namespace common;
+using namespace config;
 namespace {
 
 std::string Lower(const std::string &s) {

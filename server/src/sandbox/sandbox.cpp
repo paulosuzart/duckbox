@@ -1,6 +1,7 @@
 #include "sandbox/sandbox.hpp"
-#include "sandbox/arrow_ipc.hpp"
-#include "sandbox/arrow_types.hpp"
+#include "cluster/lease.hpp"
+#include "arrow/arrow_ipc.hpp"
+#include "arrow/arrow_types.hpp"
 #include "common/error.hpp"
 #include "common/json.hpp"
 #include "lake/lake.hpp"
@@ -19,6 +20,15 @@
 
 namespace duckbox {
 namespace sandbox {
+using namespace cluster;
+using namespace arrow;
+using namespace common;
+using namespace lake;
+using namespace metrics;
+using namespace rewriter;
+using namespace config;
+using namespace node;
+using namespace s3;
 
 TenantSandbox::TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key,
                              std::string spec_dir, std::string sandbox_id, int version,
@@ -433,7 +443,7 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
     }
 }
 
-std::shared_ptr<arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std::string &sql) {
+std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std::string &sql) {
     Warmup(false);
     std::lock_guard<std::mutex> hold(mu_);
     Touch();

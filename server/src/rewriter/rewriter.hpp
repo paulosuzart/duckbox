@@ -23,7 +23,7 @@ namespace rewriter {
 // earlier names only (recursive arm also sees itself). Nested WITH names do
 // not leak, and a catalog-qualified BaseTableRef is never treated as a CTE.
 struct RewriteContext {
-    const Policy *policy = nullptr;
+    const config::Policy *policy = nullptr;
     TenantKey key;
     std::vector<std::unordered_set<std::string>> cte_scope;
 };
@@ -36,14 +36,14 @@ struct RewriteResult {
 class ISqlRewriter {
   public:
     virtual ~ISqlRewriter() = default;
-    virtual RewriteResult Rewrite(const std::string &sql, const Policy &policy,
+    virtual RewriteResult Rewrite(const std::string &sql, const config::Policy &policy,
                                   const TenantKey &key) const = 0;
 };
 
 class SqlRewriter : public ISqlRewriter {
   public:
     // Validates then wraps allowlisted tables; VALUES subqueries are rewritten.
-    RewriteResult Rewrite(const std::string &sql, const Policy &policy,
+    RewriteResult Rewrite(const std::string &sql, const config::Policy &policy,
                           const TenantKey &key) const override;
 };
 
@@ -65,25 +65,10 @@ ddb::Value ValueFromKeyVar(const std::string &name,
 void BindParsedExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr,
                           const ddb::case_insensitive_map_t<ddb::Value> &values);
 
-std::string RewriteUserSql(const std::string &sql, const Policy &policy, const TenantKey &key);
-RewriteResult RewriteUserSqlDetailed(const std::string &sql, const Policy &policy,
+std::string RewriteUserSql(const std::string &sql, const config::Policy &policy, const TenantKey &key);
+RewriteResult RewriteUserSqlDetailed(const std::string &sql, const config::Policy &policy,
                                      const TenantKey &key);
 
 } // namespace rewriter
-
-using rewriter::RewriteContext;
-using rewriter::RewriteResult;
-using rewriter::ISqlRewriter;
-using rewriter::SqlRewriter;
-using rewriter::RewriteSelect;
-using rewriter::ApplyMaxRows;
-using rewriter::BindNamedParameters;
-using rewriter::BindNamedParametersInStatement;
-using rewriter::ParsePolicyFilter;
-using rewriter::ColonParamsToDollar;
-using rewriter::ValueFromKeyVar;
-using rewriter::BindParsedExpression;
-using rewriter::RewriteUserSql;
-using rewriter::RewriteUserSqlDetailed;
 
 } // namespace duckbox

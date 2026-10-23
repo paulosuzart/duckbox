@@ -55,10 +55,4 @@ void YamlRejectUnknownKeys(const YamlNode &n, std::initializer_list<const char *
 
 } // namespace common
 
-using common::YamlNode;
-using common::ParseYaml;
-using common::LoadYamlFile;
-using common::YamlStringList;
-using common::YamlRejectUnknownKeys;
-
 } // namespace duckbox

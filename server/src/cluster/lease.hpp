@@ -6,8 +6,8 @@
 // S3ConditionalLeaseManager is the real v1 fence: TTL + epoch, steal if expired.
 
 #include "metrics/metrics.hpp"
+#include "node/daemon_config.hpp"
 #include "s3/s3.hpp"
-#include "rewriter/tenant_key.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -18,6 +18,9 @@
 #include <vector>
 
 namespace duckbox {
+namespace rewriter {
+struct TenantKey;
+}
 namespace cluster {
 
 // Writer fence. epoch lives on the S3 lease object only — it is not written into
@@ -74,7 +77,7 @@ public:
 	// If-None-Match create, or steal-if-expired (epoch++). If another node holds
 	// an unexpired lease, returns that record with owned_locally=false.
 	virtual Lease Acquire(const std::string &resource_id) = 0;
-	virtual void Renew(const Lease &lease) = 0; // If-Match; throws LeaseLostError on lost ownership
+	virtual void Renew(const Lease &lease) = 0; // If-Match; throws common::LeaseLostError on lost ownership
 	virtual void Release(const Lease &lease) = 0;
 	virtual Lease Peek(const std::string &resource_id) = 0; // missing => resource set, owned_locally=false, epoch=0
 	virtual void SetDraining(bool v) {
@@ -117,23 +120,23 @@ enum class RouteDecision { Local, Forward, Handoff };
 class IRouter {
 public:
 	virtual ~IRouter() = default;
-	virtual RouteDecision Decide(const TenantKey &key) = 0; // Local until multi-node routing is wired
+	virtual RouteDecision Decide(const rewriter::TenantKey &key) = 0; // Local until multi-node routing is wired
 };
 
 class LeaseTelemetry {
 public:
-	explicit LeaseTelemetry(std::shared_ptr<IMetrics> metrics = {});
-	IMetrics &M(); // NoopMetrics if none was passed
+	explicit LeaseTelemetry(std::shared_ptr<metrics::IMetrics> metrics = {});
+	metrics::IMetrics &M(); // metrics::NoopMetrics if none was passed
 
 protected:
-	std::shared_ptr<IMetrics> metrics_;
+	std::shared_ptr<metrics::IMetrics> metrics_;
 	std::unordered_set<std::string> owned_;
 };
 
 // Always grants local ownership. Sufficient for single-node / memory mode.
 class SingleNodeLeaseManager : public ILeaseManager, public LeaseTelemetry {
 public:
-	explicit SingleNodeLeaseManager(std::shared_ptr<IMetrics> metrics = {});
+	explicit SingleNodeLeaseManager(std::shared_ptr<metrics::IMetrics> metrics = {});
 	Lease Acquire(const std::string &resource_id) override;
 	void Renew(const Lease &lease) override;
 	void Release(const Lease &lease) override;
@@ -153,8 +156,8 @@ private:
 
 class LocalRouter : public IRouter, public LeaseTelemetry { // always RouteDecision::Local
 public:
-	explicit LocalRouter(std::shared_ptr<IMetrics> metrics = {});
-	RouteDecision Decide(const TenantKey &key) override;
+	explicit LocalRouter(std::shared_ptr<metrics::IMetrics> metrics = {});
+	RouteDecision Decide(const rewriter::TenantKey &key) override;
 };
 
 struct S3LeaseOptions {
@@ -171,7 +174,7 @@ struct S3LeaseOptions {
 	std::string instance_id; // per-process nonce; empty = generated in the manager/directory ctor
 };
 
-S3LeaseOptions LeaseOptionsFromDaemon(const DaemonConfig &daemon);
+S3LeaseOptions LeaseOptionsFromDaemon(const node::DaemonConfig &daemon);
 
 struct NodeRecord {
 	std::string node_id;
@@ -187,7 +190,7 @@ struct NodeRecord {
 // Heartbeat records under {prefix}nodes/{id}.json. Peers discover each other via ListKeys.
 class S3NodeDirectory {
 public:
-	S3NodeDirectory(std::shared_ptr<S3ControlClient> client, S3LeaseOptions opt, std::shared_ptr<IMetrics> metrics = {},
+	S3NodeDirectory(std::shared_ptr<s3::S3ControlClient> client, S3LeaseOptions opt, std::shared_ptr<metrics::IMetrics> metrics = {},
 	                std::shared_ptr<Clock> clock = {});
 	void Heartbeat();
 	void Deregister();
@@ -219,15 +222,15 @@ public:
 private:
 	std::string ObjectKey(const std::string &node_id) const;
 	std::string Encode(const NodeRecord &n) const;
-	NodeRecord Parse(const S3Object &obj) const;
+	NodeRecord Parse(const s3::S3Object &obj) const;
 	std::vector<NodeRecord> ListUncached();
 	void PutHeartbeatLocked(); // caller holds mu_
 	void InvalidateLiveCacheLocked();
 	int64_t DirectoryCacheTtlMs() const;
 
-	std::shared_ptr<S3ControlClient> client_;
+	std::shared_ptr<s3::S3ControlClient> client_;
 	S3LeaseOptions opt_;
-	std::shared_ptr<IMetrics> metrics_;
+	std::shared_ptr<metrics::IMetrics> metrics_;
 	std::shared_ptr<Clock> clock_;
 	mutable std::mutex mu_;
 	int64_t started_at_ms_ = 0;
@@ -244,8 +247,8 @@ private:
 // S3 If-None-Match:* create, If-Match renew/steal/release. Clock is injectable for TTL tests.
 class S3ConditionalLeaseManager : public ILeaseManager, public LeaseTelemetry {
 public:
-	S3ConditionalLeaseManager(std::shared_ptr<S3ControlClient> client, S3LeaseOptions opt,
-	                          std::shared_ptr<IMetrics> metrics = {}, std::shared_ptr<Clock> clock = {});
+	S3ConditionalLeaseManager(std::shared_ptr<s3::S3ControlClient> client, S3LeaseOptions opt,
+	                          std::shared_ptr<metrics::IMetrics> metrics = {}, std::shared_ptr<Clock> clock = {});
 	Lease Acquire(const std::string &resource_id) override;
 	void Renew(const Lease &lease) override;
 	void Release(const Lease &lease) override;
@@ -273,7 +276,7 @@ private:
 		int64_t cache_until_ms = 0;
 	};
 	std::string ObjectKey(const std::string &resource_id) const;
-	Lease ParseRecord(const S3Object &obj) const;
+	Lease ParseRecord(const s3::S3Object &obj) const;
 	std::string Encode(const Lease &lease) const;
 	Lease Load(const std::string &resource_id);
 	void Remember(const Lease &lease);
@@ -283,7 +286,7 @@ private:
 	uint64_t LoadEpochMarker(const std::string &resource_id);
 	bool StoreEpochMarker(const std::string &resource_id, uint64_t epoch);
 
-	std::shared_ptr<S3ControlClient> client_;
+	std::shared_ptr<s3::S3ControlClient> client_;
 	S3LeaseOptions opt_;
 	std::shared_ptr<Clock> clock_;
 	mutable std::mutex mu_;
@@ -294,23 +297,5 @@ private:
 };
 
 } // namespace cluster
-
-using cluster::Lease;
-using cluster::SelfFence;
-using cluster::Clock;
-using cluster::SystemClock;
-using cluster::FakeClock;
-using cluster::ILeaseManager;
-using cluster::LeaseManager;
-using cluster::RouteDecision;
-using cluster::IRouter;
-using cluster::LeaseTelemetry;
-using cluster::SingleNodeLeaseManager;
-using cluster::LocalRouter;
-using cluster::S3LeaseOptions;
-using cluster::LeaseOptionsFromDaemon;
-using cluster::NodeRecord;
-using cluster::S3NodeDirectory;
-using cluster::S3ConditionalLeaseManager;
 
 } // namespace duckbox

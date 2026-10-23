@@ -10,7 +10,7 @@
 int main(int argc, char **argv) {
 	// Before any library thread: SIGINT/SIGTERM stay blocked so a dedicated
 	// sigwait thread in RunServer owns them (Arrow/gRPC/AWS must not).
-	duckbox::BlockTerminationSignals();
+	duckbox::flight::BlockTerminationSignals();
 	CLI::App app{"duckbox — deny-by-default SQL sandbox (named sandboxes + control plane)\n\n"
 	             "The daemon has no data access. Named sandbox definitions (id, key, policy,\n"
 	             "lake, credential refs) live in the registry. Queries send id + SQL."};
@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
 	serve->add_flag("--no-metrics", serve_no_metrics, "Disable the metrics listener");
 	serve->add_option("--handle-secret", serve_handle_secret, "Override handle HMAC secret");
 
-	duckbox::SandboxCliRequest req;
+	duckbox::flight::SandboxCliRequest req;
 	req.url = "grpc://127.0.0.1:4747";
 	req.caller = "local";
 	auto *sandbox = app.add_subcommand("sandbox", "Named-sandbox CRUD against a running daemon");
@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
 	validate->add_option("--spec", validate_spec, "Sandbox spec YAML");
 	validate->add_option("--daemon", validate_daemon, "Daemon YAML");
 
-	duckbox::NodeCliRequest node_req;
+	duckbox::flight::NodeCliRequest node_req;
 	auto *node = app.add_subcommand("node", "Cluster node admin (drain / membership)");
 	node->require_subcommand(1);
 	auto *node_drain = node->add_subcommand("drain", "Stop taking new leases, release owned sandboxes, deregister");
@@ -102,9 +102,9 @@ int main(int argc, char **argv) {
 
 	try {
 		if (*serve) {
-			duckbox::ServerOptions opt;
+			duckbox::flight::ServerOptions opt;
 			opt.daemon =
-			    serve_daemon.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(serve_daemon);
+			    serve_daemon.empty() ? duckbox::node::DefaultDaemonConfig() : duckbox::node::LoadDaemonFile(serve_daemon);
 			if (!serve_listen.empty()) {
 				opt.daemon.listen = serve_listen;
 			}
@@ -124,7 +124,7 @@ int main(int argc, char **argv) {
 			if (!serve_handle_secret.empty()) {
 				opt.daemon.handle_secret = serve_handle_secret;
 			}
-			return duckbox::RunServer(opt);
+			return duckbox::flight::RunServer(opt);
 		}
 		if (*sandbox) {
 			if (*sb_create) {
@@ -140,20 +140,20 @@ int main(int argc, char **argv) {
 			} else if (*sb_expire) {
 				req.op = "expire";
 			}
-			return duckbox::RunSandboxCli(req);
+			return duckbox::flight::RunSandboxCli(req);
 		}
 		if (*run) {
-			auto daemon = run_daemon.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(run_daemon);
-			return duckbox::RunLocalQuery(daemon, run_spec, run_key, run_sql);
+			auto daemon = run_daemon.empty() ? duckbox::node::DefaultDaemonConfig() : duckbox::node::LoadDaemonFile(run_daemon);
+			return duckbox::flight::RunLocalQuery(daemon, run_spec, run_key, run_sql);
 		}
 		if (*validate) {
 			auto daemon =
-			    validate_daemon.empty() ? duckbox::DefaultDaemonConfig() : duckbox::LoadDaemonFile(validate_daemon);
-			return duckbox::RunValidateCommand(daemon, validate_spec);
+			    validate_daemon.empty() ? duckbox::node::DefaultDaemonConfig() : duckbox::node::LoadDaemonFile(validate_daemon);
+			return duckbox::config::RunValidateCommand(daemon, validate_spec);
 		}
 		if (*node) {
 			if (*node_drain) {
-				return duckbox::RunNodeDrain(node_req);
+				return duckbox::flight::RunNodeDrain(node_req);
 			}
 			return 1;
 		}

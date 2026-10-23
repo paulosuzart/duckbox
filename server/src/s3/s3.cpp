@@ -34,6 +34,8 @@
 
 namespace duckbox {
 namespace s3 {
+using namespace common;
+using namespace node;
 namespace {
 
 std::string UnquoteEtag(std::string e) {

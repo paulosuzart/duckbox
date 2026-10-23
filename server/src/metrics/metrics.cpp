@@ -1,4 +1,6 @@
 #include "metrics/metrics.hpp"
+#include "config/policy.hpp"
+#include "rewriter/tenant_key.hpp"
 #include "node/daemon_config.hpp"
 #include "common/error.hpp"
 #include "common/json.hpp"
@@ -16,6 +18,10 @@
 
 namespace duckbox {
 namespace metrics {
+using namespace config;
+using namespace rewriter;
+using namespace node;
+using namespace common;
 namespace {
 
 std::shared_ptr<IMetrics> g_metrics = std::make_shared<NoopMetrics>();

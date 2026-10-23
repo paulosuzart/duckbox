@@ -38,30 +38,30 @@ struct ResolvedS3Credentials {
 };
 
 S3CredentialProvider ParseS3Provider(const std::string &raw, const std::string &field_path);
-S3CredentialProvider LakeS3Provider(const S3Settings &s3);
+S3CredentialProvider LakeS3Provider(const config::S3Settings &s3);
 bool IsCredentialChain(S3CredentialProvider provider);
 
 bool ValidAwsProfileName(const std::string &profile);
 bool ValidIamRoleArn(const std::string &arn);
 bool AllowlistHasWildcard(const std::vector<std::string> &items);
-bool LakeAllowListsEmpty(const LakeAllow &allow);
+bool LakeAllowListsEmpty(const node::LakeAllow &allow);
 std::string CanonicalS3Endpoint(const std::string &endpoint); // empty → s3.amazonaws.com
 // True for s3.amazonaws.com / s3.<region>.amazonaws.com (optional port). Custom
 // stores (RustFS) are false so STS can share that endpoint.
 bool IsAwsS3Hostname(const std::string &host);
 
 // Mode consistency (no daemon). Field paths under lake.s3 / lake.extensions.
-void ValidateS3CredentialFields(const S3Settings &s3, LakeKind kind,
+void ValidateS3CredentialFields(const config::S3Settings &s3, config::LakeKind kind,
                                 const std::vector<std::string> &extensions,
-                                std::vector<SpecIssue> &issues);
+                                std::vector<common::SpecIssue> &issues);
 
 // Node allowlists. Fail closed: empty profile/role lists deny those fields.
-void ValidateS3CredentialAllowlists(const SandboxSpec &spec, const DaemonConfig &daemon,
-                                    std::vector<SpecIssue> &issues);
+void ValidateS3CredentialAllowlists(const config::SandboxSpec &spec, const node::DaemonConfig &daemon,
+                                    std::vector<common::SpecIssue> &issues);
 
-void RejectS3CredentialAllowlistIssues(const SandboxSpec &spec, const DaemonConfig &daemon);
+void RejectS3CredentialAllowlistIssues(const config::SandboxSpec &spec, const node::DaemonConfig &daemon);
 
-ResolvedS3Credentials ResolveLakeS3Credentials(const S3Settings &s3, const SecretResolver &secrets);
+ResolvedS3Credentials ResolveLakeS3Credentials(const config::S3Settings &s3, const SecretResolver &secrets);
 std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds);
 
 // DuckDB 1.5.6 aws extension CHAIN items (docs + aws_secret.cpp):
@@ -79,39 +79,14 @@ std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds);
 // creds and ignores PROFILE.
 const char *DuckDbDefaultCredentialChain();
 const char *DuckDbProfileCredentialChain();
-bool UsesDefaultCredentialChain(const S3Settings &s3);
-bool LeaseUsesDefaultCredentialChain(const LeaseSettings &lease);
+bool UsesDefaultCredentialChain(const config::S3Settings &s3);
+bool LeaseUsesDefaultCredentialChain(const node::LeaseSettings &lease);
 
-LeaseAuthKind ClassifyLeaseAuth(const LeaseSettings &lease);
-bool LeaseUsesCredentialChain(const LeaseSettings &lease);
-void ValidateLeaseCredentialFields(const LeaseSettings &lease, bool allow_insecure_dev,
-                                   std::vector<SpecIssue> &issues);
+LeaseAuthKind ClassifyLeaseAuth(const node::LeaseSettings &lease);
+bool LeaseUsesCredentialChain(const node::LeaseSettings &lease);
+void ValidateLeaseCredentialFields(const node::LeaseSettings &lease, bool allow_insecure_dev,
+                                   std::vector<common::SpecIssue> &issues);
 
 } // namespace s3
-
-using s3::S3CredentialProvider;
-using s3::LeaseAuthKind;
-using s3::ResolvedS3Credentials;
-using s3::ParseS3Provider;
-using s3::LakeS3Provider;
-using s3::IsCredentialChain;
-using s3::ValidAwsProfileName;
-using s3::ValidIamRoleArn;
-using s3::AllowlistHasWildcard;
-using s3::LakeAllowListsEmpty;
-using s3::CanonicalS3Endpoint;
-using s3::IsAwsS3Hostname;
-using s3::ValidateS3CredentialFields;
-using s3::ValidateS3CredentialAllowlists;
-using s3::RejectS3CredentialAllowlistIssues;
-using s3::ResolveLakeS3Credentials;
-using s3::BuildDuckDbS3SecretSql;
-using s3::DuckDbDefaultCredentialChain;
-using s3::DuckDbProfileCredentialChain;
-using s3::UsesDefaultCredentialChain;
-using s3::LeaseUsesDefaultCredentialChain;
-using s3::ClassifyLeaseAuth;
-using s3::LeaseUsesCredentialChain;
-using s3::ValidateLeaseCredentialFields;
 
 } // namespace duckbox

@@ -7,6 +7,7 @@
 
 namespace duckbox {
 namespace flight {
+using namespace common;
 namespace {
 
 void PutU32(std::string &s, uint32_t v) {
