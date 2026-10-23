@@ -88,7 +88,8 @@ EOF
     exit 1
   }
   url="https://packages.apache.org/artifactory/arrow/ubuntu/pool/${codename}/main/a/apache-arrow-apt-source/apache-arrow-apt-source_${ARROW_APT_VERSION}_all.deb"
-  tmp="$(mktemp)"
+  # apt-get install requires a .deb suffix; a bare mktemp path is "Unsupported file".
+  tmp="$(mktemp --suffix=.deb)"
   trap 'rm -f "${tmp}"' EXIT
   wget -q "${url}" -O "${tmp}"
   got="$(sha256sum "${tmp}" | awk '{print $1}')"
