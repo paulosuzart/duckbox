@@ -1,4 +1,4 @@
-#include "sandbox/arrow_ipc.hpp"
+#include "arrow/arrow_ipc.hpp"
 #include "common/error.hpp"
 
 #include <arrow/buffer.h>
@@ -11,23 +11,24 @@
 #include <cstring>
 
 namespace duckbox {
-namespace sandbox {
+namespace arrow {
+using namespace common;
 
 std::vector<uint8_t> MaterializedToArrowIpc(ddb::MaterializedQueryResult &result) {
 	auto opts = result.client_properties;
 	ArrowSchema c_schema;
 	ddb::ArrowConverter::ToArrowSchema(&c_schema, result.types, result.names, opts);
-	auto schema_res = arrow::ImportSchema(&c_schema);
+	auto schema_res = ::arrow::ImportSchema(&c_schema);
 	if (!schema_res.ok()) {
 		throw Error("arrow schema import failed: " + schema_res.status().ToString());
 	}
 	auto schema = *schema_res;
-	auto sink_res = arrow::io::BufferOutputStream::Create();
+	auto sink_res = ::arrow::io::BufferOutputStream::Create();
 	if (!sink_res.ok()) {
 		throw Error("arrow sink failed");
 	}
 	auto sink = *sink_res;
-	auto writer_res = arrow::ipc::MakeStreamWriter(sink, schema);
+	auto writer_res = ::arrow::ipc::MakeStreamWriter(sink, schema);
 	if (!writer_res.ok()) {
 		throw Error("arrow writer failed");
 	}
@@ -39,7 +40,7 @@ std::vector<uint8_t> MaterializedToArrowIpc(ddb::MaterializedQueryResult &result
 		}
 		ArrowArray c_arr;
 		ddb::ArrowConverter::ToArrowArray(chunk, &c_arr, opts, ext);
-		auto batch_res = arrow::ImportRecordBatch(&c_arr, schema);
+		auto batch_res = ::arrow::ImportRecordBatch(&c_arr, schema);
 		if (!batch_res.ok()) {
 			throw Error("arrow batch import failed: " + batch_res.status().ToString());
 		}
@@ -87,26 +88,26 @@ std::vector<uint8_t> QueryToArrowIpc(ddb::Connection &con, const std::string &se
 	return QueryToArrowIpc(con, select_sql, none);
 }
 
-std::shared_ptr<arrow::Schema> SchemaFromArrowIpc(const std::vector<uint8_t> &ipc) {
+std::shared_ptr<::arrow::Schema> SchemaFromArrowIpc(const std::vector<uint8_t> &ipc) {
 	if (ipc.empty()) {
 		throw Error("arrow ipc schema is empty");
 	}
-	auto maybe = arrow::AllocateBuffer(static_cast<int64_t>(ipc.size()));
+	auto maybe = ::arrow::AllocateBuffer(static_cast<int64_t>(ipc.size()));
 	if (!maybe.ok()) {
 		throw Error("arrow ipc schema buffer failed");
 	}
-	std::shared_ptr<arrow::Buffer> buf(std::move(*maybe));
+	std::shared_ptr<::arrow::Buffer> buf(std::move(*maybe));
 	if (!ipc.empty()) {
 		std::memcpy(buf->mutable_data(), ipc.data(), ipc.size());
 	}
-	auto reader = std::make_shared<arrow::io::BufferReader>(buf);
-	auto br = arrow::ipc::RecordBatchStreamReader::Open(reader);
+	auto reader = std::make_shared<::arrow::io::BufferReader>(buf);
+	auto br = ::arrow::ipc::RecordBatchStreamReader::Open(reader);
 	if (!br.ok()) {
 		throw Error("arrow ipc schema read failed: " + br.status().ToString());
 	}
 	return (*br)->schema();
 }
 
-} // namespace sandbox
+} // namespace arrow
 
 } // namespace duckbox

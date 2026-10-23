@@ -18,22 +18,22 @@ namespace config {
 class ISpecValidator {
   public:
     virtual ~ISpecValidator() = default;
-    virtual std::vector<SpecIssue> ValidateStatic(const SandboxSpec &spec) const = 0;
-    virtual std::vector<SpecIssue>
+    virtual std::vector<common::SpecIssue> ValidateStatic(const SandboxSpec &spec) const = 0;
+    virtual std::vector<common::SpecIssue>
     ValidateLake(SandboxSpec &spec, ddb::Connection &con) const = 0; // fills lake_columns
 };
 
 class SpecValidator : public ISpecValidator {
   public:
-    std::vector<SpecIssue>
+    std::vector<common::SpecIssue>
     ValidateStatic(const SandboxSpec &spec) const override; // all errors, field paths
-    std::vector<SpecIssue> ValidateStatic(const SandboxSpec &spec,
-                                          const DaemonConfig &daemon) const;
-    std::vector<SpecIssue> ValidateLake(SandboxSpec &spec, ddb::Connection &con) const override;
-    void ThrowIf(const std::vector<SpecIssue> &issues) const; // SpecError if nonempty
+    std::vector<common::SpecIssue> ValidateStatic(const SandboxSpec &spec,
+                                          const node::DaemonConfig &daemon) const;
+    std::vector<common::SpecIssue> ValidateLake(SandboxSpec &spec, ddb::Connection &con) const override;
+    void ThrowIf(const std::vector<common::SpecIssue> &issues) const; // common::SpecError if nonempty
 };
 
-int RunValidateCommand(const DaemonConfig &daemon,
+int RunValidateCommand(const node::DaemonConfig &daemon,
                        const std::string &spec_path); // CLI; throwaway sandbox for lake check
 
 // Exact warmup / ValidateStatic message for an allowlisted macro.
@@ -55,13 +55,5 @@ void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string
 void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con);
 
 } // namespace config
-
-using config::ISpecValidator;
-using config::SpecValidator;
-using config::RunValidateCommand;
-using config::MacroNotAllowlistedMessage;
-using config::IsAllowlistedMacroException;
-using config::CollectCreatedMacros;
-using config::RejectAllowlistedMacros;
 
 } // namespace duckbox

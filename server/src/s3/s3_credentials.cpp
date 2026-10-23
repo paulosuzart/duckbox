@@ -9,6 +9,10 @@
 
 namespace duckbox {
 namespace s3 {
+using namespace common;
+using namespace lake;
+using namespace node;
+using namespace config;
 namespace {
 
 std::string LowerCopy(std::string s) {

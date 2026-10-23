@@ -38,7 +38,7 @@ public:
 // env:NAME, file:/abs/path. Bare NAME (from *_env fields) is env:NAME.
 // Rejects anything that looks like an inline secret value.
 SecretRef ParseSecretRef(const std::string &raw, const std::string &field_path);
-void ValidateSecretRefSyntax(const SecretRef &ref, const std::string &field_path, std::vector<SpecIssue> &issues);
+void ValidateSecretRefSyntax(const SecretRef &ref, const std::string &field_path, std::vector<common::SpecIssue> &issues);
 
 // Returns getenv(env_name) if set, else inline_value. Throws if both empty.
 std::string ResolveSecret(const std::string &env_name, const std::string &inline_value, const std::string &field_path);
@@ -46,13 +46,5 @@ std::string ResolveSecret(const std::string &env_name, const std::string &inline
 std::string TrimCopy(const std::string &s);
 
 } // namespace s3
-
-using s3::SecretRef;
-using s3::SecretResolver;
-using s3::EnvFileSecretResolver;
-using s3::ParseSecretRef;
-using s3::ValidateSecretRefSyntax;
-using s3::ResolveSecret;
-using s3::TrimCopy;
 
 } // namespace duckbox

@@ -9,32 +9,32 @@
 
 namespace {
 
-duckbox::Policy PolicyUnderTest() {
+duckbox::config::Policy PolicyUnderTest() {
     return duckbox::test::TestPolicy();
 }
 
-duckbox::Policy HiddenPolicy() {
+duckbox::config::Policy HiddenPolicy() {
     return duckbox::test::HiddenAmountPolicy();
 }
 
-duckbox::TenantKey Tenant21(const duckbox::Policy &policy) {
-    return duckbox::ParseTenantKey("tenant_21:user_sergio", policy.key);
+duckbox::rewriter::TenantKey Tenant21(const duckbox::config::Policy &policy) {
+    return duckbox::rewriter::ParseTenantKey("tenant_21:user_sergio", policy.key);
 }
 
-void ExpectValidates(const char *sql, const duckbox::Policy &policy, const std::string &msg) {
+void ExpectValidates(const char *sql, const duckbox::config::Policy &policy, const std::string &msg) {
     try {
-        auto parser = duckbox::ParseSql(sql);
-        duckbox::ValidateStatements(parser->statements, policy);
+        auto parser = duckbox::rewriter::ParseSql(sql);
+        duckbox::rewriter::ValidateStatements(parser->statements, policy);
         duckbox::test::Expect(true, msg);
     } catch (const std::exception &e) {
         duckbox::test::Expect(false, msg + ": " + e.what());
     }
 }
 
-std::string RewriteOrEmpty(const char *sql, const duckbox::Policy &policy,
-                           const duckbox::TenantKey &key, const std::string &msg) {
+std::string RewriteOrEmpty(const char *sql, const duckbox::config::Policy &policy,
+                           const duckbox::rewriter::TenantKey &key, const std::string &msg) {
     try {
-        return duckbox::RewriteUserSql(sql, policy, key);
+        return duckbox::rewriter::RewriteUserSql(sql, policy, key);
     } catch (const std::exception &e) {
         duckbox::test::Expect(false, msg + ": " + e.what());
         return {};
@@ -59,6 +59,17 @@ void ExpectHiddenAmount(const std::string &rw, const std::string &msg) {
 
 void duckbox::test::RunCteChainedTests() {
     using namespace duckbox;
+    using namespace duckbox::common;
+    using namespace duckbox::s3;
+    using namespace duckbox::node;
+    using namespace duckbox::config;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::lake;
+    using namespace duckbox::metrics;
+    using namespace duckbox::cluster;
+    using namespace duckbox::arrow;
+    using namespace duckbox::sandbox;
+    using namespace duckbox::flight;
     auto policy = PolicyUnderTest();
     auto hidden = HiddenPolicy();
     auto key_a = Tenant21(policy);
@@ -80,6 +91,17 @@ void duckbox::test::RunCteChainedTests() {
 
 void duckbox::test::RunCteRecursiveTests() {
     using namespace duckbox;
+    using namespace duckbox::common;
+    using namespace duckbox::s3;
+    using namespace duckbox::node;
+    using namespace duckbox::config;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::lake;
+    using namespace duckbox::metrics;
+    using namespace duckbox::cluster;
+    using namespace duckbox::arrow;
+    using namespace duckbox::sandbox;
+    using namespace duckbox::flight;
     auto policy = PolicyUnderTest();
     auto hidden = HiddenPolicy();
     auto key_a = Tenant21(policy);
@@ -108,6 +130,17 @@ void duckbox::test::RunCteRecursiveTests() {
 
 void duckbox::test::RunCteShadowTests() {
     using namespace duckbox;
+    using namespace duckbox::common;
+    using namespace duckbox::s3;
+    using namespace duckbox::node;
+    using namespace duckbox::config;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::lake;
+    using namespace duckbox::metrics;
+    using namespace duckbox::cluster;
+    using namespace duckbox::arrow;
+    using namespace duckbox::sandbox;
+    using namespace duckbox::flight;
     auto hidden = HiddenPolicy();
     auto key_a = Tenant21(hidden);
 
@@ -146,6 +179,17 @@ void duckbox::test::RunCteShadowTests() {
 
 void duckbox::test::RunCteRewriteTests() {
     using namespace duckbox;
+    using namespace duckbox::common;
+    using namespace duckbox::s3;
+    using namespace duckbox::node;
+    using namespace duckbox::config;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::lake;
+    using namespace duckbox::metrics;
+    using namespace duckbox::cluster;
+    using namespace duckbox::arrow;
+    using namespace duckbox::sandbox;
+    using namespace duckbox::flight;
     auto policy = PolicyUnderTest();
     auto hidden = HiddenPolicy();
     auto key_a = Tenant21(policy);

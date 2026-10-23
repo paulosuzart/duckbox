@@ -22,6 +22,17 @@
 
 void duckbox::test::RunClusterTests() {
 	using namespace duckbox;
+	using namespace duckbox::common;
+	using namespace duckbox::s3;
+	using namespace duckbox::node;
+	using namespace duckbox::config;
+	using namespace duckbox::rewriter;
+	using namespace duckbox::lake;
+	using namespace duckbox::metrics;
+	using namespace duckbox::cluster;
+	using namespace duckbox::arrow;
+	using namespace duckbox::sandbox;
+	using namespace duckbox::flight;
 	auto daemon_a = TestDaemon();
 	daemon_a.name = "node-a";
 	auto daemon_b = TestDaemon();
@@ -355,11 +366,11 @@ void duckbox::test::RunClusterTests() {
 			auto int_sql = std::make_unique<DuckboxFlightSqlServer>(cfg, defs_p, rt, signer_p, rewriter_p,
 			                                                       ListenerPlane::Internal, peers);
 			p.intern = std::make_unique<DuckboxFlightServer>(std::move(int_sql));
-			auto loc = arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
-			arrow::flight::FlightServerOptions fopt(*loc);
+			auto loc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
+			::arrow::flight::FlightServerOptions fopt(*loc);
 			fopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Public);
 			Expect(p.pub->Init(fopt).ok(), "proxy public init");
-			arrow::flight::FlightServerOptions iopt(*loc);
+			::arrow::flight::FlightServerOptions iopt(*loc);
 			iopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
 			Expect(p.intern->Init(iopt).ok(), "proxy internal init");
 			p.pub_port = p.pub->port();
@@ -385,12 +396,12 @@ void duckbox::test::RunClusterTests() {
 		auto owned = rt_pa->Get(rec_p);
 		Expect(owned && leases_pa->Peek("proxy-box").owned_locally, "node-a owns proxy-box");
 
-		auto bloc = arrow::flight::Location::ForGrpcTcp("127.0.0.1", nb.pub_port);
-		auto bcli_res = arrow::flight::FlightClient::Connect(*bloc);
+		auto bloc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", nb.pub_port);
+		auto bcli_res = ::arrow::flight::FlightClient::Connect(*bloc);
 		Expect(bcli_res.ok(), "client connects only to non-owner public listener");
-		auto bcli = std::shared_ptr<arrow::flight::FlightClient>(std::move(bcli_res).ValueOrDie());
-		arrow::flight::sql::FlightSqlClient sql_b(bcli);
-		arrow::flight::FlightCallOptions qopt;
+		auto bcli = std::shared_ptr<::arrow::flight::FlightClient>(std::move(bcli_res).ValueOrDie());
+		::arrow::flight::sql::FlightSqlClient sql_b(bcli);
+		::arrow::flight::FlightCallOptions qopt;
 		qopt.headers.emplace_back("x-duckbox-sandbox", "proxy-box");
 		qopt.headers.emplace_back("x-duckbox-caller", "local");
 		auto info_res = sql_b.Execute(qopt, "SELECT id FROM deals ORDER BY id");

@@ -12,6 +12,19 @@
 #include <vector>
 
 namespace duckbox {
+// Empty opens so a test can `using namespace duckbox::<area>` without including
+// every area header. Real declarations live in that area's headers.
+namespace common {}
+namespace s3 {}
+namespace node {}
+namespace config {}
+namespace rewriter {}
+namespace lake {}
+namespace metrics {}
+namespace cluster {}
+namespace arrow {}
+namespace sandbox {}
+namespace flight {}
 namespace test {
 
 extern int g_failed;
@@ -22,10 +35,10 @@ void ExpectThrowContains(const std::function<void()> &fn, const std::string &nee
                          const std::string &msg);
 int ReportAndExit(const char *suite);
 
-DaemonConfig TestDaemon();
-Policy TestPolicy();
-Policy HiddenAmountPolicy(); // TestPolicy with deals.amount omitted
-Policy TestDucklakePolicy(const Policy &base);
+node::DaemonConfig TestDaemon();
+config::Policy TestPolicy();
+config::Policy HiddenAmountPolicy(); // TestPolicy with deals.amount omitted
+config::Policy TestDucklakePolicy(const config::Policy &base);
 std::string MemorySpecDir();
 std::string MemoryAnalystPath();
 

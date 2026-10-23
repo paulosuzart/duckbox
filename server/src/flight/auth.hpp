@@ -22,16 +22,12 @@ struct AuthRequest {
 };
 
 // Parses req.key_header with policy.key. AuthError if missing/unparseable.
-TenantKey Authenticate(const Policy &policy, const AuthRequest &req);
+rewriter::TenantKey Authenticate(const config::Policy &policy, const AuthRequest &req);
 
 // Always returns the definition's bound key. A per-query x-duckbox-key must
 // match the bound key exactly or is rejected (no tenant_id-only compare).
-TenantKey AuthenticateSandbox(const Policy &policy, const std::string &bound_key, const AuthRequest &req);
+rewriter::TenantKey AuthenticateSandbox(const config::Policy &policy, const std::string &bound_key, const AuthRequest &req);
 
 } // namespace flight
-
-using flight::AuthRequest;
-using flight::Authenticate;
-using flight::AuthenticateSandbox;
 
 } // namespace duckbox

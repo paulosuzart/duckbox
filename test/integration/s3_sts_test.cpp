@@ -96,13 +96,13 @@ std::string RustFsEndpoint() {
 }
 
 bool TcpOpen(const std::string &host, int port) {
-    duckbox::LeaseSettings probe;
+    duckbox::node::LeaseSettings probe;
     probe.endpoint = "http://" + host + ":" + std::to_string(port);
     probe.bucket = kBucket;
     probe.access_key_env = "DUCKBOX_S3_KEY";
     probe.secret_key_env = "DUCKBOX_S3_SECRET";
     try {
-        auto c = duckbox::MakeS3ControlClient(probe);
+        auto c = duckbox::s3::MakeS3ControlClient(probe);
         return c->Get("connectivity-check").status != 0;
     } catch (...) {
         return false;
@@ -212,6 +212,17 @@ Aws::S3::S3ClientConfiguration PathStyleCfg(const std::string &hostport) {
 
 int main() {
     using namespace duckbox;
+    using namespace duckbox::common;
+    using namespace duckbox::s3;
+    using namespace duckbox::node;
+    using namespace duckbox::config;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::lake;
+    using namespace duckbox::metrics;
+    using namespace duckbox::cluster;
+    using namespace duckbox::arrow;
+    using namespace duckbox::sandbox;
+    using namespace duckbox::flight;
     setenv("DUCKBOX_S3_KEY", RootKey().c_str(), 0);
     setenv("DUCKBOX_S3_SECRET", RootSecret().c_str(), 0);
 

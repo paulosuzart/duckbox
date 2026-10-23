@@ -44,7 +44,7 @@ class S3ControlClient {
 // SDK credential chain / profile / STS assume-role.
 // Throws PolicyError if bucket/credentials/endpoint are missing or unparseable.
 // role_arn always uses STSAssumeRoleCredentialsProvider; never a profile fallback.
-std::shared_ptr<S3ControlClient> MakeS3ControlClient(LeaseSettings lease);
+std::shared_ptr<S3ControlClient> MakeS3ControlClient(node::LeaseSettings lease);
 bool LeaseStsAssumeRoleAvailable();
 std::string LeaseStsAssumeRoleUnavailableMessage();
 // In-memory If-Match / If-None-Match client for tests.
@@ -73,17 +73,8 @@ class FaultyS3ControlClient final : public S3ControlClient {
     bool down_ = false;
 };
 // Conditional PUT If-None-Match:*. Empty string = ok (200/204/412); else error.
-std::string ProbeControlPlaneS3(const LeaseSettings &lease);
+std::string ProbeControlPlaneS3(const node::LeaseSettings &lease);
 
 } // namespace s3
-
-using s3::S3Object;
-using s3::S3ControlClient;
-using s3::MakeS3ControlClient;
-using s3::LeaseStsAssumeRoleAvailable;
-using s3::LeaseStsAssumeRoleUnavailableMessage;
-using s3::MakeMemoryS3ControlClient;
-using s3::FaultyS3ControlClient;
-using s3::ProbeControlPlaneS3;
 
 } // namespace duckbox

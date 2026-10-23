@@ -6,7 +6,6 @@
 // for BIGINT / HUGEINT / UBIGINT / INTERVAL).
 
 #include "common/duckdb_layer.hpp"
-#include "sandbox/sandbox.hpp"
 
 #include <arrow/type.h>
 
@@ -15,7 +14,14 @@
 #include <vector>
 
 namespace duckbox {
-namespace sandbox {
+namespace arrow {
+
+// Result column name + DuckDB logical type. Apache Arrow types are ::arrow::.
+struct ColumnSchema {
+    std::string name;
+    std::string logical_type;
+};
+
 
 ddb::ClientProperties DefaultArrowClientProperties();
 
@@ -28,22 +34,15 @@ ddb::ClientProperties DefaultArrowClientProperties();
 // UNBOUND are rejected.
 ddb::LogicalType LogicalTypeFromName(const std::string &logical_type);
 
-std::shared_ptr<arrow::DataType> MapLogicalType(const ddb::LogicalType &type,
+std::shared_ptr<::arrow::DataType> MapLogicalType(const ddb::LogicalType &type,
                                                 ddb::ClientProperties opts);
-std::shared_ptr<arrow::DataType> MapTypeName(const std::string &logical_type);
+std::shared_ptr<::arrow::DataType> MapTypeName(const std::string &logical_type);
 
-std::shared_ptr<arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::string> &names,
+std::shared_ptr<::arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::string> &names,
                                                       const std::vector<ddb::LogicalType> &types,
                                                       ddb::ClientProperties opts);
-std::shared_ptr<arrow::Schema> SchemaFromCols(const std::vector<ColumnSchema> &cols);
+std::shared_ptr<::arrow::Schema> SchemaFromCols(const std::vector<ColumnSchema> &cols);
 
-} // namespace sandbox
-
-using sandbox::DefaultArrowClientProperties;
-using sandbox::LogicalTypeFromName;
-using sandbox::MapLogicalType;
-using sandbox::MapTypeName;
-using sandbox::SchemaFromLogicalTypes;
-using sandbox::SchemaFromCols;
+} // namespace arrow
 
 } // namespace duckbox

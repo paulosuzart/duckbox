@@ -5,9 +5,6 @@
 // name, else `other`) and `node`. Never tenant/user/key — those go to the
 // structured audit log.
 
-#include "config/policy.hpp"
-#include "rewriter/tenant_key.hpp"
-
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -17,6 +14,12 @@
 #include <vector>
 
 namespace duckbox {
+namespace config {
+struct SandboxSpec;
+}
+namespace rewriter {
+struct TenantKey;
+}
 namespace metrics {
 
 const char *ClassifyRejection(const std::exception &e); // bounded reason label; never the SQL text
@@ -188,31 +191,17 @@ IMetrics &Metrics(); // process singleton; NoopMetrics until SetMetrics
 void SetMetrics(std::shared_ptr<IMetrics> m);
 
 // stderr JSON. Includes tenant/user/key — those must not appear on /metrics.
-void WriteAuditLog(const TenantKey &key, const Policy &policy, double seconds, int64_t rows, int64_t bytes,
+void WriteAuditLog(const rewriter::TenantKey &key, const config::SandboxSpec &policy, double seconds, int64_t rows, int64_t bytes,
                    const char *outcome, const char *reason);
 // Create/Update audit (stderr JSON). No warnings field — authorized views are gone.
 void WriteSandboxAudit(const char *action, const std::string &id, const std::string &key);
 
-void ObserveFailure(IMetrics &m, const Policy *policy, const TenantKey *key, const std::exception &e, bool cold,
+void ObserveFailure(IMetrics &m, const config::SandboxSpec *policy, const rewriter::TenantKey *key, const std::exception &e, bool cold,
                     double seconds);
 
 void StartMetricsHttp(const std::string &listen, std::shared_ptr<IMetrics> metrics);
 void StopMetricsHttp();
 
 } // namespace metrics
-
-using metrics::ClassifyRejection;
-using metrics::ClassifyLimit;
-using metrics::SanitizeMetricValue;
-using metrics::IMetrics;
-using metrics::MetricsRegistry;
-using metrics::NoopMetrics;
-using metrics::Metrics;
-using metrics::SetMetrics;
-using metrics::WriteAuditLog;
-using metrics::WriteSandboxAudit;
-using metrics::ObserveFailure;
-using metrics::StartMetricsHttp;
-using metrics::StopMetricsHttp;
 
 } // namespace duckbox

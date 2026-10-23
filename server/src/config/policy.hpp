@@ -25,8 +25,8 @@ struct S3Settings {
     std::string endpoint_env;
     std::string url_style = "path";
     bool use_ssl = false;
-    SecretRef access_key;
-    SecretRef secret_key;
+    s3::SecretRef access_key;
+    s3::SecretRef secret_key;
     std::string provider; // empty / config / credential_chain
     std::string profile;
     std::string role_arn;
@@ -40,7 +40,7 @@ struct LakeSettings {
     LakeKind kind = LakeKind::Memory;
     std::string alias = "lake";
     std::string catalog;
-    SecretRef catalog_ref;   // env:/file: for catalog DSN; never a value in the registry
+    s3::SecretRef catalog_ref;   // env:/file: for catalog DSN; never a value in the registry
     std::string catalog_env; // shorthand env name
     std::string data_path;
     bool read_only = true;
@@ -103,7 +103,7 @@ struct ColumnMeta {
 struct Attachment {
     std::string name;
     std::string location;
-    SecretRef credential;
+    s3::SecretRef credential;
 };
 
 // Allowlisted table. filters are typed equalities (tenant_id, _deleted, …)
@@ -232,43 +232,5 @@ bool ParseExpiresAtMs(const std::string &raw, int64_t *out_ms);
 int64_t ComputeExpiresAtMs(int64_t created_at_ms, const SandboxSpec &spec);
 
 } // namespace config
-
-using config::ApplyTableDefaults;
-using config::Attachment;
-using config::CanonicalAllowedPrefix;
-using config::CatalogTableSelectSql;
-using config::ColumnMeta;
-using config::ComputeExpiresAtMs;
-using config::ContentHash;
-using config::DeclaredAllowedPaths;
-using config::DecodeSpecPayload;
-using config::DefaultTableCatalog;
-using config::DefaultTableSchema;
-using config::FingerprintSpec;
-using config::HandleSettings;
-using config::IsAlwaysDeniedTableFunction;
-using config::KeySpec;
-using config::kMaxStaleVersionGraceMs;
-using config::LakeKind;
-using config::LakeSettings;
-using config::LifecycleSettings;
-using config::LoadPolicyFile;
-using config::LoadSpecFile;
-using config::LoadSpecString;
-using config::LocationContributesAllowedPath;
-using config::ParseDurationMs;
-using config::ParseExpiresAtMs;
-using config::Policy;
-using config::QualifiedTable;
-using config::QualifyTable;
-using config::QuoteSqlIdent;
-using config::Resources;
-using config::S3Settings;
-using config::SafeSqlIdent;
-using config::SandboxSpec;
-using config::TableMapKey;
-using config::TablePolicy;
-using config::ValidSandboxId;
-using config::ValidSqlIdent;
 
 } // namespace duckbox

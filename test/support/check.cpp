@@ -10,6 +10,9 @@
 
 namespace duckbox {
 namespace test {
+using namespace common;
+using namespace config;
+using namespace node;
 
 namespace {
 struct HandleSecretEnv {

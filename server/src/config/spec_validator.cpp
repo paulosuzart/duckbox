@@ -16,6 +16,12 @@
 
 namespace duckbox {
 namespace config {
+using namespace common;
+using namespace lake;
+using namespace rewriter;
+using namespace s3;
+using namespace sandbox;
+using namespace node;
 namespace {
 
 void CollectParamsFromQuery(ddb::QueryNode &node, std::unordered_set<std::string> &out);

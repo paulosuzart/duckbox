@@ -34,8 +34,8 @@ std::string DucklakeYaml(const std::string &s3_block, const std::string &extra_e
            ext + "  s3:\n" + s3_block;
 }
 
-duckbox::DaemonConfig ProdAllow() {
-    duckbox::DaemonConfig d;
+duckbox::node::DaemonConfig ProdAllow() {
+    duckbox::node::DaemonConfig d;
     d.allow_insecure_dev = false;
     d.lake_allow.s3_endpoints = {"127.0.0.1:9000", "s3.amazonaws.com"};
     d.lake_allow.secret_refs = {"env:DUCKBOX_S3_KEY", "env:DUCKBOX_S3_SECRET",
@@ -45,7 +45,7 @@ duckbox::DaemonConfig ProdAllow() {
     return d;
 }
 
-bool HasIssue(const std::vector<duckbox::SpecIssue> &iss, const std::string &path,
+bool HasIssue(const std::vector<duckbox::common::SpecIssue> &iss, const std::string &path,
               const std::string &needle) {
     for (auto &i : iss) {
         if ((path.empty() || i.path == path) && i.message.find(needle) != std::string::npos) {
@@ -59,6 +59,17 @@ bool HasIssue(const std::vector<duckbox::SpecIssue> &iss, const std::string &pat
 
 int main() {
     using namespace duckbox;
+    using namespace duckbox::common;
+    using namespace duckbox::s3;
+    using namespace duckbox::node;
+    using namespace duckbox::config;
+    using namespace duckbox::rewriter;
+    using namespace duckbox::lake;
+    using namespace duckbox::metrics;
+    using namespace duckbox::cluster;
+    using namespace duckbox::arrow;
+    using namespace duckbox::sandbox;
+    using namespace duckbox::flight;
 
     const char *static_s3 =
         "    endpoint: \"127.0.0.1:9000\"\n    url_style: path\n    use_ssl: false\n"

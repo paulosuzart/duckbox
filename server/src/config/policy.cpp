@@ -16,6 +16,9 @@
 
 namespace duckbox {
 namespace config {
+using namespace common;
+using namespace lake;
+using namespace s3;
 namespace {
 
 std::string Lower(std::string s) {
@@ -839,6 +842,41 @@ SandboxSpec LoadSpecFile(const std::string &path) {
         spec.lake.bootstrap_sql = body.str();
     }
     return spec;
+}
+
+
+std::vector<std::string> KeySpec::VariableNames() const {
+    std::vector<std::string> names;
+    auto add = [&](const std::string &n) {
+        if (n.empty()) {
+            return;
+        }
+        for (auto &e : names) {
+            if (e == n) {
+                return;
+            }
+        }
+        names.push_back(n);
+    };
+    for (auto &pat : patterns) {
+        for (size_t i = 0; i < pat.size(); i++) {
+            if (pat[i] == '{') {
+                auto end = pat.find('}', i);
+                if (end == std::string::npos) {
+                    break;
+                }
+                add(pat.substr(i + 1, end - i - 1));
+                i = end;
+            }
+        }
+    }
+    for (auto &n : regex_names) {
+        add(n);
+    }
+    for (auto &n : split_names) {
+        add(n);
+    }
+    return names;
 }
 
 } // namespace config

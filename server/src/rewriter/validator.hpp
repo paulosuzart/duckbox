@@ -17,23 +17,23 @@ namespace duckbox {
 namespace rewriter {
 
 struct ValidationContext {
-	const Policy *policy = nullptr;
+	const config::Policy *policy = nullptr;
 	std::vector<std::unordered_set<std::string>> cte_scope; // unqualified names only
 };
 
 class ISqlValidator {
 public:
 	virtual ~ISqlValidator() = default;
-	virtual void Validate(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts, const Policy &policy) const = 0;
+	virtual void Validate(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts, const config::Policy &policy) const = 0;
 };
 
 class SqlValidator : public ISqlValidator {
 public:
 	// Qualified names are never CTEs. VALUES lists recurse into subqueries.
-	void Validate(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts, const Policy &policy) const override;
+	void Validate(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts, const config::Policy &policy) const override;
 };
 
-void ValidateStatements(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts, const Policy &policy);
+void ValidateStatements(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts, const config::Policy &policy);
 void ValidateSelect(ddb::SelectStatement &stmt, ValidationContext &ctx);
 void ValidateQueryNode(ddb::QueryNode &node, ValidationContext &ctx);
 void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx); // qualified names skip CTE shadowing
@@ -42,15 +42,5 @@ void ValidateExpression(ddb::ParsedExpression &expr, ValidationContext &ctx);
 std::unique_ptr<ddb::Parser> ParseSql(const std::string &sql);
 
 } // namespace rewriter
-
-using rewriter::ValidationContext;
-using rewriter::ISqlValidator;
-using rewriter::SqlValidator;
-using rewriter::ValidateStatements;
-using rewriter::ValidateSelect;
-using rewriter::ValidateQueryNode;
-using rewriter::ValidateTableRef;
-using rewriter::ValidateExpression;
-using rewriter::ParseSql;
 
 } // namespace duckbox

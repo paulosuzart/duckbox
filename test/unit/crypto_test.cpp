@@ -9,16 +9,27 @@
 namespace {
 
 std::string MkJwt(const std::string &secret, const std::string &header_json, const std::string &payload_json) {
-	auto header = duckbox::Base64UrlEncode(header_json);
-	auto payload = duckbox::Base64UrlEncode(payload_json);
+	auto header = duckbox::common::Base64UrlEncode(header_json);
+	auto payload = duckbox::common::Base64UrlEncode(payload_json);
 	auto msg = header + "." + payload;
-	return msg + "." + duckbox::Base64UrlEncode(duckbox::HmacSha256(secret, msg));
+	return msg + "." + duckbox::common::Base64UrlEncode(duckbox::common::HmacSha256(secret, msg));
 }
 
 } // namespace
 
 void duckbox::test::RunCryptoTests() {
 	using namespace duckbox;
+	using namespace duckbox::common;
+	using namespace duckbox::s3;
+	using namespace duckbox::node;
+	using namespace duckbox::config;
+	using namespace duckbox::rewriter;
+	using namespace duckbox::lake;
+	using namespace duckbox::metrics;
+	using namespace duckbox::cluster;
+	using namespace duckbox::arrow;
+	using namespace duckbox::sandbox;
+	using namespace duckbox::flight;
 	const std::string secret = "jwt-hs256-secret";
 	auto now = static_cast<int64_t>(std::time(nullptr));
 
