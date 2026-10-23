@@ -49,8 +49,11 @@ services:
       RUSTFS_ACCESS_KEY: rustfsadmin
       RUSTFS_SECRET_KEY: rustfsadmin
       RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true"
+      # Compose service names are private; OIDC discovery/JWKS need an exact
+      # origin allowlist or RustFS skips the provider (SSRF egress policy).
+      RUSTFS_OUTBOUND_ALLOW_ORIGINS: http://oidc:8088
       RUSTFS_IDENTITY_OPENID_ENABLE: "on"
-      RUSTFS_IDENTITY_OPENID_CONFIG_URL: http://oidc:8088/.well-known/openid-configuration
+      RUSTFS_IDENTITY_OPENID_CONFIG_URL: http://oidc:8088
       RUSTFS_IDENTITY_OPENID_ISSUER: http://oidc:8088
       RUSTFS_IDENTITY_OPENID_CLIENT_ID: duckbox-sts
       RUSTFS_IDENTITY_OPENID_CLIENT_SECRET: duckbox-oidc-secret

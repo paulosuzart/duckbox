@@ -62,11 +62,13 @@ constexpr const char *kIamSecret = "duckboxstssecret";
 constexpr const char *kPolicyName = "duckbox-sts";
 constexpr const char *kRoleArn = "arn:aws:iam::000000000000:role/duckbox-lake";
 constexpr const char *kBucket = "duckbox-sts";
-constexpr const char *kPolicyJson = "{\"Version\":\"2012-10-17\",\"Statement\":["
-                                    "{\"Sid\":\"AssumeRole\",\"Effect\":\"Allow\",\"Action\":["
-                                    "\"sts:AssumeRole\"],\"Resource\":[\"*\"]},"
-                                    "{\"Sid\":\"S3\",\"Effect\":\"Allow\",\"Action\":[\"s3:*\"],"
-                                    "\"Resource\":[\"arn:aws:s3:::*\",\"arn:aws:s3:::*/*\"]}]}";
+// RustFS accepts sts:AssumeRole with no Resource. Resource "*" is rejected
+// (only arn:aws:s3::: and arn:aws:kms::: patterns parse).
+constexpr const char *kPolicyJson =
+    "{\"Version\":\"2012-10-17\",\"Statement\":["
+    "{\"Sid\":\"AssumeRole\",\"Effect\":\"Allow\",\"Action\":[\"sts:AssumeRole\"]},"
+    "{\"Sid\":\"S3\",\"Effect\":\"Allow\",\"Action\":[\"s3:*\"],"
+    "\"Resource\":[\"arn:aws:s3:::*\",\"arn:aws:s3:::*/*\"]}]}";
 
 std::string EnvOr(const char *name, const char *fallback) {
     if (const char *v = std::getenv(name); v && *v) {
