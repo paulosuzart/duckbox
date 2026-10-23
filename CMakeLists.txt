@@ -232,6 +232,7 @@ set(DUCKBOX_SOURCES
   server/src/spec_validator.cpp
   server/src/sandbox.cpp
   server/src/s3.cpp
+  server/src/s3_credentials.cpp
   server/src/sandbox_registry.cpp
   server/src/arrow_ipc.cpp
   server/src/arrow_types.cpp
@@ -274,6 +275,14 @@ if(TARGET aws-cpp-sdk-s3)
     target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-core)
   endif()
   target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-s3)
+  find_package(aws-cpp-sdk-sts CONFIG QUIET)
+  find_package(aws-cpp-sdk-identity-management CONFIG QUIET)
+  if(TARGET aws-cpp-sdk-sts)
+    target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-sts)
+  endif()
+  if(TARGET aws-cpp-sdk-identity-management)
+    target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-identity-management)
+  endif()
 else()
   target_include_directories(duckbox_core PUBLIC ${AWSSDK_INCLUDE_DIRS})
   target_link_libraries(duckbox_core PUBLIC ${AWSSDK_LIBRARIES})
@@ -388,13 +397,31 @@ duckbox_add_test(duckbox_schema_tests
   test/schema/flight_schema_test.cpp)
 target_include_directories(duckbox_schema_tests BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/test/schema)
 
+duckbox_add_test(duckbox_s3_credentials_tests
+  test/support/check.cpp
+  test/unit/s3_credentials_test.cpp)
+
+duckbox_add_test(duckbox_s3_secret_guardrail_tests
+  test/support/check.cpp
+  test/guardrails/s3_secrets_test.cpp)
+
+duckbox_add_test(duckbox_s3_sts_tests
+  test/support/check.cpp
+  test/integration/s3_sts_test.cpp)
+
 enable_testing()
 add_test(NAME unit COMMAND duckbox_unit_tests)
 add_test(NAME guardrails COMMAND duckbox_guardrail_tests)
 add_test(NAME integration COMMAND duckbox_integration_tests)
 add_test(NAME schema COMMAND duckbox_schema_tests)
+add_test(NAME s3_credentials COMMAND duckbox_s3_credentials_tests)
+add_test(NAME s3_secret_guardrails COMMAND duckbox_s3_secret_guardrail_tests)
+add_test(NAME s3_sts COMMAND duckbox_s3_sts_tests)
 set_tests_properties(unit PROPERTIES LABELS "unit")
 set_tests_properties(guardrails PROPERTIES LABELS "guardrails")
 set_tests_properties(integration PROPERTIES LABELS "integration")
 # Also labeled unit so macOS `ctest -L unit|guardrails` runs it.
 set_tests_properties(schema PROPERTIES LABELS "schema;unit")
+set_tests_properties(s3_credentials PROPERTIES LABELS "unit")
+set_tests_properties(s3_secret_guardrails PROPERTIES LABELS "guardrails")
+set_tests_properties(s3_sts PROPERTIES LABELS "integration")

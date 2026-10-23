@@ -6,6 +6,7 @@
 #include "duckbox/lake.hpp"
 #include "duckbox/metrics.hpp"
 #include "duckbox/rewriter.hpp"
+#include "duckbox/s3_credentials.hpp"
 #include "duckbox/spec_validator.hpp"
 #include "duckbox/validator.hpp"
 
@@ -313,6 +314,7 @@ QueryOutput TenantSandbox::Execute(const std::string &sql) {
         ObserveFailure(
             Metrics(), &policy_, &key_, e, cold,
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        RethrowIfExpiredSessionCredentials(e, policy_.lake.s3);
         throw;
     }
 }
@@ -337,6 +339,7 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql,
         ObserveFailure(
             Metrics(), &policy_, &key_, e, cold,
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        RethrowIfExpiredSessionCredentials(e, policy_.lake.s3);
         throw;
     }
 }

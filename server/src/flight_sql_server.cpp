@@ -1000,6 +1000,8 @@ DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContext &context, co
             if (!rec.key.empty()) {
                 spec.bound_key = rec.key;
             }
+            SpecValidator v;
+            v.ThrowIf(v.ValidateStatic(spec, daemon_));
             rec = RecordFromSpec(spec, "");
         };
         if (action.type == "CreateSandbox" || action.type == "UpdateSandbox") {
@@ -1018,6 +1020,8 @@ DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContext &context, co
                     spec.id = rec.id;
                 }
                 spec.bound_key = current.key;
+                SpecValidator v;
+                v.ThrowIf(v.ValidateStatic(spec, daemon_));
                 rec = RecordFromSpec(spec, "");
                 rec.key = current.key;
                 AuthorizeCaller(daemon_, caller, rec.key);
@@ -1611,7 +1615,7 @@ int RunLocalQuery(const DaemonConfig &daemon, const std::string &spec_path, cons
                   const std::string &sql) {
     auto spec = LoadSpecFile(spec_path);
     SpecValidator v;
-    v.ThrowIf(v.ValidateStatic(spec));
+    v.ThrowIf(v.ValidateStatic(spec, daemon));
     auto tk = ParseTenantKey(key, spec.key);
     auto dir = std::filesystem::path(spec_path).parent_path().string();
     TenantSandbox box(daemon, spec, tk, dir);

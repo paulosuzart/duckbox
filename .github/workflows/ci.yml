@@ -76,7 +76,7 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)"
           JOBS="$(sysctl -n hw.ncpu)"
-          cmake --build build --parallel "$JOBS" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests duckbox_schema_tests
+          cmake --build build --parallel "$JOBS" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests duckbox_schema_tests duckbox_s3_credentials_tests duckbox_s3_secret_guardrail_tests duckbox_s3_sts_tests
       - name: Unit, guardrail, and integration tests
         env:
           DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
@@ -144,6 +144,14 @@ jobs:
           make validate
       - name: Start Postgres + RustFS
         run: docker compose up -d --wait
+      - name: Start MinIO (STS / temporary credentials)
+        run: docker compose --profile sts up -d --wait minio
+      - name: Temporary-credential suite against MinIO
+        env:
+          DUCKBOX_MINIO_ENDPOINT: 127.0.0.1:19000
+          DUCKBOX_MINIO_KEY: minioadmin
+          DUCKBOX_MINIO_SECRET: minioadmin
+        run: ./build/duckbox_s3_sts_tests
       - name: Python deps
         run: |
           python3 -m venv .venv

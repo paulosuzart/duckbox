@@ -35,5 +35,29 @@ services:
       retries: 20
       start_period: 10s
 
+  # Optional STS emulator. Started only with `--profile sts`.
+  # Root user can AssumeRole for local temporary-credential tests.
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":19001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_REGION_NAME: us-east-1
+    ports:
+      - "19000:9000"
+      - "19001:19001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    profiles:
+      - sts
+
 volumes:
   rustfs_data:
+  minio_data:
