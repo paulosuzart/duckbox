@@ -89,6 +89,10 @@ void CheckBootstrapSql(const std::string &sql, const SandboxSpec &spec) {
                 throw SqlRejected(
                     "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not CREATE INDEX");
             }
+            if (create.info && create.info->type == ddb::CatalogType::TRIGGER_ENTRY) {
+                throw SqlRejected("lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not "
+                                  "CREATE TRIGGER");
+            }
             auto kind =
                 create.info ? ddb::CatalogTypeToString(create.info->type) : std::string("CREATE");
             throw SqlRejected(
@@ -104,6 +108,22 @@ void CheckBootstrapSql(const std::string &sql, const SandboxSpec &spec) {
         if (st->type == ddb::StatementType::CREATE_FUNC_STATEMENT) {
             throw SqlRejected(
                 "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not CREATE FUNCTION");
+        }
+        if (st->type == ddb::StatementType::CONNECT_STATEMENT ||
+            st->type == ddb::StatementType::DISCONNECT_STATEMENT ||
+            st->type == ddb::StatementType::PASSTHROUGH_STATEMENT) {
+            throw SqlRejected(
+                "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not CONNECT");
+        }
+        if (st->type == ddb::StatementType::LOAD_STATEMENT ||
+            st->type == ddb::StatementType::EXTENSION_STATEMENT ||
+            st->type == ddb::StatementType::UPDATE_EXTENSIONS_STATEMENT) {
+            throw SqlRejected(
+                "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not extension loading");
+        }
+        if (st->type == ddb::StatementType::EXTERNAL_RESOURCE_STATEMENT) {
+            throw SqlRejected(
+                "lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not EXTERNAL RESOURCE");
         }
         throw SqlRejected("lake bootstrap SQL only allows CREATE TABLE/SCHEMA/INSERT, not " +
                           ddb::StatementTypeToString(st->type));

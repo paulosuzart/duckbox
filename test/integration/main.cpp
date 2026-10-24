@@ -11,5 +11,10 @@ int main() {
     RunAuthFlightTests();
     RunClusterTests();
     RunSignalShutdownTests();
+    RunConnectRuntimeTests();
+    RunTriggerRuntimeTests();
+    RunQuackRuntimeTests();
+    RunExtensionCapiRuntimeTests();
+    RunAgentModeRuntimeTests();
     return ReportAndExit("integration");
 }

@@ -297,6 +297,18 @@ void TenantSandbox::Warmup(bool validate_lake) {
         RequireHardeningSetting(*con_, "autoinstall_known_extensions", "false");
         RequireHardeningSetting(*con_, "autoload_known_extensions", "false");
         RequireHardeningSetting(*con_, "enable_external_access", "false");
+        // DuckDB 2.0 extension C API / repository / parser-override surface.
+        // Lock the strongest settings DuckDB exposes, then read back.
+        ExecHardeningOrThrow(*con_, "SET allow_community_extensions=false");
+        ExecHardeningOrThrow(*con_, "SET allow_unsigned_extensions=false");
+        ExecHardeningOrThrow(*con_, "SET allow_extensions_metadata_mismatch=false");
+        ExecHardeningOrThrow(*con_, "SET allow_extension_repositories='forbidden'");
+        ExecHardeningOrThrow(*con_, "SET allow_parser_override_extension='default'");
+        RequireHardeningSetting(*con_, "allow_community_extensions", "false");
+        RequireHardeningSetting(*con_, "allow_unsigned_extensions", "false");
+        RequireHardeningSetting(*con_, "allow_extensions_metadata_mismatch", "false");
+        RequireHardeningSetting(*con_, "allow_extension_repositories", "forbidden");
+        RequireHardeningSetting(*con_, "allow_parser_override_extension", "default");
         // allowed_configs is a lock exception list. Empty it (default) and
         // read back so a leftover entry cannot survive lock_configuration.
         ExecHardeningOrThrow(*con_, "SET allowed_configs=[]");
@@ -501,6 +513,13 @@ std::string StripOrderByLimitForExtract(const std::string &sql) {
     } catch (...) {
         return sql;
     }
+}
+
+QueryOutput TenantSandbox::ExecuteUnrewritten(const std::string &sql) {
+    Warmup(false);
+    std::lock_guard<std::mutex> hold(mu_);
+    Touch();
+    return RunTimed(sql, {});
 }
 
 ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::string &sql) {

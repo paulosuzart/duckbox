@@ -412,7 +412,14 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/metrics_test.cpp
   test/unit/s3_test.cpp
   test/unit/lease_test.cpp
-  test/unit/membership_test.cpp)
+  test/unit/membership_test.cpp
+  test/unit/connect_deny_test.cpp
+  test/unit/trigger_deny_test.cpp
+  test/unit/quack_deny_test.cpp
+  test/unit/extension_capi_deny_test.cpp
+  test/unit/agent_mode_deny_test.cpp
+  test/unit/table_function_20_test.cpp
+  test/unit/macro_catalog_20_test.cpp)
 
 duckbox_add_test(duckbox_guardrail_tests
   test/support/check.cpp
@@ -428,7 +435,12 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/s3_registry_test.cpp
   test/integration/auth_flight_test.cpp
   test/integration/cluster_test.cpp
-  test/integration/signal_shutdown_test.cpp)
+  test/integration/signal_shutdown_test.cpp
+  test/integration/connect_runtime_test.cpp
+  test/integration/trigger_runtime_test.cpp
+  test/integration/quack_runtime_test.cpp
+  test/integration/extension_capi_runtime_test.cpp
+  test/integration/agent_mode_runtime_test.cpp)
 add_dependencies(duckbox_integration_tests duckbox)
 target_compile_definitions(duckbox_integration_tests PRIVATE
   DUCKBOX_BIN_PATH="$<TARGET_FILE:duckbox>")
@@ -437,7 +449,8 @@ duckbox_add_test(duckbox_schema_tests
   test/support/check.cpp
   test/schema/main.cpp
   test/schema/type_map_test.cpp
-  test/schema/flight_schema_test.cpp)
+  test/schema/flight_schema_test.cpp
+  test/schema/variant_test.cpp)
 target_include_directories(duckbox_schema_tests BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/test/schema)
 
 duckbox_add_test(duckbox_s3_credentials_tests
