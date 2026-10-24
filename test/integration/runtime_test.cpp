@@ -216,8 +216,11 @@ void duckbox::test::RunRuntimeTests() {
 	{
 		WarmupHardeningMismatch mismatch("enable_external_access");
 		TenantSandbox box(daemon, loaded, key_a, spec_dir);
-		ExpectThrowContains([&] { box.Warmup(false); }, "current_setting('enable_external_access')",
-		                    "read-back mismatch of enable_external_access is a clear error");
+		ExpectThrowExact(
+			[&] { box.Warmup(false); },
+			"sandbox hardening failed: current_setting('enable_external_access') is 'true', "
+			"expected 'false'",
+			"read-back mismatch of enable_external_access uses the exact comparison error");
 		Expect(!box.Warm(), "read-back mismatch does not hand out a connection");
 	}
 
@@ -232,8 +235,51 @@ void duckbox::test::RunRuntimeTests() {
 		rec.spec.bound_key = rec.key;
 		rec = defs->Create(rec);
 		WarmupHardeningMismatch mismatch("enable_external_access");
-		ExpectThrowContains([&] { rt.Get(rec); }, "current_setting('enable_external_access')",
-		                    "runtime Get fails closed on hardening read-back mismatch");
+		ExpectThrowExact(
+			[&] { rt.Get(rec); },
+			"sandbox hardening failed: current_setting('enable_external_access') is 'true', "
+			"expected 'false'",
+			"runtime Get fails closed on hardening read-back mismatch");
 		Expect(rt.Size() == 0, "read-back mismatch does not create a sandbox");
+	}
+
+	{
+		WarmupHardeningMismatch mismatch("lock_configuration");
+		TenantSandbox box(daemon, loaded, key_a, spec_dir);
+		ExpectThrowExact(
+			[&] { box.Warmup(false); },
+			"sandbox hardening failed: current_setting('lock_configuration') is 'false', "
+			"expected 'true'",
+			"lock_configuration read-back mismatch uses the exact comparison error");
+		Expect(!box.Warm(), "lock_configuration mismatch does not hand out a connection");
+	}
+
+	const char *kHardeningReadError =
+		"sandbox hardening failed: current_setting('enable_external_access'): "
+		"Catalog Error: unrecognized configuration parameter \"__duckbox_no_such_setting__\"\n"
+		"\n"
+		"Did you mean: \"binary_as_string\"";
+	{
+		WarmupHardeningReadError read_err("enable_external_access");
+		TenantSandbox box(daemon, loaded, key_a, spec_dir);
+		ExpectThrowExact([&] { box.Warmup(false); }, kHardeningReadError,
+						 "hardening query-error branch uses the exact current_setting message");
+		Expect(!box.Warm(), "hardening query error does not hand out a connection");
+	}
+
+	{
+		auto leases = std::make_shared<SingleNodeLeaseManager>();
+		auto defs = std::make_shared<MemorySandboxRegistry>();
+		SandboxRuntime rt(daemon, leases, defs);
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "harden-read-err";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		rec = defs->Create(rec);
+		WarmupHardeningReadError read_err("enable_external_access");
+		ExpectThrowExact([&] { rt.Get(rec); }, kHardeningReadError,
+						 "runtime Get fails closed on the exact hardening query-error message");
+		Expect(rt.Size() == 0, "hardening query error does not create a sandbox");
 	}
 }

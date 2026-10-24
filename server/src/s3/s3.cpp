@@ -540,8 +540,7 @@ std::string SanitizeProbeToken(std::string s) {
     return s;
 }
 
-std::string ControlPlaneProbeKey(const std::string &prefix, const std::string &node_id,
-                                 const std::string &nonce) {
+std::string ControlPlaneProbePrefix(const std::string &prefix, const std::string &node_id) {
     std::string key = prefix;
     if (!key.empty() && key.back() != '/') {
         key += '/';
@@ -549,8 +548,40 @@ std::string ControlPlaneProbeKey(const std::string &prefix, const std::string &n
     key += ".duckbox-cw-probe-";
     key += SanitizeProbeToken(node_id);
     key += '-';
-    key += nonce.empty() ? RandomHex(8) : SanitizeProbeToken(nonce);
     return key;
+}
+
+std::string ControlPlaneProbeKey(const std::string &prefix, const std::string &node_id,
+                                 const std::string &nonce) {
+    return ControlPlaneProbePrefix(prefix, node_id) +
+           (nonce.empty() ? RandomHex(8) : SanitizeProbeToken(nonce));
+}
+
+S3Object DeleteProbeObject(const S3ControlClient &client, const std::string &key,
+                           const std::string &etag, const char *why) {
+    S3Object del;
+    try {
+        del = client.Delete(key, etag);
+    } catch (const std::exception &e) {
+        del.status = 0;
+        del.error = e.what();
+    }
+    Json log;
+    log["event"] = "lease_probe_delete";
+    log["key"] = key;
+    log["status"] = del.status;
+    log["why"] = why;
+    if (!del.error.empty()) {
+        log["error"] = del.error;
+    }
+    std::clog << log.dump() << "\n";
+    return del;
+}
+
+void DeleteStaleProbes(const S3ControlClient &client, const std::string &stale_prefix) {
+    for (auto &k : client.ListKeys(stale_prefix)) {
+        DeleteProbeObject(client, k, "", "stale");
+    }
 }
 
 } // namespace
@@ -559,6 +590,7 @@ std::string ProbeControlPlaneS3(const S3ControlClient &client, const std::string
                                 const ControlPlaneProbeOptions &opts) {
     std::string key;
     try {
+        DeleteStaleProbes(client, ControlPlaneProbePrefix(prefix, opts.node_id));
         key = ControlPlaneProbeKey(prefix, opts.node_id, opts.nonce);
         auto put = client.Put(key, "duckbox-lease-probe", "", "*");
         if (put.status != 200 && put.status != 204 && put.status != 412) {
@@ -579,7 +611,7 @@ std::string ProbeControlPlaneS3(const S3ControlClient &client, const std::string
             }
             if (!wrote || got.status != 404 || attempt == attempts) {
                 if (wrote) {
-                    client.Delete(key, "");
+                    DeleteProbeObject(client, key, "", "get_failed");
                     return got.error.empty() ? "probe GET after PUT failed" : got.error;
                 }
                 return "";
@@ -599,17 +631,14 @@ std::string ProbeControlPlaneS3(const S3ControlClient &client, const std::string
                 backoff_ms *= 2;
             }
         }
-        auto del = client.Delete(key, got.etag);
+        auto del = DeleteProbeObject(client, key, got.etag, "ok");
         if (del.status != 200 && del.status != 204 && del.status != 404 && del.status != 412) {
             return del.error.empty() ? "conditional DELETE (If-Match) failed" : del.error;
         }
         return "";
     } catch (const std::exception &e) {
         if (!key.empty()) {
-            try {
-                client.Delete(key, "");
-            } catch (...) {
-            }
+            DeleteProbeObject(client, key, "", "exception");
         }
         return e.what();
     }

@@ -34,6 +34,7 @@ namespace {
 
 thread_local std::string g_hardening_fail_needle;
 thread_local std::string g_hardening_mismatch_setting;
+thread_local std::string g_hardening_read_error_setting;
 
 std::string LowerAscii(std::string s) {
     for (char &c : s) {
@@ -57,11 +58,11 @@ void ExecHardeningOrThrow(ddb::Connection &con, const std::string &sql) {
 }
 
 void RequireHardeningSetting(ddb::Connection &con, const char *name, const char *expected) {
-    if (!g_hardening_mismatch_setting.empty() && g_hardening_mismatch_setting == name) {
-        throw Error(std::string("sandbox hardening failed: current_setting('") + name +
-                    "') is 'true', expected '" + expected + "'");
+    std::string sql = std::string("SELECT current_setting('") + name + "')";
+    if (!g_hardening_read_error_setting.empty() && g_hardening_read_error_setting == name) {
+        sql = "SELECT current_setting('__duckbox_no_such_setting__')";
     }
-    auto got = con.Query(std::string("SELECT current_setting('") + name + "')");
+    auto got = con.Query(sql);
     if (!got || got->HasError()) {
         std::string why = (got && got->HasError()) ? got->GetError() : "no result";
         throw Error(std::string("sandbox hardening failed: current_setting('") + name +
@@ -73,6 +74,9 @@ void RequireHardeningSetting(ddb::Connection &con, const char *name, const char 
         if (mat.RowCount() > 0) {
             text = mat.GetValue(0, 0).ToString();
         }
+    }
+    if (!g_hardening_mismatch_setting.empty() && g_hardening_mismatch_setting == name) {
+        text = (LowerAscii(expected) == "true") ? "false" : "true";
     }
     if (LowerAscii(text) != LowerAscii(expected)) {
         throw Error(std::string("sandbox hardening failed: current_setting('") + name + "') is '" +
@@ -96,6 +100,14 @@ WarmupHardeningMismatch::WarmupHardeningMismatch(std::string setting_name) {
 
 WarmupHardeningMismatch::~WarmupHardeningMismatch() {
     g_hardening_mismatch_setting.clear();
+}
+
+WarmupHardeningReadError::WarmupHardeningReadError(std::string setting_name) {
+    g_hardening_read_error_setting = std::move(setting_name);
+}
+
+WarmupHardeningReadError::~WarmupHardeningReadError() {
+    g_hardening_read_error_setting.clear();
 }
 
 TenantSandbox::TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key,
@@ -257,6 +269,7 @@ void TenantSandbox::Warmup(bool validate_lake) {
         RequireHardeningSetting(*con_, "autoload_known_extensions", "false");
         RequireHardeningSetting(*con_, "enable_external_access", "false");
         ExecHardeningOrThrow(*con_, "SET lock_configuration=true");
+        RequireHardeningSetting(*con_, "lock_configuration", "true");
         warmup_count_++;
         Touch();
         Metrics().IncColdStart();

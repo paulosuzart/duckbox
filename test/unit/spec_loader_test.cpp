@@ -545,6 +545,20 @@ void duckbox::test::RunSpecLoaderTests() {
             cluster.peer_secret = "short-secret";
             ExpectThrowContains([&] { ValidateDaemonOrThrow(cluster); }, "16 characters",
                                 "peer secret shorter than 16 characters is refused");
+            DaemonConfig long_id = TestDaemon();
+            long_id.lease.node_id = std::string(kMaxNodeIdBytes + 1, 'n');
+            long_id.lease.skip_probe = true;
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(long_id); }, "128 bytes",
+                                "lease.node_id longer than 128 bytes is refused");
+            DaemonConfig ok_id = TestDaemon();
+            ok_id.lease.node_id = std::string(kMaxNodeIdBytes, 'n');
+            ok_id.lease.skip_probe = true;
+            ValidateDaemonOrThrow(ok_id);
+            DaemonConfig long_name = TestDaemon();
+            long_name.name = std::string(kMaxNodeIdBytes + 1, 'x');
+            long_name.lease.skip_probe = true;
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(long_name); }, "128 bytes",
+                                "daemon name used as node_id longer than 128 bytes is refused");
         }
         {
             auto loc = ParseFlightLocation("127.0.0.1:5747");

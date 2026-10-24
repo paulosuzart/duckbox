@@ -75,8 +75,9 @@ class FaultyS3ControlClient final : public S3ControlClient {
 };
 // Conditional PUT If-None-Match:*. Empty string = ok (200/204/412); else error.
 // Each probe uses prefix/.duckbox-cw-probe-<node_id>-<nonce> so concurrent
-// daemons never share a key. GET after PUT retries a transient 404; the
-// calling node always deletes its own probe object. Persistent GET failure
+// daemons never share a key. Startup lists that node prefix and deletes
+// leftover objects from a crash between PUT and DELETE. GET after PUT
+// retries a transient 404; every DELETE is logged. Persistent GET failure
 // is still fatal.
 struct ControlPlaneProbeOptions {
     int max_get_attempts = 5;

@@ -113,13 +113,24 @@ class WarmupHardeningFailure {
     WarmupHardeningFailure &operator=(const WarmupHardeningFailure &) = delete;
 };
 
-// Test seam: while alive, hardening read-back reports a mismatch for setting.
+// Test seam: while alive, hardening read-back substitutes 'true' AFTER the
+// real current_setting query, so the comparison branch runs.
 class WarmupHardeningMismatch {
   public:
     explicit WarmupHardeningMismatch(std::string setting_name);
     ~WarmupHardeningMismatch();
     WarmupHardeningMismatch(const WarmupHardeningMismatch &) = delete;
     WarmupHardeningMismatch &operator=(const WarmupHardeningMismatch &) = delete;
+};
+
+// Test seam: while alive, the current_setting query for this name is forced
+// to fail so the query-error branch runs.
+class WarmupHardeningReadError {
+  public:
+    explicit WarmupHardeningReadError(std::string setting_name);
+    ~WarmupHardeningReadError();
+    WarmupHardeningReadError(const WarmupHardeningReadError &) = delete;
+    WarmupHardeningReadError &operator=(const WarmupHardeningReadError &) = delete;
 };
 
 // List item for ListSandboxes. state is warm | passive | defined.

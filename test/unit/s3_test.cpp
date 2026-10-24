@@ -197,4 +197,22 @@ void duckbox::test::RunS3ClientTests() {
 		auto leftover = shared->ListKeys("leases/.duckbox-cw-probe");
 		Expect(leftover.empty(), "concurrent probes each delete their own unique key");
 	}
+
+	{
+		auto mem = MakeMemoryS3ControlClient("control");
+		mem->Put("leases/.duckbox-cw-probe-node-a-dead1", "orphan", "", "*");
+		mem->Put("leases/.duckbox-cw-probe-node-a-dead2", "orphan", "", "*");
+		mem->Put("leases/.duckbox-cw-probe-node-b-keep", "other", "", "*");
+		ControlPlaneProbeOptions opts;
+		opts.node_id = "node-a";
+		opts.nonce = "live";
+		opts.sleep = [](int) {};
+		auto err = ProbeControlPlaneS3(*mem, "leases/", opts);
+		Expect(err.empty(), "probe after leftover orphans succeeds");
+		auto leftover_a = mem->ListKeys("leases/.duckbox-cw-probe-node-a-");
+		Expect(leftover_a.empty(), "startup deletes this node's stale probe objects");
+		auto leftover_b = mem->ListKeys("leases/.duckbox-cw-probe-node-b-");
+		Expect(leftover_b.size() == 1 && leftover_b[0].find("node-b-keep") != std::string::npos,
+			   "other node's leftover probe is left alone");
+	}
 }
