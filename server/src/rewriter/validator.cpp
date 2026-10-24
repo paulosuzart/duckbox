@@ -15,11 +15,12 @@ std::string Lower(const std::string &s) {
 
 bool IsCte(const ValidationContext &ctx, const ddb::BaseTableRef &base) {
     // Qualified names never match a CTE.
-    if (!base.schema_name.empty() || !base.catalog_name.empty()) {
+    const auto &qn = base.GetQualifiedName();
+    if (!qn.Schema().empty() || !qn.Catalog().empty()) {
         return false;
     }
     for (auto it = ctx.cte_scope.rbegin(); it != ctx.cte_scope.rend(); ++it) {
-        if (it->count(Lower(base.table_name))) {
+        if (it->count(Lower(IdentName(base.Table())))) {
             return true;
         }
     }
@@ -43,17 +44,17 @@ void ValidateCteMap(ddb::QueryNode &node, ValidationContext &ctx) {
     // or later siblings. Nested frames stay on the stack (no parent copy).
     PushCteFrame(ctx);
     for (auto &kv : node.cte_map.map) {
-        if (kv.second && kv.second->query) {
-            ValidateSelect(*kv.second->query, ctx);
+        if (kv.second && kv.second->query_node) {
+            ValidateQueryNode(*kv.second->query_node, ctx);
         }
-        AddCteName(ctx, kv.first);
+        AddCteName(ctx, IdentName(kv.first));
     }
 }
 
 } // namespace
 
 std::unique_ptr<ddb::Parser> ParseSql(const std::string &sql) {
-    auto parser = std::make_unique<ddb::Parser>();
+    auto parser = MakeParser();
     parser->ParseQuery(sql);
     return parser;
 }
@@ -62,22 +63,22 @@ void ValidateExpression(ddb::ParsedExpression &expr, ValidationContext &ctx) {
     switch (expr.GetExpressionClass()) {
     case ddb::ExpressionClass::FUNCTION: {
         auto &fn = expr.Cast<ddb::FunctionExpression>();
-        if (!fn.is_operator && !ctx.policy->FunctionAllowed(fn.function_name)) {
-            throw SqlRejected("function not allowlisted: " + fn.function_name);
+        if (!fn.IsOperator() && !ctx.policy->FunctionAllowed(IdentName(fn.FunctionName()))) {
+            throw SqlRejected("function not allowlisted: " + IdentName(fn.FunctionName()));
         }
         break;
     }
     case ddb::ExpressionClass::WINDOW: {
         auto &win = expr.Cast<ddb::WindowExpression>();
-        if (!ctx.policy->FunctionAllowed(win.function_name)) {
-            throw SqlRejected("window function not allowlisted: " + win.function_name);
+        if (!ctx.policy->FunctionAllowed(IdentName(win.FunctionName()))) {
+            throw SqlRejected("window function not allowlisted: " + IdentName(win.FunctionName()));
         }
         break;
     }
     case ddb::ExpressionClass::SUBQUERY: {
         auto &sq = expr.Cast<ddb::SubqueryExpression>();
-        if (sq.subquery) {
-            ValidateSelect(*sq.subquery, ctx);
+        if (sq.SubqueryMutable()) {
+            ValidateSelect(*sq.SubqueryMutable(), ctx);
         }
         break;
     }
@@ -103,14 +104,16 @@ void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx) {
                    ddb::StringUtil::EndsWith(ddb::StringUtil::Lower(name), ".json") ||
                    ddb::StringUtil::EndsWith(ddb::StringUtil::Lower(name), ".arrows");
         };
-        if (looks_like_path(base.table_name) || looks_like_path(base.schema_name) ||
-            looks_like_path(base.catalog_name)) {
+        const auto &qn = base.GetQualifiedName();
+        if (looks_like_path(IdentName(qn.Name())) || looks_like_path(IdentName(qn.Schema())) ||
+            looks_like_path(IdentName(qn.Catalog()))) {
             throw SqlRejected("table functions are denied (including replacement scans): " +
-                              base.table_name);
+                              IdentName(qn.Name()));
         }
-        if (!ctx.policy->FindTable(base.catalog_name, base.schema_name, base.table_name)) {
-            auto written = QualifyTable(base.catalog_name, base.schema_name, base.table_name,
-                                        ctx.policy->lake);
+        if (!ctx.policy->FindTable(IdentName(qn.Catalog()), IdentName(qn.Schema()),
+                                   IdentName(qn.Name()))) {
+            auto written = QualifyTable(IdentName(qn.Catalog()), IdentName(qn.Schema()),
+                                        IdentName(qn.Name()), ctx.policy->lake);
             throw SqlRejected("table not allowlisted: " + written.Display());
         }
         break;
@@ -212,7 +215,7 @@ void ValidateQueryNode(ddb::QueryNode &node, ValidationContext &ctx) {
             ValidateQueryNode(*rec.left, ctx);
         }
         PushCteFrame(ctx);
-        AddCteName(ctx, rec.ctename);
+        AddCteName(ctx, IdentName(rec.ctename));
         if (rec.right) {
             ValidateQueryNode(*rec.right, ctx);
         }
@@ -224,8 +227,16 @@ void ValidateQueryNode(ddb::QueryNode &node, ValidationContext &ctx) {
         PopCteFrame(ctx);
         break;
     }
+    case ddb::QueryNodeType::CTE_NODE:
+    case ddb::QueryNodeType::BOUND_SUBQUERY_NODE:
+    case ddb::QueryNodeType::STATEMENT_NODE:
+    case ddb::QueryNodeType::INSERT_QUERY_NODE:
+    case ddb::QueryNodeType::UPDATE_QUERY_NODE:
+    case ddb::QueryNodeType::DELETE_QUERY_NODE:
+    case ddb::QueryNodeType::MERGE_QUERY_NODE:
+    case ddb::QueryNodeType::COPY_QUERY_NODE:
     default:
-        // CTE_NODE is not produced by the current parser; fail closed.
+        // CTE_NODE / DML query nodes (INSERT/UPDATE/DELETE/MERGE/COPY) fail closed.
         throw SqlRejected("only SELECT / UNION queries are allowed");
     }
     ddb::ParsedExpressionIterator::EnumerateQueryNodeModifiers(

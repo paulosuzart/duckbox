@@ -72,14 +72,14 @@ ResolvedS3Credentials ResolveLakeS3Credentials(const config::S3Settings &s3,
                                                const SecretResolver &secrets);
 std::string BuildDuckDbS3SecretSql(const ResolvedS3Credentials &creds);
 
-// DuckDB 1.5.6 aws extension CHAIN items (docs + aws_secret.cpp):
+// DuckDB 2.0.0 aws extension CHAIN items (docs + aws_secret.cpp):
 //   env, config, process, web_identity, sso, sts, instance.
-//   There is no `container` item in 1.5.6.
+//   There is no `container` item in 2.0.0.
 // Default (no profile/role): env;config;process;web_identity;sso
 //   — same order/coverage as this SDK's DefaultAWSCredentialsProviderChain.
 //   — IRSA is web_identity (sts without ASSUME_ROLE_ARN is an error).
 //   — instance/IMDS omitted; AWS_EC2_METADATA_DISABLED is process-wide.
-//     Instance profiles are not supported. `container` is not a 1.5.6 item.
+//     Instance profiles are not supported. `container` is not a 2.0.0 item.
 // Profile only: config;sso (lease: ProfileConfigFile + SSOCredentialsProvider).
 //   `aws sso login` is not enough without the sso item.
 // Role only: sts (requires ASSUME_ROLE_ARN).

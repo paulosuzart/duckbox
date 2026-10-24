@@ -220,7 +220,7 @@ bool ValidSandboxId(const std::string &id);       // [a-z0-9][a-z0-9_-]{0,63}
 bool ValidSqlIdent(const std::string &s);
 // ValidSqlIdent and DuckDB will re-emit it unquoted (not a keyword, no special chars).
 bool SafeSqlIdent(const std::string &s);
-std::string QuoteSqlIdent(const std::string &s); // KeywordHelper::WriteOptionallyQuoted
+std::string QuoteSqlIdent(const std::string &s); // SQLIdentifier::ToString
 // SELECT listed columns FROM table for GetTables include_schema. Throws if columns
 // is empty or a name is not SafeSqlIdent.
 std::string CatalogTableSelectSql(const TablePolicy &table);

@@ -12,6 +12,7 @@ void RunCteChainedTests();
 void RunCteRecursiveTests();
 void RunCteShadowTests();
 void RunCteRewriteTests();
+void RunCteDmlFailClosedTests();
 void RunHandleTests();
 void RunCryptoTests();
 void RunRegistryTests();

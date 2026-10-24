@@ -1,13 +1,13 @@
 #include "sandbox/sandbox.hpp"
-#include "cluster/lease.hpp"
 #include "arrow/arrow_ipc.hpp"
 #include "arrow/arrow_types.hpp"
+#include "cluster/lease.hpp"
 #include "common/error.hpp"
 #include "common/json.hpp"
+#include "config/spec_validator.hpp"
 #include "lake/lake.hpp"
 #include "metrics/metrics.hpp"
 #include "rewriter/rewriter.hpp"
-#include "config/spec_validator.hpp"
 #include "rewriter/validator.hpp"
 
 #include <algorithm>
@@ -70,6 +70,7 @@ void TenantSandbox::Warmup(bool validate_lake) {
         Touch();
         return;
     }
+    EnsureLinkedDuckDb();
     auto t0 = std::chrono::steady_clock::now();
     if (policy_.lake.kind == LakeKind::Ducklake && policy_.lake.catalog.empty()) {
         try {
@@ -254,7 +255,7 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
                 throw Error(ps->GetError());
             }
             auto dparams = ToDuckValues(params);
-            result = ps->Execute(dparams, false);
+            result = ps->Execute(dparams, ddb::QueryParameters{});
         }
         if (result->HasError()) {
             finish_watchdog();
@@ -263,12 +264,10 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
             }
             throw Error(result->GetError());
         }
+        result->Complete();
         out.text_table = result->ToString();
-        if (result->type == ddb::QueryResultType::MATERIALIZED_RESULT) {
-            auto &mat = result->Cast<ddb::MaterializedQueryResult>();
-            out.row_count = static_cast<int64_t>(mat.RowCount());
-            out.arrow_ipc = MaterializedToArrowIpc(mat);
-        }
+        out.row_count = static_cast<int64_t>(result->RowCount());
+        out.arrow_ipc = MaterializedToArrowIpc(*result);
         finish_watchdog();
         if (timed_out) {
             throw Error("query timeout");
@@ -352,12 +351,12 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql,
     }
 }
 
-// DuckDB 1.5.6 ExtractPlan hits an internal binder error on some
+// DuckDB ExtractPlan hits an internal binder error on some
 // ORDER BY + LIMIT (TopN) trees over a rewritten subquery wrap. ExtractPlan
 // is diagnostic only.
 std::string StripOrderByLimitForExtract(const std::string &sql) {
     try {
-        ddb::Parser parser;
+        auto parser = ddb::Parser::GetBuiltinParser();
         parser.ParseQuery(sql);
         if (parser.statements.size() != 1 || !parser.statements[0] ||
             parser.statements[0]->type != ddb::StatementType::SELECT_STATEMENT) {
@@ -374,7 +373,7 @@ std::string StripOrderByLimitForExtract(const std::string &sql) {
             }
             if (mod->type == ddb::ResultModifierType::ORDER_MODIFIER ||
                 mod->type == ddb::ResultModifierType::LIMIT_MODIFIER ||
-                mod->type == ddb::ResultModifierType::LIMIT_PERCENT_MODIFIER) {
+                mod->type == ddb::ResultModifierType::LEGACY_LIMIT_PERCENT_MODIFIER) {
                 continue;
             }
             kept.push_back(std::move(mod));
@@ -434,7 +433,7 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
         auto &names = ps->GetNames();
         auto &types = ps->GetTypes();
         for (idx_t i = 0; i < names.size(); i++) {
-            out.push_back(ColumnSchema{names[i], types[i].ToString()});
+            out.push_back(ColumnSchema{IdentName(names[i]), types[i].ToString()});
         }
         return out;
     } catch (...) {
@@ -463,7 +462,7 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std
         out_names.reserve(names.size());
         out_types.reserve(types.size());
         for (idx_t i = 0; i < names.size(); i++) {
-            out_names.push_back(names[i]);
+            out_names.push_back(IdentName(names[i]));
             out_types.push_back(types[i]);
         }
         auto opts = con_->context->GetClientProperties();

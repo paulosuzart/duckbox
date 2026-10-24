@@ -21,7 +21,8 @@ duckbox::rewriter::TenantKey Tenant21(const duckbox::config::Policy &policy) {
     return duckbox::rewriter::ParseTenantKey("tenant_21:user_sergio", policy.key);
 }
 
-void ExpectValidates(const char *sql, const duckbox::config::Policy &policy, const std::string &msg) {
+void ExpectValidates(const char *sql, const duckbox::config::Policy &policy,
+                     const std::string &msg) {
     try {
         auto parser = duckbox::rewriter::ParseSql(sql);
         duckbox::rewriter::ValidateStatements(parser->statements, policy);
@@ -279,4 +280,92 @@ void duckbox::test::RunCteRewriteTests() {
         ExpectThrowContains([&] { RewriteSelect(stmt, rctx); }, "only SELECT",
                             "CTE_NODE rewrite fails closed");
     }
+}
+
+void duckbox::test::RunCteDmlFailClosedTests() {
+    using namespace duckbox;
+    using namespace duckbox::config;
+    using namespace duckbox::rewriter;
+    auto hidden = HiddenPolicy();
+    auto key_a = Tenant21(hidden);
+
+    auto expect_node_rejected = [&](ddb::unique_ptr<ddb::QueryNode> node, const char *kind) {
+        ValidationContext vctx;
+        vctx.policy = &hidden;
+        ExpectThrowContains([&] { ValidateQueryNode(*node, vctx); }, "only SELECT",
+                            std::string(kind) + " query node validates fail-closed");
+        ddb::SelectStatement stmt;
+        stmt.node = std::move(node);
+        RewriteContext rctx;
+        rctx.policy = &hidden;
+        rctx.key = key_a;
+        ExpectThrowContains([&] { RewriteSelect(stmt, rctx); }, "only SELECT",
+                            std::string(kind) + " query node rewrite fails closed");
+    };
+    expect_node_rejected(ddb::make_uniq<ddb::InsertQueryNode>(), "INSERT");
+    expect_node_rejected(ddb::make_uniq<ddb::UpdateQueryNode>(), "UPDATE");
+    expect_node_rejected(ddb::make_uniq<ddb::DeleteQueryNode>(), "DELETE");
+    expect_node_rejected(ddb::make_uniq<ddb::MergeQueryNode>(), "MERGE");
+    expect_node_rejected(ddb::make_uniq<ddb::CopyQueryNode>(ddb::make_uniq<ddb::CopyInfo>()),
+                         "COPY");
+
+    auto expect_cte_body_rejected = [&](ddb::unique_ptr<ddb::QueryNode> body, const char *kind) {
+        auto sel = ddb::make_uniq<ddb::SelectNode>();
+        auto info = ddb::make_uniq<ddb::CommonTableExpressionInfo>();
+        info->query_node = std::move(body);
+        sel->cte_map.map[ddb::Identifier("t")] = std::move(info);
+        ValidationContext vctx;
+        vctx.policy = &hidden;
+        ExpectThrowContains([&] { ValidateQueryNode(*sel, vctx); }, "only SELECT",
+                            std::string(kind) + " CTE body validates fail-closed");
+        ddb::SelectStatement stmt;
+        stmt.node = std::move(sel);
+        RewriteContext rctx;
+        rctx.policy = &hidden;
+        rctx.key = key_a;
+        ExpectThrowContains([&] { RewriteSelect(stmt, rctx); }, "only SELECT",
+                            std::string(kind) + " CTE body rewrite fails closed");
+    };
+    expect_cte_body_rejected(ddb::make_uniq<ddb::InsertQueryNode>(), "INSERT");
+    expect_cte_body_rejected(ddb::make_uniq<ddb::UpdateQueryNode>(), "UPDATE");
+    expect_cte_body_rejected(ddb::make_uniq<ddb::DeleteQueryNode>(), "DELETE");
+    expect_cte_body_rejected(ddb::make_uniq<ddb::MergeQueryNode>(), "MERGE");
+    expect_cte_body_rejected(ddb::make_uniq<ddb::CopyQueryNode>(ddb::make_uniq<ddb::CopyInfo>()),
+                             "COPY");
+
+    const char *modifying_ctes[] = {
+        "WITH t AS (INSERT INTO deals SELECT * FROM deals) SELECT * FROM t",
+        "WITH t AS (UPDATE deals SET title = title) SELECT * FROM t",
+        "WITH t AS (DELETE FROM deals) SELECT * FROM t",
+        "WITH t AS (MERGE INTO deals USING deals s ON deals.id = s.id WHEN MATCHED "
+        "THEN UPDATE SET title = s.title) SELECT * FROM t",
+        "WITH t AS (COPY deals TO '/tmp/denied.parquet') SELECT * FROM t",
+        "WITH t AS (INSERT INTO deals SELECT * FROM deals RETURNING id) SELECT * FROM t",
+    };
+    for (auto sql : modifying_ctes) {
+        bool validated = false;
+        try {
+            auto parser = ParseSql(sql);
+            ValidateStatements(parser->statements, hidden);
+            validated = true;
+        } catch (const std::exception &) {
+        }
+        Expect(!validated, std::string("parsed modifying CTE denied: ") + sql);
+        bool rewritten = false;
+        try {
+            RewriteUserSql(sql, hidden, key_a);
+            rewritten = true;
+        } catch (const std::exception &) {
+        }
+        Expect(!rewritten, std::string("parsed modifying CTE rewrite denied: ") + sql);
+    }
+
+    // 2.0 ducklake_snapshots() requires the catalog argument; table functions stay denied.
+    ExpectThrowContains(
+        [&] {
+            auto parser = ParseSql("SELECT * FROM ducklake_snapshots('lake')");
+            ValidateStatements(parser->statements, hidden);
+        },
+        "table functions are denied",
+        "ducklake_snapshots(catalog) remains a denied table function");
 }

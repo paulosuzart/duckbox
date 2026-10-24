@@ -16,6 +16,7 @@
 #include <arrow/flight/client.h>
 #include <arrow/flight/sql/server.h>
 #include <arrow/flight/server.h>
+#include <arrow/record_batch.h>
 
 #include <memory>
 #include <mutex>

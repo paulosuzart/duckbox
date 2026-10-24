@@ -1,11 +1,11 @@
 #include "check.hpp"
 
-#include "config/policy.hpp"
-#include "rewriter/rewriter.hpp"
-#include "sandbox/sandbox.hpp"
-#include "config/spec_validator.hpp"
-#include "rewriter/tenant_key.hpp"
 #include "common/yaml.hpp"
+#include "config/policy.hpp"
+#include "config/spec_validator.hpp"
+#include "rewriter/rewriter.hpp"
+#include "rewriter/tenant_key.hpp"
+#include "sandbox/sandbox.hpp"
 
 #include <iostream>
 #include <map>
@@ -59,6 +59,9 @@ int main() {
             for (auto &f : kv.second.filters) {
                 cache_key += "|" + f;
             }
+        }
+        for (auto &fn : pol.functions) {
+            cache_key += "\nfn:" + fn;
         }
         auto it = boxes.find(cache_key);
         if (it != boxes.end()) {
@@ -136,6 +139,11 @@ int main() {
                 case_policy.PutTable(tp);
             }
         }
+        auto extra_fns =
+            YamlStringList(node.Get("extra_functions"), node.path + ".extra_functions");
+        for (auto &fn : extra_fns) {
+            case_policy.functions.insert(fn);
+        }
         auto key = ParseTenantKey(key_raw, case_policy.key);
         auto contains = YamlStringList(node.Get("contains"), node.path + ".contains");
         auto not_contains = YamlStringList(node.Get("not_contains"), node.path + ".not_contains");
@@ -183,9 +191,7 @@ int main() {
                         yaml += "\ndeny_table_functions: " + deny_tf + "\n";
                     }
                 }
-                auto extra =
-                    YamlStringList(node.Get("extra_functions"), node.path + ".extra_functions");
-                if (!extra.empty()) {
+                if (!extra_fns.empty()) {
                     auto marker = yaml.find("functions:");
                     if (marker == std::string::npos) {
                         yaml += "\nfunctions:\n";
@@ -198,7 +204,7 @@ int main() {
                         insert_at++;
                     }
                     std::string added;
-                    for (auto &fn : extra) {
+                    for (auto &fn : extra_fns) {
                         added += "  - " + fn + "\n";
                     }
                     yaml.insert(insert_at, added);

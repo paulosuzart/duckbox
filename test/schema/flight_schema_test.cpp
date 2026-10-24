@@ -1,10 +1,10 @@
 #include "check.hpp"
 #include "suite.hpp"
 
-#include "flight/flight_sql_server.hpp"
-#include "flight/handle.hpp"
 #include "cluster/lease.hpp"
 #include "config/policy.hpp"
+#include "flight/flight_sql_server.hpp"
+#include "flight/handle.hpp"
 #include "rewriter/rewriter.hpp"
 #include "sandbox/sandbox.hpp"
 #include "sandbox/sandbox_registry.hpp"
@@ -16,12 +16,15 @@
 #include <arrow/flight/sql/client.h>
 #include <arrow/io/memory.h>
 #include <arrow/ipc/dictionary.h>
+#include <arrow/ipc/options.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
 
 #include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -84,7 +87,8 @@ std::shared_ptr<::arrow::Schema> InfoSchema(const ::arrow::flight::FlightInfo &i
     return *schema;
 }
 
-void ExpectFlightMatch(::arrow::flight::sql::FlightSqlClient &sql, ::arrow::flight::FlightClient &raw,
+void ExpectFlightMatch(::arrow::flight::sql::FlightSqlClient &sql,
+                       ::arrow::flight::FlightClient &raw,
                        const ::arrow::flight::FlightCallOptions &opt, const std::string &sql_text,
                        const std::string &msg) {
     auto info_res = sql.Execute(opt, sql_text);
@@ -129,7 +133,7 @@ void ExpectFlightMatch(::arrow::flight::sql::FlightSqlClient &sql, ::arrow::flig
 }
 
 std::shared_ptr<::arrow::Schema> SchemaFromIpcMessage(const uint8_t *data, int32_t size,
-                                                    const std::string &msg) {
+                                                      const std::string &msg) {
     if (!data || size <= 0) {
         duckbox::test::Expect(false, msg + " empty included schema");
         return nullptr;
@@ -145,10 +149,108 @@ std::shared_ptr<::arrow::Schema> SchemaFromIpcMessage(const uint8_t *data, int32
     return *got;
 }
 
+void ExpectAlignedTable(const ::arrow::Table &tbl, const std::string &msg) {
+    for (int c = 0; c < tbl.num_columns(); c++) {
+        auto col = tbl.column(c);
+        auto id = col->type()->id();
+        if (id != ::arrow::Type::STRING && id != ::arrow::Type::BINARY) {
+            continue;
+        }
+        for (int ch = 0; ch < col->num_chunks(); ch++) {
+            auto chunk = col->chunk(ch);
+            if (!chunk || !chunk->data() || chunk->data()->buffers.size() < 2 ||
+                !chunk->data()->buffers[1]) {
+                continue;
+            }
+            auto addr = reinterpret_cast<uintptr_t>(chunk->data()->buffers[1]->data());
+            duckbox::test::Expect(addr % 4 == 0, msg + " " + tbl.field(c)->name() + " offsets at " +
+                                                     std::to_string(addr) + " align=" +
+                                                     std::to_string(addr % 8) + " (need 4/8)");
+        }
+    }
+}
+
+std::shared_ptr<::arrow::Table> TicketTable(::arrow::flight::FlightClient &raw,
+                                            const ::arrow::flight::FlightCallOptions &opt,
+                                            const ::arrow::flight::FlightInfo &info,
+                                            const std::string &msg) {
+    duckbox::test::Expect(!info.endpoints().empty(), msg + " has a ticket");
+    if (info.endpoints().empty()) {
+        return nullptr;
+    }
+    auto stream_res = raw.DoGet(opt, info.endpoints()[0].ticket);
+    duckbox::test::Expect(stream_res.ok(), msg + " DoGet: " + stream_res.status().ToString());
+    if (!stream_res.ok()) {
+        return nullptr;
+    }
+    auto tbl = stream_res.ValueOrDie()->ToTable();
+    duckbox::test::Expect(tbl.ok(), msg + " ToTable: " + tbl.status().ToString());
+    if (!tbl.ok()) {
+        return nullptr;
+    }
+    ExpectAlignedTable(**tbl, msg);
+    return *tbl;
+}
+
+void ExpectMetadataStreams(::arrow::flight::sql::FlightSqlClient &sql,
+                           ::arrow::flight::FlightClient &raw,
+                           const ::arrow::flight::FlightCallOptions &opt) {
+    {
+        auto info = sql.GetCatalogs(opt);
+        duckbox::test::Expect(info.ok(), "GetCatalogs: " + info.status().ToString());
+        if (info.ok()) {
+            auto tbl = TicketTable(raw, opt, **info, "GetCatalogs");
+            duckbox::test::Expect(tbl && tbl->num_rows() >= 1, "GetCatalogs has a catalog");
+        }
+    }
+    {
+        auto info = sql.GetDbSchemas(opt, nullptr, nullptr);
+        duckbox::test::Expect(info.ok(), "GetDbSchemas: " + info.status().ToString());
+        if (info.ok()) {
+            (void)TicketTable(raw, opt, **info, "GetDbSchemas");
+        }
+    }
+    {
+        auto info = sql.GetTables(opt, nullptr, nullptr, nullptr, false, nullptr);
+        duckbox::test::Expect(info.ok(), "GetTables: " + info.status().ToString());
+        if (info.ok()) {
+            (void)TicketTable(raw, opt, **info, "GetTables");
+        }
+    }
+    {
+        auto info = sql.GetTableTypes(opt);
+        duckbox::test::Expect(info.ok(), "GetTableTypes: " + info.status().ToString());
+        if (info.ok()) {
+            (void)TicketTable(raw, opt, **info, "GetTableTypes");
+        }
+    }
+}
+
+void MaybeRunPyarrowMetadata(int port, const std::string &sandbox) {
+    const char *py_env = std::getenv("DUCKBOX_PYTHON");
+    std::string py = py_env && *py_env ? py_env : "python3";
+    std::string probe = py + " -c \"import pyarrow.flight, adbc_driver_flightsql\"";
+    if (std::system(probe.c_str()) != 0) {
+        if (std::getenv("GITHUB_ACTIONS")) {
+            duckbox::test::Expect(false, "pyarrow and adbc_driver_flightsql are required in CI "
+                                         "(set DUCKBOX_PYTHON to a venv with "
+                                         "examples/python/requirements.txt)");
+        }
+        return;
+    }
+    std::string script =
+        std::string(DUCKBOX_SOURCE_DIR) + "/test/schema/flight_metadata_pyarrow.py";
+    std::ostringstream cmd;
+    cmd << py << " " << script << " --url grpc://127.0.0.1:" << port << " --sandbox " << sandbox
+        << " --key tenant_21:user_sergio --caller analyst-svc";
+    duckbox::test::Expect(std::system(cmd.str().c_str()) == 0,
+                          "pyarrow GetTables offsets are aligned with ensure_alignment");
+}
+
 std::shared_ptr<::arrow::Schema> IncludedTableSchema(::arrow::flight::sql::FlightSqlClient &sql,
-                                                   ::arrow::flight::FlightClient &raw,
-                                                   const ::arrow::flight::FlightCallOptions &opt,
-                                                   const std::string &table_name) {
+                                                     ::arrow::flight::FlightClient &raw,
+                                                     const ::arrow::flight::FlightCallOptions &opt,
+                                                     const std::string &table_name) {
     auto info_res = sql.GetTables(opt, nullptr, nullptr, &table_name, true, nullptr);
     duckbox::test::Expect(info_res.ok(),
                           table_name + " GetTables: " + info_res.status().ToString());
@@ -180,6 +282,7 @@ std::shared_ptr<::arrow::Schema> IncludedTableSchema(::arrow::flight::sql::Fligh
     }
     auto name_arr = std::static_pointer_cast<::arrow::StringArray>(names->chunk(0));
     auto schema_arr = std::static_pointer_cast<::arrow::BinaryArray>(schemas->chunk(0));
+    ExpectAlignedTable(**tbl, table_name + " GetTables include_schema");
     for (int64_t i = 0; i < name_arr->length(); i++) {
         if (name_arr->GetString(i) != table_name) {
             continue;
@@ -249,6 +352,9 @@ void duckbox::test::RunFlightSchemaTests() {
         std::shared_ptr<::arrow::flight::FlightClient>(std::move(client_res).ValueOrDie());
 
     ::arrow::flight::FlightCallOptions opt;
+    // gRPC zero-copy can deliver StringArray offsets at align=1. ARM64 SIGSEGV'd
+    // in GetTables include_schema without this client option.
+    opt.read_options.ensure_alignment = ::arrow::ipc::Alignment::kDataTypeSpecificAlignment;
     opt.headers.emplace_back("x-duckbox-caller", "analyst-svc");
     opt.headers.emplace_back("x-duckbox-sandbox", "schema-int");
     opt.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
@@ -257,6 +363,7 @@ void duckbox::test::RunFlightSchemaTests() {
     Expect(created.find("schema-int") != std::string::npos, "CreateSandbox for schema suite");
 
     ::arrow::flight::sql::FlightSqlClient sql_client(raw_client);
+    ExpectMetadataStreams(sql_client, *raw_client, opt);
 
     ExpectFlightMatch(sql_client, *raw_client, opt, "SELECT count(*) FROM deals", "count(*)");
     ExpectFlightMatch(sql_client, *raw_client, opt, "SELECT CAST(id AS BIGINT) AS id64 FROM deals",
@@ -426,6 +533,40 @@ void duckbox::test::RunFlightSchemaTests() {
                        "mp is MAP, not utf8");
             }
         }
+        MaybeRunPyarrowMetadata(port, "schema-views");
+    }
+
+    {
+        auto body = SpecBodyForAction(MemoryAnalystPath());
+        auto fn_at = body.find("functions:");
+        Expect(fn_at != std::string::npos, "memory analyst spec has functions for windows");
+        if (fn_at != std::string::npos) {
+            auto insert_at = body.find('\n', fn_at);
+            if (insert_at == std::string::npos) {
+                insert_at = body.size();
+            } else {
+                insert_at++;
+            }
+            body.insert(insert_at, "  - row_number\n  - rank\n  - dense_rank\n  - ntile\n"
+                                   "  - percent_rank\n  - cume_dist\n");
+        }
+        auto win_opt = opt;
+        win_opt.headers.clear();
+        win_opt.read_options.ensure_alignment = ::arrow::ipc::Alignment::kDataTypeSpecificAlignment;
+        win_opt.headers.emplace_back("x-duckbox-caller", "analyst-svc");
+        win_opt.headers.emplace_back("x-duckbox-sandbox", "schema-windows");
+        win_opt.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+        auto created = ActionBody(*raw_client, win_opt, "CreateSandbox", body);
+        Expect(created.find("schema-windows") != std::string::npos,
+               "CreateSandbox with window functions allowlisted");
+        ExpectFlightMatch(sql_client, *raw_client, win_opt,
+                          "SELECT id, row_number() OVER (ORDER BY id) AS rn FROM deals",
+                          "row_number");
+        ExpectFlightMatch(sql_client, *raw_client, win_opt,
+                          "SELECT id, rank() OVER (ORDER BY id) AS r FROM deals", "rank");
+        ExpectFlightMatch(sql_client, *raw_client, win_opt,
+                          "SELECT id FROM deals QUALIFY row_number() OVER (ORDER BY id) = 1",
+                          "QUALIFY row_number");
     }
 
     (void)server->Shutdown();

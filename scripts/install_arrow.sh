@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Arrow C++ with Flight SQL. Linux: Apache APT. macOS: Homebrew.
-# Pin Arrow 26.0.0 (the version CI installs today). DuckDB stays 1.5.6.
+# Pin Arrow 26.0.0 (the version CI installs today). DuckDB stays 2.0.0.
 set -euo pipefail
 
 ARROW_VERSION="${ARROW_VERSION:-26.0.0}"

@@ -16,11 +16,12 @@ std::string Lower(const std::string &s) {
 
 bool IsCte(const RewriteContext &ctx, const ddb::BaseTableRef &base) {
     // Qualified names never match a CTE.
-    if (!base.schema_name.empty() || !base.catalog_name.empty()) {
+    const auto &qn = base.GetQualifiedName();
+    if (!qn.Schema().empty() || !qn.Catalog().empty()) {
         return false;
     }
     for (auto it = ctx.cte_scope.rbegin(); it != ctx.cte_scope.rend(); ++it) {
-        if (it->count(Lower(base.table_name))) {
+        if (it->count(Lower(IdentName(base.Table())))) {
             return true;
         }
     }
@@ -69,8 +70,8 @@ void RewriteExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr, RewriteCont
     }
     if (expr->GetExpressionClass() == ddb::ExpressionClass::SUBQUERY) {
         auto &sq = expr->Cast<ddb::SubqueryExpression>();
-        if (sq.subquery) {
-            RewriteSelectInPlace(*sq.subquery, ctx);
+        if (sq.SubqueryMutable()) {
+            RewriteSelectInPlace(*sq.SubqueryMutable(), ctx);
         }
     }
     ddb::ParsedExpressionIterator::EnumerateChildren(
@@ -83,7 +84,8 @@ bool IsTenantColumn(const ddb::ParsedExpression &e, const std::string &tenant_co
         return false;
     }
     auto &c = e.Cast<ddb::ColumnRefExpression>();
-    return !c.column_names.empty() && Lower(c.column_names.back()) == Lower(tenant_col);
+    return !c.ColumnNames().empty() &&
+           Lower(IdentName(c.ColumnNames().back())) == Lower(tenant_col);
 }
 
 ddb::unique_ptr<ddb::ParsedExpression> FilterBoundToKey(ddb::unique_ptr<ddb::ParsedExpression> expr,
@@ -92,17 +94,17 @@ ddb::unique_ptr<ddb::ParsedExpression> FilterBoundToKey(ddb::unique_ptr<ddb::Par
         return expr;
     }
     auto &cmp = expr->Cast<ddb::ComparisonExpression>();
-    if (!cmp.left || !cmp.right) {
+    if (!cmp.LeftMutable() || !cmp.RightMutable()) {
         return expr;
     }
     ddb::ParsedExpression *col = nullptr;
     ddb::unique_ptr<ddb::ParsedExpression> *other = nullptr;
-    if (IsTenantColumn(*cmp.left, spec.tenant_column)) {
-        col = cmp.left.get();
-        other = &cmp.right;
-    } else if (IsTenantColumn(*cmp.right, spec.tenant_column)) {
-        col = cmp.right.get();
-        other = &cmp.left;
+    if (IsTenantColumn(*cmp.LeftMutable(), spec.tenant_column)) {
+        col = cmp.LeftMutable().get();
+        other = &cmp.RightMutable();
+    } else if (IsTenantColumn(*cmp.RightMutable(), spec.tenant_column)) {
+        col = cmp.RightMutable().get();
+        other = &cmp.LeftMutable();
     }
     if (!col || !other) {
         return expr;
@@ -110,7 +112,7 @@ ddb::unique_ptr<ddb::ParsedExpression> FilterBoundToKey(ddb::unique_ptr<ddb::Par
     (void)col;
     // Always bind the tenant column to the key variable, never a spec literal.
     auto param = ddb::make_uniq<ddb::ParameterExpression>();
-    param->identifier = "tenant_id";
+    param->IdentifierMutable() = ddb::Identifier("tenant_id");
     *other = std::move(param);
     return expr;
 }
@@ -124,8 +126,9 @@ ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> 
         auto &b = inner_from->Cast<ddb::BaseTableRef>();
         // Always the allowlisted catalog.schema, never an agent-written qualifier
         // that happened to share the table name (e.g. staging.deals).
-        b.schema_name = spec.schema.empty() ? DefaultTableSchema() : spec.schema;
-        b.catalog_name = spec.catalog.empty() ? DefaultTableCatalog(policy.lake) : spec.catalog;
+        b.SetQualifiedName(
+            ddb::Identifier(spec.catalog.empty() ? DefaultTableCatalog(policy.lake) : spec.catalog),
+            ddb::Identifier(spec.schema.empty() ? DefaultTableSchema() : spec.schema), b.Table());
     }
 
     auto inner = ddb::make_uniq<ddb::SelectNode>();
@@ -133,7 +136,8 @@ ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> 
         inner->select_list.push_back(ddb::make_uniq<ddb::StarExpression>());
     } else {
         for (auto &col : spec.columns) {
-            inner->select_list.push_back(ddb::make_uniq<ddb::ColumnRefExpression>(col));
+            inner->select_list.push_back(
+                ddb::make_uniq<ddb::ColumnRefExpression>(ddb::Identifier(col)));
         }
     }
     inner->from_table = std::move(inner_from);
@@ -153,11 +157,11 @@ ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> 
     auto stmt = ddb::make_uniq<ddb::SelectStatement>();
     stmt->node = std::move(inner);
 
-    std::string alias = base->alias;
+    std::string alias = IdentName(base->alias);
     if (alias.empty()) {
         alias = spec.name;
     }
-    auto sub = ddb::make_uniq<ddb::SubqueryRef>(std::move(stmt), alias);
+    auto sub = ddb::make_uniq<ddb::SubqueryRef>(std::move(stmt), ddb::Identifier(alias));
     sub->column_name_alias = base->column_name_alias;
     return sub;
 }
@@ -172,14 +176,16 @@ void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx) {
         if (IsCte(ctx, base)) {
             return;
         }
-        auto *spec = ctx.policy->FindTable(base.catalog_name, base.schema_name, base.table_name);
+        const auto &qn = base.GetQualifiedName();
+        auto *spec = ctx.policy->FindTable(IdentName(qn.Catalog()), IdentName(qn.Schema()),
+                                           IdentName(qn.Name()));
         if (!spec) {
-            auto written = QualifyTable(base.catalog_name, base.schema_name, base.table_name,
-                                        ctx.policy->lake);
+            auto written = QualifyTable(IdentName(qn.Catalog()), IdentName(qn.Schema()),
+                                        IdentName(qn.Name()), ctx.policy->lake);
             throw SqlRejected("table not allowlisted during rewrite: " + written.Display());
         }
         if (ref->alias.empty()) {
-            ref->alias = base.table_name;
+            ref->alias = base.Table();
         }
         ref = WrapFilteredTable(ref->Copy(), *spec, *ctx.policy);
         return;
@@ -224,10 +230,10 @@ void RewriteQueryNode(ddb::unique_ptr<ddb::QueryNode> &node, RewriteContext &ctx
         // or later siblings. Nested frames stay on the stack (no parent copy).
         PushCteFrame(ctx);
         for (auto &kv : node->cte_map.map) {
-            if (kv.second && kv.second->query) {
-                RewriteSelectInPlace(*kv.second->query, ctx);
+            if (kv.second && kv.second->query_node) {
+                RewriteQueryNode(kv.second->query_node, ctx);
             }
-            AddCteName(ctx, kv.first);
+            AddCteName(ctx, IdentName(kv.first));
         }
     }
     switch (node->type) {
@@ -257,7 +263,7 @@ void RewriteQueryNode(ddb::unique_ptr<ddb::QueryNode> &node, RewriteContext &ctx
         auto &rec = node->Cast<ddb::RecursiveCTENode>();
         RewriteQueryNode(rec.left, ctx);
         PushCteFrame(ctx);
-        AddCteName(ctx, rec.ctename);
+        AddCteName(ctx, IdentName(rec.ctename));
         RewriteQueryNode(rec.right, ctx);
         for (auto &kt : rec.key_targets) {
             RewriteExpression(kt, ctx);
@@ -265,8 +271,16 @@ void RewriteQueryNode(ddb::unique_ptr<ddb::QueryNode> &node, RewriteContext &ctx
         PopCteFrame(ctx);
         break;
     }
+    case ddb::QueryNodeType::CTE_NODE:
+    case ddb::QueryNodeType::BOUND_SUBQUERY_NODE:
+    case ddb::QueryNodeType::STATEMENT_NODE:
+    case ddb::QueryNodeType::INSERT_QUERY_NODE:
+    case ddb::QueryNodeType::UPDATE_QUERY_NODE:
+    case ddb::QueryNodeType::DELETE_QUERY_NODE:
+    case ddb::QueryNodeType::MERGE_QUERY_NODE:
+    case ddb::QueryNodeType::COPY_QUERY_NODE:
     default:
-        // CTE_NODE is not produced by the current parser; fail closed.
+        // CTE_NODE / DML query nodes (INSERT/UPDATE/DELETE/MERGE/COPY) fail closed.
         throw SqlRejected("only SELECT / UNION can be rewritten");
     }
     ddb::ParsedExpressionIterator::EnumerateQueryNodeModifiers(
@@ -288,16 +302,16 @@ void BindExpr(ddb::unique_ptr<ddb::ParsedExpression> &expr,
     }
     if (expr->GetExpressionClass() == ddb::ExpressionClass::PARAMETER) {
         auto &p = expr->Cast<ddb::ParameterExpression>();
-        auto it = values.find(p.identifier);
+        auto it = values.find(IdentName(p.Identifier()));
         if (it != values.end()) {
-            expr = ddb::make_uniq<ddb::ConstantExpression>(it->second);
+            expr = ddb::ConstantExpression::FromValue(it->second);
         }
         return;
     }
     if (expr->GetExpressionClass() == ddb::ExpressionClass::SUBQUERY) {
         auto &sq = expr->Cast<ddb::SubqueryExpression>();
-        if (sq.subquery) {
-            BindNamedParametersInStatement(*sq.subquery, values);
+        if (sq.SubqueryMutable()) {
+            BindNamedParametersInStatement(*sq.SubqueryMutable(), values);
         }
     }
     ddb::ParsedExpressionIterator::EnumerateChildren(
@@ -334,8 +348,8 @@ void BindTableRef(ddb::unique_ptr<ddb::TableRef> &ref,
 
 void BindQueryNode(ddb::QueryNode &node, const ddb::case_insensitive_map_t<ddb::Value> &values) {
     for (auto &kv : node.cte_map.map) {
-        if (kv.second && kv.second->query) {
-            BindNamedParametersInStatement(*kv.second->query, values);
+        if (kv.second && kv.second->query_node) {
+            BindQueryNode(*kv.second->query_node, values);
         }
     }
     if (node.type == ddb::QueryNodeType::SELECT_NODE) {
@@ -375,7 +389,8 @@ void BindQueryNode(ddb::QueryNode &node, const ddb::case_insensitive_map_t<ddb::
 
 ddb::unique_ptr<ddb::ParsedExpression> ParsePolicyFilter(const std::string &filter_sql) {
     auto converted = ColonParamsToDollar(filter_sql);
-    auto exprs = ddb::Parser::ParseExpressionList(converted);
+    auto parser = ddb::Parser::GetBuiltinParser();
+    auto exprs = parser.ParseExpressionList(converted);
     if (exprs.size() != 1) {
         throw PolicyError("filter must be a single expression: " + filter_sql);
     }
@@ -399,21 +414,19 @@ void ApplyMaxRows(ddb::QueryNode &node, int64_t max_rows) {
         int64_t cap = max_rows;
         if (lim.limit && lim.limit->GetExpressionClass() == ddb::ExpressionClass::CONSTANT) {
             auto &c = lim.limit->Cast<ddb::ConstantExpression>();
-            if (!c.value.IsNull() && c.value.type().IsNumeric()) {
-                try {
-                    auto user = c.value.GetValue<int64_t>();
-                    if (user >= 0 && user < cap) {
-                        cap = user;
-                    }
-                } catch (...) {
+            auto &lit = c.GetLiteral();
+            if (!lit.IsNull() && lit.IsNumeric()) {
+                int64_t user = 0;
+                if (lit.TryGetInt64(user) && user >= 0 && user < cap) {
+                    cap = user;
                 }
             }
         }
-        lim.limit = ddb::make_uniq<ddb::ConstantExpression>(ddb::Value::BIGINT(cap));
+        lim.limit = ddb::ConstantExpression::FromValue(ddb::Value::BIGINT(cap));
         return;
     }
     auto lim = ddb::make_uniq<ddb::LimitModifier>();
-    lim->limit = ddb::make_uniq<ddb::ConstantExpression>(ddb::Value::BIGINT(max_rows));
+    lim->limit = ddb::ConstantExpression::FromValue(ddb::Value::BIGINT(max_rows));
     node.modifiers.push_back(std::move(lim));
 }
 

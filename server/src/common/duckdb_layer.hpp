@@ -1,7 +1,7 @@
 #pragma once
 
-// Isolation layer for DuckDB internals. When DuckDB 2.0 lands, this is the
-// folder to revisit first: parser/planner types, OptimizerExtension, settings.
+// Isolation layer for DuckDB internals. DuckDB 2.0.0 is the supported engine:
+// parser/planner types, Identifier/QualifiedName accessors, QueryResult, settings.
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
@@ -12,6 +12,8 @@
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
 #include "duckdb/common/enums/statement_type.hpp"
+#include "duckdb/common/identifier.hpp"
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/function/scalar_macro_function.hpp"
@@ -21,9 +23,9 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
-#include "duckdb/main/pending_query_result.hpp"
 #include "duckdb/main/prepared_statement.hpp"
+#include "duckdb/main/query_parameters.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/parser/common_table_expression_info.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
@@ -39,6 +41,7 @@
 #include "duckdb/parser/expression/window_expression.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
+#include "duckdb/parser/parsed_data/copy_info.hpp"
 #include "duckdb/parser/parsed_data/create_info.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
@@ -47,15 +50,22 @@
 #include "duckdb/parser/parsed_data/load_info.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/parser_options.hpp"
+#include "duckdb/parser/query_node/copy_query_node.hpp"
 #include "duckdb/parser/query_node/cte_node.hpp"
+#include "duckdb/parser/query_node/delete_query_node.hpp"
+#include "duckdb/parser/query_node/insert_query_node.hpp"
+#include "duckdb/parser/query_node/merge_query_node.hpp"
 #include "duckdb/parser/query_node/recursive_cte_node.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/query_node/set_operation_node.hpp"
+#include "duckdb/parser/query_node/update_query_node.hpp"
 #include "duckdb/parser/result_modifier.hpp"
 #include "duckdb/parser/statement/attach_statement.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/parser/statement/load_statement.hpp"
+#include "duckdb/parser/statement/merge_into_statement.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/statement/set_statement.hpp"
 #include "duckdb/parser/tableref.hpp"
@@ -84,6 +94,8 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/table_filter.hpp"
 
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace duckbox {
@@ -97,6 +109,19 @@ inline ddb::vector<ddb::Value> ToDuckValues(const std::vector<ddb::Value> &in) {
         out.push_back(v);
     }
     return out;
+}
+
+inline std::string IdentName(const ddb::Identifier &id) {
+    return id.GetIdentifierName();
+}
+
+// Registers statically linked DuckDB 2.0 extensions (parquet/json/icu/…) and
+// the INSTALL/LOAD provider. Safe to call more than once.
+void EnsureLinkedDuckDb();
+
+inline std::unique_ptr<ddb::Parser> MakeParser() {
+    EnsureLinkedDuckDb();
+    return std::make_unique<ddb::Parser>(ddb::ParserOptions::Builtin());
 }
 
 } // namespace duckbox

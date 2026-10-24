@@ -15,6 +15,7 @@
 #include <arrow/flight/client_auth.h>
 #include <arrow/io/memory.h>
 #include <arrow/ipc/dictionary.h>
+#include <arrow/ipc/options.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
 #include <arrow/record_batch.h>
@@ -55,6 +56,7 @@ using ::arrow::flight::FlightDescriptor;
 using ::arrow::flight::FlightEndpoint;
 using ::arrow::flight::FlightInfo;
 using ::arrow::flight::Location;
+using ::arrow::flight::FlightPayload;
 using ::arrow::flight::RecordBatchStream;
 using ::arrow::flight::ServerCallContext;
 using ::arrow::flight::Ticket;
@@ -278,6 +280,9 @@ PeerFlight::PeerFlight(std::string secret, int64_t timeout_ms)
 ::arrow::flight::FlightCallOptions PeerFlight::CallOpt(const std::string &sandbox_id,
                                                      const std::string &key) const {
     ::arrow::flight::FlightCallOptions opt;
+    // Flight gRPC can hand the client StringArray offset buffers at align=1.
+    // ARM64 SIGSEGV'd in GetTables include_schema; copy to type-aligned memory.
+    opt.read_options.ensure_alignment = ::arrow::ipc::Alignment::kDataTypeSpecificAlignment;
     opt.timeout = ::arrow::flight::TimeoutDuration(static_cast<double>(timeout_ms_) / 1000.0);
     opt.headers.emplace_back("authorization", "Bearer " + secret_);
     opt.headers.emplace_back("x-duckbox-sandbox", sandbox_id);
@@ -537,6 +542,9 @@ DuckboxFlightSqlServer::MetaInfo(const FlightDescriptor &descriptor,
 
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::StreamIpc(const std::vector<uint8_t> &ipc) const {
+    // Own the IPC blob so the reader outlives this call. Decoded batches are
+    // streamed as-is (no per-buffer re-encode). Clients that need aligned
+    // String/Binary offsets set IpcReadOptions::ensure_alignment.
     ARROW_ASSIGN_OR_RAISE(auto buf, ::arrow::AllocateBuffer(static_cast<int64_t>(ipc.size())));
     if (!ipc.empty()) {
         std::memcpy(buf->mutable_data(), ipc.data(), ipc.size());
