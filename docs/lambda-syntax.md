@@ -5,7 +5,7 @@ form. DuckDB 2.1 removes the arrow form and the `lambda_syntax` flag.
 
 | Syntax | Example | duckbox |
 | --- | --- | --- |
-| Python-style (default) | `lambda x : x + 1` | Accepted by the rewriter. The lambda body is walked; every function still needs to be allowlisted. |
+| Python-style (default) | `lambda x : x + 1` | The rewriter accepts first. The lambda body is walked; every function still needs to be allowlisted. If a statement reached the engine, the binder / warmup would fail later unless those names are on the trusted exception list (they are not). A lambda in an `AT` clause is denied (`AT clause must be a constant literal`). |
 | Single-arrow (removed in 2.1) | `x -> x + 1` | Denied. The rewriter rejects a parsed arrow lambda first (`single-arrow lambda syntax is denied`). If a statement reached the engine, the binder would fail later because warmup locked `lambda_syntax=disable_single_arrow`. |
 | JSON arrow | `col -> '$.a'` | Denied as a single-arrow lambda (`single-arrow lambda syntax is denied`). DuckDB still parses `->` as `LambdaExpression`. |
 | Multi-parameter | `lambda x, y : x + y` | Denied (`multi-parameter lambda is denied`). |

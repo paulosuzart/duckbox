@@ -39,8 +39,9 @@ The rewriter does **not** expand macros. Spec validation and warmup reject an al
 - `now()`, `current_timestamp`, and `now() - INTERVAL '1 day'` (and any other non-literal timestamp expression)
 - `VERSION => '2'` (string; VERSION must be an integer literal)
 - `VERSION => CAST('2' AS INT)` (the child is a string literal, so this is denied)
+- functions, settings, and lambdas in `AT` (including `x -> …` and `lambda x : …`)
 
-Use `AT (VERSION => 2)` or `AT (TIMESTAMP => '2024-01-01 00:00:00')`.
+Use `AT (VERSION => 2)` or `AT (TIMESTAMP => '2024-01-01 00:00:00')`. Allowed `AT` still returns that tenant's older versions, including rows later marked `_deleted`.
 
 **Daemon identity** — `name` (and `lease.node_id` when set) must match `[A-Za-z0-9._-]` and be at most 128 bytes on **every** daemon, including single-node / no-lease. The same string is the S3 lease-probe key suffix, so a name such as `memory dev:1` is now refused (`name: must match [A-Za-z0-9._-]`). Use something like `memory-dev-1`.
 
