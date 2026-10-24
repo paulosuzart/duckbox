@@ -13,6 +13,7 @@ int main() {
     RunCteShadowTests();
     RunCteRewriteTests();
     RunCteDmlFailClosedTests();
+    RunHiddenFilterRewriteTests();
     RunInitSqlTests();
     RunHandleTests();
     RunCryptoTests();

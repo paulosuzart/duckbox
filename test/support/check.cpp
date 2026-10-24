@@ -149,6 +149,13 @@ Policy HiddenAmountPolicy() {
     return p;
 }
 
+Policy HiddenFilterPolicy() {
+    auto p = TestPolicy();
+    p.Table("deals").columns = {"id", "title", "amount"};
+    p.version = FingerprintSpec(p);
+    return p;
+}
+
 Policy TestDucklakePolicy(const Policy &base) {
     auto p = base;
     p.lake.kind = LakeKind::Ducklake;

@@ -533,6 +533,28 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql,
     }
 }
 
+QueryOutput TenantSandbox::ExecuteHandle(const std::string &sql, std::vector<ddb::Value> params) {
+    QueryActive active;
+    bool cold = !Warm();
+    auto t0 = std::chrono::steady_clock::now();
+    try {
+        Warmup(false);
+        std::lock_guard<std::mutex> hold(mu_);
+        Touch();
+        auto out = RunTimed(sql, std::move(params));
+        FinishQuery(policy_, key_, cold,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                    out);
+        return out;
+    } catch (const std::exception &e) {
+        RecoverAfterFailure();
+        ObserveFailure(
+            Metrics(), &policy_, &key_, e, cold,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        throw;
+    }
+}
+
 // DuckDB ExtractPlan hits an internal binder error on some
 // ORDER BY + LIMIT (TopN) trees over a rewritten subquery wrap. ExtractPlan
 // is diagnostic only.
@@ -674,6 +696,49 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std
 #endif
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto ps = con_->Prepare(rewritten);
+        if (ps->HasError()) {
+            RecoverAfterFailure();
+            RethrowQueryError(ps->GetError(), ps->GetErrorObject().Type(), secret_values_);
+        }
+        auto &names = ps->GetNames();
+        auto &types = ps->GetTypes();
+        std::vector<std::string> out_names;
+        std::vector<ddb::LogicalType> out_types;
+        out_names.reserve(names.size());
+        out_types.reserve(types.size());
+        for (idx_t i = 0; i < names.size(); i++) {
+            out_names.push_back(IdentName(names[i]));
+            out_types.push_back(types[i]);
+        }
+        auto opts = con_->context->GetClientProperties();
+        return SchemaFromLogicalTypes(out_names, out_types, opts);
+    } catch (const CatalogUnavailableError &) {
+        RecoverAfterFailure();
+        throw;
+    } catch (const std::exception &e) {
+        RecoverAfterFailure();
+        RethrowQueryError(e.what(), ddb::ErrorData(e).Type(), secret_values_);
+    } catch (...) {
+        RecoverAfterFailure();
+        throw;
+    }
+}
+
+std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeHandleArrow(const std::string &sql) {
+    Warmup(false);
+    std::lock_guard<std::mutex> hold(mu_);
+    Touch();
+    if (con_ && con_->HasActiveTransaction()) {
+        RecoverAfterFailure();
+    }
+    try {
+#ifdef DUCKBOX_TESTING
+        auto injected = InjectedQueryError();
+        if (!injected.empty()) {
+            RethrowQueryError(injected, ddb::ExceptionType::IO, secret_values_);
+        }
+#endif
+        auto ps = con_->Prepare(sql);
         if (ps->HasError()) {
             RecoverAfterFailure();
             RethrowQueryError(ps->GetError(), ps->GetErrorObject().Type(), secret_values_);

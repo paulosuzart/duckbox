@@ -465,6 +465,7 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/init_sql_test.cpp
   test/unit/rewriter_test.cpp
   test/unit/cte_scope_test.cpp
+  test/unit/hidden_filter_rewrite_test.cpp
   test/unit/handle_test.cpp
   test/unit/crypto_test.cpp
   test/unit/registry_test.cpp
@@ -495,6 +496,8 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/sandbox_exec_test.cpp
   test/integration/cte_exec_test.cpp
   test/integration/cte_flight_test.cpp
+  test/integration/hidden_filter_exec_test.cpp
+  test/integration/hidden_filter_flight_test.cpp
   test/integration/runtime_test.cpp
   test/integration/s3_registry_test.cpp
   test/integration/auth_flight_test.cpp
