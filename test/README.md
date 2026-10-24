@@ -12,8 +12,8 @@ Four CTest-labeled binaries. `make test` runs all of them.
 | `integration` | `duckbox_integration_tests` | TenantSandbox execute, idle/list/expire, fake S3 registry, caller auth, in-process Flight SQL, DuckDB 2.0 runtime denials, lambda new/old syntax, storage-format denials |
 | `integration` | `duckbox_s3_sts_tests` | RustFS STS / credential_chain (skips live hops if RustFS is down) |
 
-Add a new bypass as a YAML case (`id`, `sql`, `expect: allow|deny`, optional `reason` / `stage` / `contains`). Reviewer repros live here. Handle forgery and stale versions stay in unit `handle` / `registry`. Lambda syntax has **separate** unit and integration suites (`lambda_new_syntax` / `lambda_old_syntax`) plus matching guardrail cases. DuckLake + S3 e2e stays in CI: `readme-runbook` (2.0 seed + quickstart) and `ducklake-compat` (CI requires a 1.5.6-created lake via `DUCKBOX_REQUIRE_LAKE_ENGINE=1.5.6`, then duckbox 2.0; see `docs/ducklake-compatibility.md`). Multi-node e2e is lease failover only (memory policy, RustFS).
+Add a new bypass as a YAML case (`id`, `sql`, `expect: allow|deny`, optional `reason` / `stage` / `contains`). Reviewer repros live here. Handle forgery and stale versions stay in unit `handle` / `registry`. Lambda syntax has **separate** unit and integration suites (`lambda_new_syntax` / `lambda_old_syntax`) plus matching guardrail cases. DuckLake + S3 e2e stays in CI: `readme-runbook` (2.0 seed + quickstart). Multi-node e2e is lease failover only (memory policy, RustFS).
 
 Shared fixtures: `test/support/check.hpp`.
 
-Local coverage: unit + guardrails + integration. `make coverage` instruments `server/src` and reports **gcovr** line coverage (target ≥75%). CI runs the same script; DuckLake e2e is `readme-runbook` plus `ducklake-compat`.
+Local coverage: unit + guardrails + integration. `make coverage` instruments `server/src` and reports **gcovr** line coverage (target ≥75%). CI runs the same script; DuckLake e2e is `readme-runbook`.
