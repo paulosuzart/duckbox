@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -104,7 +105,26 @@ jobs:
         env:
           DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
           DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: ctest --test-dir build -L 'unit|guardrails|integration' --output-on-failure
+        run: ctest --test-dir build -L 'unit|guardrails|integration' --exclude-regex '^schema$' --output-on-failure
+      # Direct ctest: lldb changes the process memory layout, so a pass
+      # under the debugger is not enough on its own.
+      - name: Schema tests (ctest)
+        env:
+          DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+          DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: ctest --test-dir build -R '^schema$' --output-on-failure
+      - name: Schema tests (lldb backtrace on crash)
+        env:
+          DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+          DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: bash scripts/ci_macos_schema_loop.sh 1
+      - name: Upload schema lldb log
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-schema-lldb-${{ github.sha }}
+          path: schema-lldb-logs/
+          if-no-files-found: ignore
 
   coverage:
     name: Line coverage (gcovr)

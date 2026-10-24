@@ -45,6 +45,24 @@ std::string LowerAscii(std::string s) {
     return s;
 }
 
+std::string TrimAscii(std::string s) {
+    while (!s.empty() &&
+           (s.front() == ' ' || s.front() == '\t' || s.front() == '\n' || s.front() == '\r')) {
+        s.erase(s.begin());
+    }
+    while (!s.empty() &&
+           (s.back() == ' ' || s.back() == '\t' || s.back() == '\n' || s.back() == '\r')) {
+        s.pop_back();
+    }
+    return s;
+}
+
+// Booleans compare case-insensitively after trim. allowed_configs must
+// read back as exactly [] — empty / null / none is not accepted.
+std::string NormalizeSettingText(std::string s) {
+    return LowerAscii(TrimAscii(std::move(s)));
+}
+
 void ExecHardeningOrThrow(ddb::Connection &con, const std::string &sql) {
     if (!g_hardening_fail_needle.empty() &&
         sql.find(g_hardening_fail_needle) != std::string::npos) {
@@ -68,17 +86,27 @@ void RequireHardeningSetting(ddb::Connection &con, const char *name, const char 
         throw Error(std::string("sandbox hardening failed: current_setting('") + name +
                     "'): " + why);
     }
+    // Complete() ends the query; ~QueryResult calls Close(). Do not Close()
+    // here — it is a no-op and is not a SIGSEGV fix. Fetch() reads the first
+    // chunk (DuckDB 2.0 in-memory collection) instead of Collection().GetValue.
+    got->Complete();
     std::string text;
-    if (got->type == ddb::QueryResultType::MATERIALIZED_RESULT) {
-        auto &mat = got->Cast<ddb::MaterializedQueryResult>();
-        if (mat.RowCount() > 0) {
-            text = mat.GetValue(0, 0).ToString();
+    if (auto chunk = got->Fetch()) {
+        if (chunk->size() > 0) {
+            text = chunk->GetValue(0, 0).ToString();
         }
     }
     if (!g_hardening_mismatch_setting.empty() && g_hardening_mismatch_setting == name) {
-        text = (LowerAscii(expected) == "true") ? "false" : "true";
+        auto want = LowerAscii(expected);
+        if (want == "true") {
+            text = "false";
+        } else if (want == "false") {
+            text = "true";
+        } else {
+            text = "[max_memory]";
+        }
     }
-    if (LowerAscii(text) != LowerAscii(expected)) {
+    if (NormalizeSettingText(text) != NormalizeSettingText(expected)) {
         throw Error(std::string("sandbox hardening failed: current_setting('") + name + "') is '" +
                     text + "', expected '" + expected + "'");
     }
@@ -269,6 +297,10 @@ void TenantSandbox::Warmup(bool validate_lake) {
         RequireHardeningSetting(*con_, "autoinstall_known_extensions", "false");
         RequireHardeningSetting(*con_, "autoload_known_extensions", "false");
         RequireHardeningSetting(*con_, "enable_external_access", "false");
+        // allowed_configs is a lock exception list. Empty it (default) and
+        // read back so a leftover entry cannot survive lock_configuration.
+        ExecHardeningOrThrow(*con_, "SET allowed_configs=[]");
+        RequireHardeningSetting(*con_, "allowed_configs", "[]");
         ExecHardeningOrThrow(*con_, "SET lock_configuration=true");
         RequireHardeningSetting(*con_, "lock_configuration", "true");
         warmup_count_++;

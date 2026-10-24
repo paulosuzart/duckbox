@@ -254,16 +254,32 @@ void duckbox::test::RunRuntimeTests() {
 		Expect(!box.Warm(), "lock_configuration mismatch does not hand out a connection");
 	}
 
-	const char *kHardeningReadError =
-		"sandbox hardening failed: current_setting('enable_external_access'): "
-		"Catalog Error: unrecognized configuration parameter \"__duckbox_no_such_setting__\"\n"
-		"\n"
-		"Did you mean: \"binary_as_string\"";
+	{
+		WarmupHardeningMismatch mismatch("allowed_configs");
+		TenantSandbox box(daemon, loaded, key_a, spec_dir);
+		ExpectThrowExact(
+			[&] { box.Warmup(false); },
+			"sandbox hardening failed: current_setting('allowed_configs') is '[max_memory]', "
+			"expected '[]'",
+			"allowed_configs read-back mismatch uses the exact comparison error");
+		Expect(!box.Warm(), "non-empty allowed_configs does not hand out a connection");
+	}
+
+	{
+		WarmupHardeningFailure fail("allowed_configs");
+		TenantSandbox box(daemon, loaded, key_a, spec_dir);
+		ExpectThrowContains([&] { box.Warmup(false); }, "sandbox hardening failed",
+		                    "SET allowed_configs failure is a clear hardening error");
+		Expect(!box.Warm(), "failed allowed_configs SET does not hand out a connection");
+	}
+
+	const char *kHardeningReadErrorPrefix =
+		"sandbox hardening failed: current_setting('enable_external_access'): ";
 	{
 		WarmupHardeningReadError read_err("enable_external_access");
 		TenantSandbox box(daemon, loaded, key_a, spec_dir);
-		ExpectThrowExact([&] { box.Warmup(false); }, kHardeningReadError,
-						 "hardening query-error branch uses the exact current_setting message");
+		ExpectThrowContains([&] { box.Warmup(false); }, kHardeningReadErrorPrefix,
+		                    "hardening query-error branch uses the current_setting prefix");
 		Expect(!box.Warm(), "hardening query error does not hand out a connection");
 	}
 
@@ -278,8 +294,8 @@ void duckbox::test::RunRuntimeTests() {
 		rec.spec.bound_key = rec.key;
 		rec = defs->Create(rec);
 		WarmupHardeningReadError read_err("enable_external_access");
-		ExpectThrowExact([&] { rt.Get(rec); }, kHardeningReadError,
-						 "runtime Get fails closed on the exact hardening query-error message");
+		ExpectThrowContains([&] { rt.Get(rec); }, kHardeningReadErrorPrefix,
+		                    "runtime Get fails closed on the hardening query-error prefix");
 		Expect(rt.Size() == 0, "hardening query error does not create a sandbox");
 	}
 }

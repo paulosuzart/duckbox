@@ -113,8 +113,9 @@ class WarmupHardeningFailure {
     WarmupHardeningFailure &operator=(const WarmupHardeningFailure &) = delete;
 };
 
-// Test seam: while alive, hardening read-back substitutes 'true' AFTER the
-// real current_setting query, so the comparison branch runs.
+// Test seam: while alive, hardening read-back substitutes the opposite
+// boolean (or '[max_memory]' for a list) AFTER the real current_setting
+// query, so the comparison branch runs.
 class WarmupHardeningMismatch {
   public:
     explicit WarmupHardeningMismatch(std::string setting_name);

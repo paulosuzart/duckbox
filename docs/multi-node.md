@@ -119,10 +119,7 @@ Under `lease:` in the daemon YAML (all optional except the S3 endpoint block you
 | `provider` | `config` | `config` (static keys) or `credential_chain` (SDK profile / assume-role / default chain, including IRSA web identity). |
 | `profile` / `role_arn` | optional | Only with `credential_chain`. `role_arn` always uses `STSAssumeRoleCredentialsProvider` (fail closed if the STS SDK is not linked). A named profile is not a substitute. |
 | `skip_probe` | `false` | Skip If-None-Match startup probe (`{prefix}.duckbox-cw-probe-<node_id>-<nonce>`). |
-| `node_id` | daemon `name` | Must be unique in the cluster. At most 128 bytes so the probe key stays under S3’s 1024-byte limit. |
-
-Startup lists `{prefix}.duckbox-cw-probe-<node_id>-` and deletes leftover objects from a crash between PUT and DELETE (SIGKILL during probe). Each DELETE is logged (`lease_probe_delete`). Other nodes’ prefixes are left alone.
-| `advertise` | `grpc://` + `internal_listen` | **Internal** URL peers dial. Use a reachable private host, not `0.0.0.0`. |
+| `node_id` | daemon `name` | Must be unique in the cluster. `[A-Za-z0-9._-]`, at most 128 bytes (S3 probe key). |
 | `ttl` / `ttl_ms` | `15s` | Lease and heartbeat TTL. Must exceed the longest S3 blip you want to survive without a restart. |
 | `heartbeat` / `heartbeat_ms` | `ttl/3` (min 1s) | Node-lease renew interval. |
 | `skew` / `skew_ms` | `1s` | Extra wait past `expiry_ms` before stealing another node’s lease (local-clock skew margin). |
@@ -130,6 +127,8 @@ Startup lists `{prefix}.duckbox-cw-probe-<node_id>-` and deletes leftover object
 | `gc` / `gc_ms` | `24h` | Age after which a lease tombstone may be deleted. Epoch is copied to `{prefix}epochs/{id}.json` first. `0` disables. |
 | `proxy_timeout` / `proxy_timeout_ms` | `5s` | Deadline for peer Flight proxy RPCs. |
 | `max_leases` | `0` (unlimited) | Optional cap of sandboxes this node will own. |
+
+Startup lists `{prefix}.duckbox-cw-probe-<node_id>-` and deletes leftover objects whose remainder is a 16-hex nonce and whose `LastModified` is older than five minutes (crash between PUT and DELETE). In-flight probes — including another process of the same `node_id`, or a longer id such as `a-b` when this node is `a` — are left alone. A list failure is logged (`s3_list` / `lease_probe_list`) and does not fail startup. Each DELETE is logged (`lease_probe_delete`). Nodes need **NTP-synced clocks** for that five-minute cutoff: cleanup compares S3 `LastModified` to the local clock. A node more than five minutes ahead can delete a peer's in-flight probe; a node behind leaves stale objects longer.
 
 Top-level / `auth:`:
 
@@ -185,7 +184,7 @@ A failed **node heartbeat** PUT does **not** immediately exit. While the publish
 
 ## Clock skew
 
-Steal compares `expiry_ms` in the object to the node's local clock (injectable in tests), plus `lease.skew` (default 1s). A node is treated as expired only when `expiry_ms + skew_ms <= now`, which delays an early steal if our clock is ahead. If B is **behind**, failover is delayed by TTL plus skew. Keep NTP (or equivalent) within a small fraction of `lease.ttl`. duckbox does not wait on a centralized clock.
+Steal compares `expiry_ms` in the object to the node's local clock (injectable in tests), plus `lease.skew` (default 1s). A node is treated as expired only when `expiry_ms + skew_ms <= now`, which delays an early steal if our clock is ahead. If B is **behind**, failover is delayed by TTL plus skew. Keep NTP (or equivalent) within a small fraction of `lease.ttl`. The lease-probe leftover cutoff (five minutes, `LastModified`) also uses the local clock — keep nodes NTP-synced so one node cannot treat another's in-flight probe as stale. duckbox does not wait on a centralized clock.
 
 ## Limits
 

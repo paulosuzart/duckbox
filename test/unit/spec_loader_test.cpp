@@ -559,6 +559,15 @@ void duckbox::test::RunSpecLoaderTests() {
             long_name.lease.skip_probe = true;
             ExpectThrowContains([&] { ValidateDaemonOrThrow(long_name); }, "128 bytes",
                                 "daemon name used as node_id longer than 128 bytes is refused");
+            DaemonConfig slash = TestDaemon();
+            slash.lease.node_id = "a/b";
+            slash.lease.skip_probe = true;
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(slash); }, "[A-Za-z0-9._-]",
+                                "lease.node_id a/b is refused so it cannot collide with a-b");
+            DaemonConfig dashed = TestDaemon();
+            dashed.lease.node_id = "a-b";
+            dashed.lease.skip_probe = true;
+            ValidateDaemonOrThrow(dashed);
         }
         {
             auto loc = ParseFlightLocation("127.0.0.1:5747");

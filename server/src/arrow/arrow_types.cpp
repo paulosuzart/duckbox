@@ -103,8 +103,12 @@ struct TypeParser {
 };
 
 TypeParser &Parser() {
-    static TypeParser parser;
-    return parser;
+    // Intentionally leaked. DuckDB 2.0 ~BlockAllocator touches thread-local
+    // state that is already gone at atexit on macOS arm64 (schema tests:
+    // EXC_BAD_ACCESS in BlockAllocatorThreadLocalState::Initialize from
+    // TypeParser -> DuckDB -> DatabaseInstance -> DBConfig -> BlockAllocator).
+    static TypeParser *parser = new TypeParser;
+    return *parser;
 }
 
 ddb::LogicalType ParseWithContext(const std::string &name) {

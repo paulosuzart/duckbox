@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -562,16 +563,23 @@ void duckbox::test::RunFlightSchemaTests() {
         ExpectFlightMatch(sql_client, *raw_client, win_opt,
                           "SELECT id, row_number() OVER (ORDER BY id) AS rn FROM deals",
                           "row_number");
+        std::clog << "schema-checkpoint: row_number done" << std::endl;
         ExpectFlightMatch(sql_client, *raw_client, win_opt,
                           "SELECT id, rank() OVER (ORDER BY id) AS r FROM deals", "rank");
+        std::clog << "schema-checkpoint: rank done" << std::endl;
         ExpectFlightMatch(sql_client, *raw_client, win_opt,
                           "SELECT id FROM deals QUALIFY row_number() OVER (ORDER BY id) = 1",
                           "QUALIFY row_number");
+        std::clog << "schema-checkpoint: QUALIFY ExpectFlightMatch done" << std::endl;
     }
 
+    std::clog << "schema-checkpoint: before Shutdown" << std::endl;
     (void)server->Shutdown();
+    std::clog << "schema-checkpoint: Shutdown returned" << std::endl;
     (void)server->Wait();
+    std::clog << "schema-checkpoint: Wait returned" << std::endl;
     if (serve_th.joinable()) {
         serve_th.join();
     }
+    std::clog << "schema-checkpoint: serve thread joined" << std::endl;
 }

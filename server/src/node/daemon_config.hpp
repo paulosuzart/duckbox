@@ -50,7 +50,7 @@ struct LeaseSettings {
     std::string profile;
     std::string role_arn;
     bool skip_probe = false;
-    std::string node_id;   // default: daemon name; max kMaxNodeIdBytes
+    std::string node_id;   // default: daemon name; [A-Za-z0-9._-], max kMaxNodeIdBytes
     std::string advertise; // grpc://host:port; default grpc://listen
     int64_t ttl_ms = 15000;
     int64_t heartbeat_ms = 5000;
@@ -100,6 +100,16 @@ constexpr int kMinHandleSecretLen = 16;
 constexpr int kMinPeerSecretLen = 16;
 // Probe key is {prefix}.duckbox-cw-probe-<node_id>-<nonce>; S3 keys cap at 1024.
 constexpr size_t kMaxNodeIdBytes = 128;
+
+inline bool ValidNodeIdChars(const std::string &s) {
+    for (unsigned char c : s) {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '-' || c == '_' || c == '.')) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // Bearer secret, then JWT HS256, else x-duckbox-caller only when allow_insecure_dev.
 // Throws AuthError; never treats an unsigned token as a spec payload.
