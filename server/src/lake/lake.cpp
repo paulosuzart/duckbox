@@ -2,6 +2,10 @@
 #include "common/error.hpp"
 #include "s3/s3_credentials.hpp"
 
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_replace.h"
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -40,24 +44,11 @@ std::string ResolvePath(const std::string &base_dir, const std::string &path) {
 
 namespace {
 
-bool CiEq(const std::string &s, size_t pos, const std::string &pat) {
-    if (pos + pat.size() > s.size()) {
+bool CiEq(absl::string_view s, size_t pos, absl::string_view pat) {
+    if (pos > s.size() || s.size() - pos < pat.size()) {
         return false;
     }
-    for (size_t i = 0; i < pat.size(); i++) {
-        char a = s[pos + i];
-        char b = pat[i];
-        if (a >= 'A' && a <= 'Z') {
-            a = static_cast<char>(a - 'A' + 'a');
-        }
-        if (b >= 'A' && b <= 'Z') {
-            b = static_cast<char>(b - 'A' + 'a');
-        }
-        if (a != b) {
-            return false;
-        }
-    }
-    return true;
+    return absl::EqualsIgnoreCase(s.substr(pos, pat.size()), pat);
 }
 
 bool IsIdentChar(char c) {
@@ -78,13 +69,7 @@ void ReplaceAllExact(std::string &s, const std::string &needle, const char *repl
     if (needle.empty()) {
         return;
     }
-    size_t pos = 0;
-    const size_t n = needle.size();
-    const size_t rlen = std::char_traits<char>::length(repl);
-    while ((pos = s.find(needle, pos)) != std::string::npos) {
-        s.replace(pos, n, repl);
-        pos += rlen;
-    }
+    absl::StrReplaceAll({{needle, repl}}, &s);
 }
 
 void RedactExactValues(std::string &s, const SecretRedactionContext &ctx) {
@@ -329,7 +314,7 @@ std::string UnprefixedCatalogDsn(const std::string &dsn) {
     const char *prefixes[] = {"ducklake:postgres:", "ducklake:postgresql://",
                               "ducklake:postgres://", "ducklake:"};
     for (const char *p : prefixes) {
-        if (CiEq(dsn, 0, p)) {
+        if (absl::StartsWithIgnoreCase(dsn, p)) {
             return dsn.substr(std::char_traits<char>::length(p));
         }
     }
@@ -437,16 +422,11 @@ std::string RedactSecretText(const std::string &text, const SecretRedactionConte
 
 namespace {
 
-bool CiContains(const std::string &s, const std::string &pat) {
+bool CiContains(absl::string_view s, absl::string_view pat) {
     if (pat.empty() || s.size() < pat.size()) {
         return false;
     }
-    for (size_t i = 0; i + pat.size() <= s.size(); i++) {
-        if (CiEq(s, i, pat)) {
-            return true;
-        }
-    }
-    return false;
+    return absl::StrContains(absl::AsciiStrToLower(s), absl::AsciiStrToLower(pat));
 }
 
 bool LooksLikeConfiguredDsn(const std::string &v) {
@@ -621,11 +601,11 @@ std::string ResolveLakeCatalog(const SandboxSpec &spec, const SecretResolver &se
 }
 
 void LoadExtension(ddb::Connection &con, const std::string &name) {
-    auto lower = ddb::StringUtil::Lower(name);
+    auto lower = absl::AsciiStrToLower(name);
     if (lower.empty() || lower == "[]") {
         return;
     }
-    if (lower.find('\'') != std::string::npos || lower.find(';') != std::string::npos) {
+    if (absl::StrContains(lower, '\'') || absl::StrContains(lower, ';')) {
         throw PolicyError("lake.extensions contains an invalid name");
     }
     auto load = con.Query("LOAD " + lower);
@@ -646,7 +626,7 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
     LoadExtension(con, "nanoarrow");
 
     for (auto &ext : spec.lake.extensions) {
-        auto lower = ddb::StringUtil::Lower(ext);
+        auto lower = absl::AsciiStrToLower(ext);
         if (lower.empty() || lower == "nanoarrow" || lower == "[]") {
             continue;
         }

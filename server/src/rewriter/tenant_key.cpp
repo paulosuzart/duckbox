@@ -1,6 +1,8 @@
 #include "rewriter/tenant_key.hpp"
 #include "common/error.hpp"
 
+#include "absl/strings/str_split.h"
+
 #include <cctype>
 #include <limits>
 #include <regex>
@@ -25,8 +27,9 @@ bool LooksNumeric(const std::string &s) {
 }
 
 void StripPrefixes(std::string &value, const std::vector<std::string> &prefixes) {
+    // Only strip when the remainder is non-empty (value.size() > prefix.size()).
     for (auto &p : prefixes) {
-        if (!p.empty() && value.size() > p.size() && value.compare(0, p.size(), p) == 0) {
+        if (!p.empty() && value.size() > p.size() && value.starts_with(p)) {
             value = value.substr(p.size());
             return;
         }
@@ -170,17 +173,7 @@ TenantKey ParseTenantKey(const std::string &raw, const KeySpec &spec) {
     }
 
     if (!spec.split.empty()) {
-        std::vector<std::string> parts;
-        size_t start = 0;
-        while (start <= raw.size()) {
-            auto pos = raw.find(spec.split, start);
-            if (pos == std::string::npos) {
-                parts.push_back(raw.substr(start));
-                break;
-            }
-            parts.push_back(raw.substr(start, pos - start));
-            start = pos + spec.split.size();
-        }
+        std::vector<std::string> parts = absl::StrSplit(raw, spec.split);
         if (spec.split_names.empty() || parts.size() < spec.split_names.size()) {
             throw AuthError("tenant key '" + raw + "' does not match auth.key.split");
         }

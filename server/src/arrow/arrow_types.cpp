@@ -5,6 +5,8 @@
 #include <arrow/extension/parquet_variant.h>
 #include <arrow/extension_type.h>
 
+#include "absl/strings/ascii.h"
+
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -13,18 +15,6 @@ namespace duckbox {
 namespace arrow {
 using namespace common;
 namespace {
-
-ddb::string TrimSpaces(const std::string &s) {
-    size_t a = 0;
-    size_t b = s.size();
-    while (a < b && s[a] == ' ') {
-        a++;
-    }
-    while (b > a && s[b - 1] == ' ') {
-        b--;
-    }
-    return ddb::string(s.substr(a, b - a));
-}
 
 bool HasControlChars(const std::string &s) {
     for (unsigned char c : s) {
@@ -302,7 +292,7 @@ ddb::ClientProperties DefaultArrowClientProperties() {
 
 ddb::LogicalType LogicalTypeFromName(const std::string &logical_type) {
     constexpr size_t kMaxTypeNameBytes = 64 * 1024;
-    auto name = TrimSpaces(logical_type);
+    auto name = ddb::string(absl::StripAsciiWhitespace(logical_type));
     if (logical_type.empty() || name.empty() || logical_type.size() > kMaxTypeNameBytes ||
         HasControlChars(logical_type) || UnbalancedParens(std::string(name)) ||
         HasTopLevelDot(std::string(name))) {

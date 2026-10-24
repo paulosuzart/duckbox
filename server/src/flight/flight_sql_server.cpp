@@ -9,6 +9,8 @@
 #include "metrics/metrics.hpp"
 #include "s3/secrets.hpp"
 
+#include "absl/strings/ascii.h"
+
 #include <arrow/array.h>
 #include <arrow/buffer.h>
 #include <arrow/builder.h>
@@ -1488,7 +1490,7 @@ int RunSandboxCli(const SandboxCliRequest &req) {
         }
         body = spec.yaml_body;
         if (!req.id.empty() || !req.key.empty()) {
-            if (body.find("\nid:") == std::string::npos && body.rfind("id:", 0) != 0) {
+            if (body.find("\nid:") == std::string::npos && !body.starts_with("id:")) {
                 body = "id: " + spec.id + "\nkey: " + spec.bound_key + "\n" + body;
             }
         }
@@ -1582,10 +1584,10 @@ int RunNodeDrain(const NodeCliRequest &req) {
     }
     auto client = std::move(*client_res);
     std::string handshake = req.peer_secret;
-    if (handshake.rfind("env:", 0) == 0 || handshake.rfind("file:", 0) == 0) {
+    if (handshake.starts_with("env:") || handshake.starts_with("file:")) {
         try {
-            handshake = TrimCopy(EnvFileSecretResolver{}.Resolve(
-                ParseSecretRef(handshake, "peer-secret"), "peer-secret"));
+            handshake = std::string(absl::StripAsciiWhitespace(EnvFileSecretResolver{}.Resolve(
+                ParseSecretRef(handshake, "peer-secret"), "peer-secret")));
         } catch (const std::exception &e) {
             std::cerr << e.what() << "\n";
             return 1;

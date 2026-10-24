@@ -5,6 +5,10 @@
 #include "lake/lake.hpp"
 #include "s3/secrets.hpp"
 
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_split.h"
+
 #include <algorithm>
 #include <cctype>
 #include <ctime>
@@ -22,12 +26,6 @@ using namespace lake;
 using namespace s3;
 namespace {
 
-std::string Lower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
-
 std::string ChildPath(const std::string &parent, const std::string &key) {
     return parent.empty() ? key : parent + "." + key;
 }
@@ -37,17 +35,7 @@ void ParseTableKey(const std::string &raw, std::string &catalog, std::string &sc
     catalog.clear();
     schema.clear();
     name.clear();
-    std::vector<std::string> parts;
-    std::string cur;
-    for (char c : raw) {
-        if (c == '.') {
-            parts.push_back(cur);
-            cur.clear();
-        } else {
-            cur.push_back(c);
-        }
-    }
-    parts.push_back(cur);
+    std::vector<std::string> parts = absl::StrSplit(raw, '.');
     if (parts.size() >= 3) {
         catalog = parts[0];
         schema = parts[1];
@@ -162,7 +150,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
             }
             a.credential = OptionalRef(&kv.second, "credential", "credential_ref",
                                        ChildPath("attachments." + kv.first, "credential"));
-            p.attachments.emplace(Lower(a.name), std::move(a));
+            p.attachments.emplace(absl::AsciiStrToLower(a.name), std::move(a));
         }
     }
     if (auto *auth = root.Get("auth")) {
@@ -182,7 +170,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
         YamlRejectUnknownKeys(*lake, {"kind", "alias", "catalog", "catalog_env", "catalog_ref",
                                       "data_path", "read_only", "bootstrap_sql", "init_sql",
                                       "extensions", "s3"});
-        auto kind = Lower(lake->GetString("kind", "memory"));
+        auto kind = absl::AsciiStrToLower(lake->GetString("kind", "memory"));
         if (kind == "ducklake") {
             p.lake.kind = LakeKind::Ducklake;
         } else if (kind == "memory") {
@@ -200,11 +188,9 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
         if (p.lake.bootstrap_sql_path.empty()) {
             p.lake.bootstrap_sql_path = lake->GetString("init_sql");
         }
-        if (p.lake.bootstrap_sql_path.find('\n') != std::string::npos ||
-            ddb::StringUtil::StartsWith(ddb::StringUtil::Lower(p.lake.bootstrap_sql_path),
-                                        "create") ||
-            ddb::StringUtil::StartsWith(ddb::StringUtil::Lower(p.lake.bootstrap_sql_path),
-                                        "insert")) {
+        auto bootstrap_lower = absl::AsciiStrToLower(p.lake.bootstrap_sql_path);
+        if (absl::StrContains(p.lake.bootstrap_sql_path, '\n') ||
+            bootstrap_lower.starts_with("create") || bootstrap_lower.starts_with("insert")) {
             p.lake.bootstrap_sql = p.lake.bootstrap_sql_path;
             p.lake.bootstrap_sql_path.clear();
         }
@@ -266,7 +252,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
     }
     p.functions.clear();
     for (auto &fn : StringList(root.Get("functions"), "functions")) {
-        auto lower = Lower(fn);
+        auto lower = NormalizeSqlIdent(fn);
         if (IsAlwaysDeniedFunction(lower)) {
             throw PolicyError("functions: '" + fn + "' is never allowlisted");
         }
@@ -333,9 +319,13 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 
 } // namespace
 
+std::string NormalizeSqlIdent(const std::string &s) {
+    return absl::AsciiStrToLower(s);
+}
+
 std::string DefaultTableCatalog(const LakeSettings &lake) {
     if (!lake.alias.empty()) {
-        return ddb::StringUtil::Lower(lake.alias);
+        return NormalizeSqlIdent(lake.alias);
     }
     return lake.kind == LakeKind::Memory ? "memory" : "lake";
 }
@@ -343,9 +333,9 @@ std::string DefaultTableCatalog(const LakeSettings &lake) {
 QualifiedTable QualifyTable(const std::string &catalog, const std::string &schema,
                             const std::string &name, const LakeSettings &lake) {
     QualifiedTable q;
-    q.catalog = catalog.empty() ? DefaultTableCatalog(lake) : ddb::StringUtil::Lower(catalog);
-    q.schema = schema.empty() ? DefaultTableSchema() : ddb::StringUtil::Lower(schema);
-    q.name = ddb::StringUtil::Lower(name);
+    q.catalog = catalog.empty() ? DefaultTableCatalog(lake) : NormalizeSqlIdent(catalog);
+    q.schema = schema.empty() ? DefaultTableSchema() : NormalizeSqlIdent(schema);
+    q.name = NormalizeSqlIdent(name);
     return q;
 }
 
@@ -353,14 +343,14 @@ void ApplyTableDefaults(TablePolicy &table, const LakeSettings &lake) {
     if (table.catalog.empty()) {
         table.catalog = DefaultTableCatalog(lake);
     } else {
-        table.catalog = ddb::StringUtil::Lower(table.catalog);
+        table.catalog = NormalizeSqlIdent(table.catalog);
     }
     if (table.schema.empty()) {
         table.schema = DefaultTableSchema();
     } else {
-        table.schema = ddb::StringUtil::Lower(table.schema);
+        table.schema = NormalizeSqlIdent(table.schema);
     }
-    table.name = ddb::StringUtil::Lower(table.name);
+    table.name = NormalizeSqlIdent(table.name);
 }
 
 std::string QualifiedTable::Display() const {
@@ -430,7 +420,7 @@ void SandboxSpec::PutTable(TablePolicy table) {
 }
 
 bool SandboxSpec::FunctionAllowed(const std::string &name) const {
-    auto lower = Lower(name);
+    auto lower = NormalizeSqlIdent(name);
     if (IsAlwaysDeniedFunction(lower)) {
         return false;
     }
@@ -441,15 +431,15 @@ bool LocationContributesAllowedPath(const std::string &location) {
     if (location.empty()) {
         return false;
     }
-    auto lower = Lower(location);
-    if (lower.rfind("postgres://", 0) == 0 || lower.rfind("postgresql://", 0) == 0 ||
-        lower.rfind("mysql://", 0) == 0 || lower.rfind("sqlite://", 0) == 0) {
+    auto lower = absl::AsciiStrToLower(location);
+    if (lower.starts_with("postgres://") || lower.starts_with("postgresql://") ||
+        lower.starts_with("mysql://") || lower.starts_with("sqlite://")) {
         return false;
     }
-    if (location.find("://") != std::string::npos) {
+    if (absl::StrContains(location, "://")) {
         return true;
     }
-    if (lower.find("host=") != std::string::npos && lower.find("dbname=") != std::string::npos) {
+    if (absl::StrContains(lower, "host=") && absl::StrContains(lower, "dbname=")) {
         return false;
     }
     return true;
@@ -513,24 +503,21 @@ bool IsAlwaysDeniedTableFunction(const std::string &name) {
     // Spec validation deny-list (table-function names never allowlisted).
     // Prefixes cover 2.0 surfaces that reach the network, filesystem, another
     // instance, or config (Quack, Iceberg/Glue catalogs, parquet metadata, …).
-    auto n = Lower(name);
-    if (ddb::StringUtil::StartsWith(n, "postgres_") || ddb::StringUtil::StartsWith(n, "duckdb_") ||
-        ddb::StringUtil::StartsWith(n, "ducklake_") || ddb::StringUtil::StartsWith(n, "pragma_") ||
-        ddb::StringUtil::StartsWith(n, "sqlite_") || ddb::StringUtil::StartsWith(n, "mysql_") ||
-        ddb::StringUtil::StartsWith(n, "read_") || ddb::StringUtil::StartsWith(n, "quack_") ||
-        ddb::StringUtil::StartsWith(n, "iceberg_") || ddb::StringUtil::StartsWith(n, "parquet_") ||
-        ddb::StringUtil::StartsWith(n, "glue_") ||
-        ddb::StringUtil::StartsWith(n, "cloudformation_") ||
-        ddb::StringUtil::StartsWith(n, "odbc_") || ddb::StringUtil::StartsWith(n, "azure_") ||
-        ddb::StringUtil::StartsWith(n, "http_") || ddb::StringUtil::StartsWith(n, "https_") ||
-        ddb::StringUtil::StartsWith(n, "s3_") || ddb::StringUtil::StartsWith(n, "aws_") ||
-        ddb::StringUtil::StartsWith(n, "__aws__") || ddb::StringUtil::StartsWith(n, "delta_") ||
-        ddb::StringUtil::StartsWith(n, "lance_") ||
-        ddb::StringUtil::StartsWith(n, "set_iceberg_") ||
-        ddb::StringUtil::StartsWith(n, "remove_iceberg_") ||
-        ddb::StringUtil::StartsWith(n, "fuzz") ||
-        n.find("external_resource") != std::string::npos || n.find("secret") != std::string::npos ||
-        ddb::StringUtil::EndsWith(n, "_scan")) {
+    auto n = NormalizeSqlIdent(name);
+    static constexpr const char *kDeniedPrefixes[] = {
+        "postgres_", "duckdb_",      "ducklake_",       "pragma_",
+        "sqlite_",   "mysql_",       "read_",           "quack_",
+        "iceberg_",  "parquet_",     "glue_",           "cloudformation_",
+        "odbc_",     "azure_",       "http_",           "https_",
+        "s3_",       "aws_",         "__aws__",         "delta_",
+        "lance_",    "set_iceberg_", "remove_iceberg_", "fuzz"};
+    for (const char *p : kDeniedPrefixes) {
+        if (n.starts_with(p)) {
+            return true;
+        }
+    }
+    if (absl::StrContains(n, "external_resource") || absl::StrContains(n, "secret") ||
+        n.ends_with("_scan")) {
         return true;
     }
     static const std::unordered_set<std::string> kExact = {"glob",
@@ -575,11 +562,10 @@ bool IsAlwaysDeniedTableFunction(const std::string &name) {
 }
 
 bool IsSecretRelatedName(const std::string &name) {
-    auto n = Lower(name);
-    return n.find("secret") != std::string::npos || n.find("password") != std::string::npos ||
-           n.find("access_key") != std::string::npos ||
-           n.find("session_token") != std::string::npos ||
-           n.find("pgpassword") != std::string::npos || n.find("passfile") != std::string::npos ||
+    auto n = NormalizeSqlIdent(name);
+    return absl::StrContains(n, "secret") || absl::StrContains(n, "password") ||
+           absl::StrContains(n, "access_key") || absl::StrContains(n, "session_token") ||
+           absl::StrContains(n, "pgpassword") || absl::StrContains(n, "passfile") ||
            n == "current_setting" || n == "load_aws_credentials" || n == "which_secret";
 }
 
@@ -719,18 +705,10 @@ bool ParseDurationMs(const std::string &raw, int64_t *out_ms) {
     if (!out_ms) {
         return false;
     }
-    size_t a = 0;
-    while (a < raw.size() && std::isspace(static_cast<unsigned char>(raw[a]))) {
-        a++;
-    }
-    size_t b = raw.size();
-    while (b > a && std::isspace(static_cast<unsigned char>(raw[b - 1]))) {
-        b--;
-    }
-    if (a >= b) {
+    std::string s(absl::StripAsciiWhitespace(raw));
+    if (s.empty()) {
         return false;
     }
-    std::string s = raw.substr(a, b - a);
     if (s[0] == '-') {
         return false;
     }
@@ -750,10 +728,7 @@ bool ParseDurationMs(const std::string &raw, int64_t *out_ms) {
     } catch (...) {
         return false;
     }
-    auto unit = s.substr(i);
-    for (char &c : unit) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
+    auto unit = absl::AsciiStrToLower(s.substr(i));
     int64_t mul = 1000; // bare integer = seconds
     if (unit.empty() || unit == "s") {
         mul = 1000;
@@ -777,19 +752,11 @@ bool ParseExpiresAtMs(const std::string &raw, int64_t *out_ms) {
     if (!out_ms) {
         return false;
     }
-    size_t a = 0;
-    while (a < raw.size() && std::isspace(static_cast<unsigned char>(raw[a]))) {
-        a++;
-    }
-    size_t b = raw.size();
-    while (b > a && std::isspace(static_cast<unsigned char>(raw[b - 1]))) {
-        b--;
-    }
-    if (a >= b) {
+    std::string s(absl::StripAsciiWhitespace(raw));
+    if (s.empty()) {
         return false;
     }
-    std::string s = raw.substr(a, b - a);
-    bool digits = !s.empty();
+    bool digits = true;
     for (char c : s) {
         if (!std::isdigit(static_cast<unsigned char>(c))) {
             digits = false;

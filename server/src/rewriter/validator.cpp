@@ -1,6 +1,9 @@
 #include "rewriter/validator.hpp"
 #include "common/error.hpp"
 
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+
 #include "duckdb/parser/tableref/at_clause.hpp"
 #include "duckdb/parser/tableref/pivotref.hpp"
 
@@ -10,10 +13,6 @@ using namespace common;
 using namespace config;
 namespace {
 
-std::string Lower(const std::string &s) {
-    return ddb::StringUtil::Lower(s);
-}
-
 bool IsCte(const ValidationContext &ctx, const ddb::BaseTableRef &base) {
     // Qualified names never match a CTE.
     const auto &qn = base.GetQualifiedName();
@@ -21,7 +20,7 @@ bool IsCte(const ValidationContext &ctx, const ddb::BaseTableRef &base) {
         return false;
     }
     for (auto it = ctx.cte_scope.rbegin(); it != ctx.cte_scope.rend(); ++it) {
-        if (it->count(Lower(IdentName(base.Table())))) {
+        if (it->count(NormalizeSqlIdent(IdentName(base.Table())))) {
             return true;
         }
     }
@@ -33,7 +32,7 @@ void PushCteFrame(ValidationContext &ctx) {
 }
 
 void AddCteName(ValidationContext &ctx, const std::string &name) {
-    ctx.cte_scope.back().insert(Lower(name));
+    ctx.cte_scope.back().insert(NormalizeSqlIdent(name));
 }
 
 void PopCteFrame(ValidationContext &ctx) {
@@ -89,7 +88,7 @@ void ValidateAtClause(ddb::AtClause &at) {
     if (!at.ExpressionMutable()) {
         throw SqlRejected("AT clause must be a constant literal");
     }
-    auto unit = Lower(IdentName(at.Unit()));
+    auto unit = NormalizeSqlIdent(IdentName(at.Unit()));
     auto &expr = *at.ExpressionMutable();
     if (unit == "version") {
         if (!IsIntegerLiteral(expr)) {
@@ -155,12 +154,11 @@ void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx) {
             break;
         }
         auto looks_like_path = [](const std::string &name) {
-            return name.find("://") != std::string::npos || name.find('/') != std::string::npos ||
-                   name.find('\\') != std::string::npos ||
-                   ddb::StringUtil::EndsWith(ddb::StringUtil::Lower(name), ".parquet") ||
-                   ddb::StringUtil::EndsWith(ddb::StringUtil::Lower(name), ".csv") ||
-                   ddb::StringUtil::EndsWith(ddb::StringUtil::Lower(name), ".json") ||
-                   ddb::StringUtil::EndsWith(ddb::StringUtil::Lower(name), ".arrows");
+            auto lower = absl::AsciiStrToLower(name);
+            return absl::StrContains(name, "://") || absl::StrContains(name, '/') ||
+                   absl::StrContains(name, '\\') || lower.ends_with(".parquet") ||
+                   lower.ends_with(".csv") || lower.ends_with(".json") ||
+                   lower.ends_with(".arrows");
         };
         const auto &qn = base.GetQualifiedName();
         if (looks_like_path(IdentName(qn.Name())) || looks_like_path(IdentName(qn.Schema())) ||
@@ -319,19 +317,20 @@ void SqlValidator::Validate(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>
 
 std::string SettingOrCallName(const ddb::SQLStatement &st) {
     if (st.type == ddb::StatementType::SET_STATEMENT) {
-        return Lower(IdentName(st.Cast<ddb::SetStatement>().name));
+        return NormalizeSqlIdent(IdentName(st.Cast<ddb::SetStatement>().name));
     }
     if (st.type == ddb::StatementType::PRAGMA_STATEMENT) {
         auto &pr = st.Cast<ddb::PragmaStatement>();
-        return pr.info ? Lower(IdentName(pr.info->name)) : std::string();
+        return pr.info ? NormalizeSqlIdent(IdentName(pr.info->name)) : std::string();
     }
     if (st.type == ddb::StatementType::CALL_STATEMENT) {
         auto &call = st.Cast<ddb::CallStatement>();
         if (call.function &&
             call.function->GetExpressionClass() == ddb::ExpressionClass::FUNCTION) {
-            return Lower(IdentName(call.function->Cast<ddb::FunctionExpression>().FunctionName()));
+            return NormalizeSqlIdent(
+                IdentName(call.function->Cast<ddb::FunctionExpression>().FunctionName()));
         }
-        return call.function ? Lower(call.function->ToString()) : std::string();
+        return call.function ? absl::AsciiStrToLower(call.function->ToString()) : std::string();
     }
     return {};
 }
@@ -341,13 +340,13 @@ void RejectDeniedStatement(const ddb::SQLStatement &st) {
         return;
     }
     auto named = SettingOrCallName(st);
-    if (named.find("user_agent") != std::string::npos) {
+    if (absl::StrContains(named, "user_agent")) {
         throw SqlRejected("user_agent is denied");
     }
-    if (named.find("agent") != std::string::npos) {
+    if (absl::StrContains(named, "agent")) {
         throw SqlRejected("agent mode is denied");
     }
-    if (named.find("quack") != std::string::npos || named == "whoami") {
+    if (absl::StrContains(named, "quack") || named == "whoami") {
         throw SqlRejected("Quack is denied");
     }
     if (!named.empty() && IsSecretRelatedName(named)) {
