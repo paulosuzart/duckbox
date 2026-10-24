@@ -88,7 +88,16 @@ class Duckbox:
         self.close()
 
 
-def _flight_headers(sandbox: str, key: str = "", caller: str = "local") -> list[tuple[str, str]]:
+def resolve_token(token: Optional[str] = None) -> str:
+    """Explicit token wins; otherwise DUCKBOX_TOKEN. Empty means no Bearer header. Never logs."""
+    if token:
+        return token
+    return os.environ.get("DUCKBOX_TOKEN") or ""
+
+
+def _flight_headers(
+    sandbox: str, key: str = "", caller: str = "local", token: str = ""
+) -> list[tuple[str, str]]:
     """Per-RPC headers. There is no x-duckbox-spec-dir; bootstrap SQL is inlined in the spec body."""
     headers = [
         ("x-duckbox-sandbox", sandbox),
@@ -96,6 +105,8 @@ def _flight_headers(sandbox: str, key: str = "", caller: str = "local") -> list[
     ]
     if key:
         headers.append(("x-duckbox-key", key))
+    if token:
+        headers.append(("authorization", f"Bearer {token}"))
     return headers
 
 
@@ -105,11 +116,13 @@ def create_sandbox(
     spec: Optional[PathLike] = None,
     url: Optional[str] = None,
     caller: str = "local",
+    token: Optional[str] = None,
 ) -> str:
-    """Trusted-caller CreateSandbox (Flight DoAction). Idempotent if content matches."""
+    """CreateSandbox (Flight DoAction). Sends Authorization: Bearer when token / DUCKBOX_TOKEN is set."""
     import pyarrow.flight as flight
 
     url = url or os.environ.get("DUCKBOX_URL", DEFAULT_URL)
+    token = resolve_token(token)
     spec_path = Path(spec) if spec else default_spec_path()
     yaml_text = spec_path.read_text()
     if not yaml_text.startswith("id:"):
@@ -127,7 +140,7 @@ def create_sandbox(
             break
     client = flight.FlightClient(url)
     options = flight.FlightCallOptions(
-        headers=[(k.encode(), v.encode()) for k, v in _flight_headers(sandbox, key, caller)]
+        headers=[(k.encode(), v.encode()) for k, v in _flight_headers(sandbox, key, caller, token)]
     )
     action = flight.Action("CreateSandbox", yaml_text.encode("utf-8"))
     chunks = list(client.do_action(action, options))
@@ -139,16 +152,23 @@ def connect(
     key: str = "",
     url: Optional[str] = None,
     retries: int = 20,
+    token: Optional[str] = None,
+    caller: str = "local",
 ) -> Duckbox:
     """ADBC Flight SQL connection to a named sandbox. Retries only connection-refused."""
     url = url or os.environ.get("DUCKBOX_URL", DEFAULT_URL)
     sandbox = os.environ.get("DUCKBOX_SANDBOX", sandbox)
+    token = resolve_token(token)
     kwargs = {
         "adbc.flight.sql.rpc.call_header.x-duckbox-sandbox": sandbox,
-        "adbc.flight.sql.rpc.call_header.x-duckbox-caller": "local",
+        "adbc.flight.sql.rpc.call_header.x-duckbox-caller": caller,
     }
     if key:
         kwargs["adbc.flight.sql.rpc.call_header.x-duckbox-key"] = key
+    if token:
+        # Official ADBC option plus the same lowercase call header JDBC/Flight use.
+        kwargs["adbc.flight.sql.authorization_header"] = f"Bearer {token}"
+        kwargs["adbc.flight.sql.rpc.call_header.authorization"] = f"Bearer {token}"
 
     last: Optional[BaseException] = None
     for _ in range(max(retries, 1)):
@@ -172,7 +192,8 @@ def query(
     sandbox: str = DEFAULT_SANDBOX,
     key: str = "",
     url: Optional[str] = None,
+    token: Optional[str] = None,
 ) -> pd.DataFrame:
     """One-shot connect + SELECT. Prefer `connect()` when issuing several queries."""
-    with connect(sandbox=sandbox, key=key, url=url) as db:
+    with connect(sandbox=sandbox, key=key, url=url, token=token) as db:
         return db.query(sql, params)

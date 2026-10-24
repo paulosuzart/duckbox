@@ -46,6 +46,8 @@ int main(int argc, char **argv) {
 		sub->add_option("--id", req.id, "Sandbox id");
 		sub->add_option("--key", req.key, "Bound tenant key");
 		sub->add_option("--caller", req.caller, "Trusted caller identity")->capture_default_str();
+		sub->add_option("--token", req.token,
+		                "Bearer token (JWT or auth.bearer_secrets); else DUCKBOX_TOKEN");
 		sub->add_option("--id-prefix", req.id_prefix, "List filter: id prefix");
 		sub->add_option("--key-prefix", req.key_prefix, "List filter: key prefix");
 		sub->add_option("--policy-class", req.policy_class, "List filter: policy class");
@@ -85,7 +87,8 @@ int main(int argc, char **argv) {
 	auto *node_drain = node->add_subcommand("drain", "Stop taking new leases, release owned sandboxes, deregister");
 	node_drain->add_option("--url", node_req.url, "Internal listener URL")->capture_default_str();
 	node_drain->add_option("--caller", node_req.caller, "Trusted caller identity")->capture_default_str();
-	node_drain->add_option("--token", node_req.token, "Bearer token (JWT or auth.bearer_secrets)");
+	node_drain->add_option("--token", node_req.token,
+	                       "Bearer token (JWT or auth.bearer_secrets); else DUCKBOX_TOKEN");
 	node_drain->add_option("--peer-secret", node_req.peer_secret,
 	                       "Peer secret for the internal handshake (literal, env:NAME, or file:/path)");
 	node_drain->add_option("--timeout", node_req.timeout_ms, "Finish in-flight queries wait (ms)")->capture_default_str();
