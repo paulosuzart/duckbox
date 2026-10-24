@@ -524,7 +524,11 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
                 add("lease.access_key_env",
                     "required (with lease.secret_key_env) for the S3 probe");
             } else if (issues.empty()) {
-                auto err = ProbeControlPlaneS3(cfg.lease);
+                auto lease = cfg.lease;
+                if (lease.node_id.empty()) {
+                    lease.node_id = cfg.name;
+                }
+                auto err = ProbeControlPlaneS3(lease);
                 if (!err.empty()) {
                     add("lease", err);
                 }

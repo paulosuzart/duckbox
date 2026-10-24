@@ -52,7 +52,8 @@ class TenantSandbox {
     ~TenantSandbox();
 
     void Warmup(bool validate_lake); // attach lake, then disable external access +
-                                     // lock_configuration
+                                     // lock_configuration. Hardening SET or read-back
+                                     // mismatch fails closed.
     void
     Passivate(const char *reason = "shutdown"); // frees DuckDB; definition stays in the registry
     void Interrupt(); // abort an in-flight statement (fence); safe from another thread
@@ -100,6 +101,25 @@ class TenantSandbox {
     std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
     int64_t last_used_wall_ms_ = 0;
     int warmup_count_ = 0;
+};
+
+// Test seam: while alive, Warmup treats any hardening SET whose SQL contains
+// needle as failed. The DuckDB connection is discarded. Empty needle disables.
+class WarmupHardeningFailure {
+  public:
+    explicit WarmupHardeningFailure(std::string sql_needle);
+    ~WarmupHardeningFailure();
+    WarmupHardeningFailure(const WarmupHardeningFailure &) = delete;
+    WarmupHardeningFailure &operator=(const WarmupHardeningFailure &) = delete;
+};
+
+// Test seam: while alive, hardening read-back reports a mismatch for setting.
+class WarmupHardeningMismatch {
+  public:
+    explicit WarmupHardeningMismatch(std::string setting_name);
+    ~WarmupHardeningMismatch();
+    WarmupHardeningMismatch(const WarmupHardeningMismatch &) = delete;
+    WarmupHardeningMismatch &operator=(const WarmupHardeningMismatch &) = delete;
 };
 
 // List item for ListSandboxes. state is warm | passive | defined.

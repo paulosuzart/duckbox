@@ -146,4 +146,94 @@ void duckbox::test::RunRuntimeTests() {
 		Expect(rt.InstanceState(wr.id) == "defined", "expire removes the instance");
 		Expect(defs_rt->Get(wr.id).id == wr.id, "expire keeps the definition");
 	}
+
+	{
+		WarmupHardeningFailure fail("enable_external_access");
+		TenantSandbox box(daemon, loaded, key_a, spec_dir);
+		ExpectThrowContains([&] { box.Warmup(false); }, "sandbox hardening failed",
+		                    "enable_external_access failure is a clear hardening error");
+		Expect(!box.Warm(), "failed enable_external_access does not hand out a connection");
+	}
+
+	{
+		auto leases = std::make_shared<SingleNodeLeaseManager>();
+		auto defs = std::make_shared<MemorySandboxRegistry>();
+		SandboxRuntime rt(daemon, leases, defs);
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "harden-ext";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		rec = defs->Create(rec);
+		WarmupHardeningFailure fail("enable_external_access");
+		ExpectThrowContains([&] { rt.Get(rec); }, "sandbox hardening failed",
+		                    "runtime Get fails closed when enable_external_access fails");
+		Expect(rt.Size() == 0 && rt.WarmCount() == 0,
+		       "failed enable_external_access does not create a sandbox");
+	}
+
+	{
+		auto leases = std::make_shared<SingleNodeLeaseManager>();
+		auto defs = std::make_shared<MemorySandboxRegistry>();
+		SandboxRuntime rt(daemon, leases, defs);
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "harden-lock";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		rec = defs->Create(rec);
+		WarmupHardeningFailure fail("lock_configuration");
+		ExpectThrowContains([&] { rt.Get(rec); }, "sandbox hardening failed",
+		                    "runtime Get fails closed when lock_configuration fails");
+		Expect(rt.Size() == 0, "failed lock_configuration does not create a sandbox");
+	}
+
+	{
+		auto leases = std::make_shared<SingleNodeLeaseManager>();
+		auto defs = std::make_shared<MemorySandboxRegistry>();
+		SandboxRuntime rt(daemon, leases, defs);
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "harden-auto";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		rec = defs->Create(rec);
+		WarmupHardeningFailure fail("autoinstall_known_extensions");
+		ExpectThrowContains([&] { rt.Get(rec); }, "sandbox hardening failed",
+		                    "runtime Get fails closed when autoinstall SET fails");
+		Expect(rt.Size() == 0, "failed autoinstall SET does not create a sandbox");
+	}
+
+	{
+		auto bad = loaded;
+		bad.resources.memory_limit = "not-a-size";
+		TenantSandbox box(daemon, bad, key_a, spec_dir);
+		ExpectThrowContains([&] { box.Warmup(false); }, "sandbox hardening failed",
+		                    "invalid memory_limit SET fails closed with a clear error");
+		Expect(!box.Warm(), "failed memory_limit does not hand out a connection");
+	}
+
+	{
+		WarmupHardeningMismatch mismatch("enable_external_access");
+		TenantSandbox box(daemon, loaded, key_a, spec_dir);
+		ExpectThrowContains([&] { box.Warmup(false); }, "current_setting('enable_external_access')",
+		                    "read-back mismatch of enable_external_access is a clear error");
+		Expect(!box.Warm(), "read-back mismatch does not hand out a connection");
+	}
+
+	{
+		auto leases = std::make_shared<SingleNodeLeaseManager>();
+		auto defs = std::make_shared<MemorySandboxRegistry>();
+		SandboxRuntime rt(daemon, leases, defs);
+		auto rec = RecordFromSpec(loaded, spec_dir);
+		rec.id = "harden-mismatch";
+		rec.key = key_a.raw;
+		rec.spec.id = rec.id;
+		rec.spec.bound_key = rec.key;
+		rec = defs->Create(rec);
+		WarmupHardeningMismatch mismatch("enable_external_access");
+		ExpectThrowContains([&] { rt.Get(rec); }, "current_setting('enable_external_access')",
+		                    "runtime Get fails closed on hardening read-back mismatch");
+		Expect(rt.Size() == 0, "read-back mismatch does not create a sandbox");
+	}
 }

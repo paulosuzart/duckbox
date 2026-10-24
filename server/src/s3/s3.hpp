@@ -10,6 +10,7 @@
 
 #include "node/daemon_config.hpp"
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -73,7 +74,21 @@ class FaultyS3ControlClient final : public S3ControlClient {
     bool down_ = false;
 };
 // Conditional PUT If-None-Match:*. Empty string = ok (200/204/412); else error.
+// Each probe uses prefix/.duckbox-cw-probe-<node_id>-<nonce> so concurrent
+// daemons never share a key. GET after PUT retries a transient 404; the
+// calling node always deletes its own probe object. Persistent GET failure
+// is still fatal.
+struct ControlPlaneProbeOptions {
+    int max_get_attempts = 5;
+    int initial_backoff_ms = 100;
+    std::function<void(int milliseconds)> sleep; // empty = this_thread::sleep_for
+    std::string node_id;                         // empty = "node"
+    std::string nonce;                           // empty = RandomHex(8)
+};
+
 std::string ProbeControlPlaneS3(const node::LeaseSettings &lease);
+std::string ProbeControlPlaneS3(const S3ControlClient &client, const std::string &prefix,
+                                const ControlPlaneProbeOptions &opts = {});
 
 } // namespace s3
 

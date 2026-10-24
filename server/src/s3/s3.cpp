@@ -1,5 +1,6 @@
 #include "s3/s3.hpp"
 #include "common/crypto.hpp"
+#include "common/json.hpp"
 #include "s3/s3_credentials.hpp"
 #include "s3/secrets.hpp"
 
@@ -25,11 +26,14 @@
 #include <aws/sts/STSClient.h>
 #endif
 
+#include <chrono>
 #include <cstdlib>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace duckbox {
@@ -513,28 +517,100 @@ const std::string &FaultyS3ControlClient::bucket() const {
 std::string ProbeControlPlaneS3(const LeaseSettings &lease) {
     try {
         auto client = MakeS3ControlClient(lease);
-        std::string key = lease.prefix;
-        if (!key.empty() && key.back() != '/') {
-            key += '/';
+        ControlPlaneProbeOptions opts;
+        opts.node_id = lease.node_id;
+        return ProbeControlPlaneS3(*client, lease.prefix, opts);
+    } catch (const std::exception &e) {
+        return e.what();
+    }
+}
+
+namespace {
+
+std::string SanitizeProbeToken(std::string s) {
+    if (s.empty()) {
+        return "node";
+    }
+    for (char &c : s) {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '-' || c == '_' || c == '.')) {
+            c = '-';
         }
-        key += ".duckbox-cw-probe";
-        auto put = client->Put(key, "duckbox-lease-probe", "", "*");
+    }
+    return s;
+}
+
+std::string ControlPlaneProbeKey(const std::string &prefix, const std::string &node_id,
+                                 const std::string &nonce) {
+    std::string key = prefix;
+    if (!key.empty() && key.back() != '/') {
+        key += '/';
+    }
+    key += ".duckbox-cw-probe-";
+    key += SanitizeProbeToken(node_id);
+    key += '-';
+    key += nonce.empty() ? RandomHex(8) : SanitizeProbeToken(nonce);
+    return key;
+}
+
+} // namespace
+
+std::string ProbeControlPlaneS3(const S3ControlClient &client, const std::string &prefix,
+                                const ControlPlaneProbeOptions &opts) {
+    std::string key;
+    try {
+        key = ControlPlaneProbeKey(prefix, opts.node_id, opts.nonce);
+        auto put = client.Put(key, "duckbox-lease-probe", "", "*");
         if (put.status != 200 && put.status != 204 && put.status != 412) {
             return put.error.empty() ? "conditional PUT (If-None-Match) failed" : put.error;
         }
-        auto got = client->Get(key);
-        if (got.status != 200) {
-            if (put.status == 200 || put.status == 204) {
-                return got.error.empty() ? "probe GET after PUT failed" : got.error;
-            }
-            return "";
+        const int attempts = opts.max_get_attempts > 0 ? opts.max_get_attempts : 5;
+        int backoff_ms = opts.initial_backoff_ms > 0 ? opts.initial_backoff_ms : 100;
+        auto sleeper = opts.sleep;
+        if (!sleeper) {
+            sleeper = [](int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); };
         }
-        auto del = client->Delete(key, got.etag);
+        const bool wrote = put.status == 200 || put.status == 204;
+        S3Object got;
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            got = client.Get(key);
+            if (got.status == 200) {
+                break;
+            }
+            if (!wrote || got.status != 404 || attempt == attempts) {
+                if (wrote) {
+                    client.Delete(key, "");
+                    return got.error.empty() ? "probe GET after PUT failed" : got.error;
+                }
+                return "";
+            }
+            Json retry;
+            retry["event"] = "lease_probe_retry";
+            retry["key"] = key;
+            retry["status"] = got.status;
+            retry["attempt"] = attempt;
+            retry["backoff_ms"] = backoff_ms;
+            if (!got.error.empty()) {
+                retry["reason"] = got.error;
+            }
+            std::clog << retry.dump() << "\n";
+            sleeper(backoff_ms);
+            if (backoff_ms < 800) {
+                backoff_ms *= 2;
+            }
+        }
+        auto del = client.Delete(key, got.etag);
         if (del.status != 200 && del.status != 204 && del.status != 404 && del.status != 412) {
             return del.error.empty() ? "conditional DELETE (If-Match) failed" : del.error;
         }
         return "";
     } catch (const std::exception &e) {
+        if (!key.empty()) {
+            try {
+                client.Delete(key, "");
+            } catch (...) {
+            }
+        }
         return e.what();
     }
 }

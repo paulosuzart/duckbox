@@ -3,8 +3,52 @@
 
 #include "s3/s3.hpp"
 
+#include <atomic>
 #include <cstdlib>
+#include <memory>
 #include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+class Get404ThenInnerClient final : public duckbox::s3::S3ControlClient {
+  public:
+	Get404ThenInnerClient(std::shared_ptr<duckbox::s3::S3ControlClient> inner, int fail_count)
+		: inner_(std::move(inner)), remaining_(fail_count) {}
+
+	duckbox::s3::S3Object Get(const std::string &key) const override {
+		gets_++;
+		if (remaining_ > 0) {
+			remaining_--;
+			duckbox::s3::S3Object out;
+			out.status = 404;
+			out.error = "s3 GET " + key + " status 404";
+			return out;
+		}
+		return inner_->Get(key);
+	}
+	duckbox::s3::S3Object Put(const std::string &key, const std::string &body,
+							  const std::string &if_match,
+							  const std::string &if_none_match) const override {
+		return inner_->Put(key, body, if_match, if_none_match);
+	}
+	duckbox::s3::S3Object Delete(const std::string &key, const std::string &if_match) const override {
+		return inner_->Delete(key, if_match);
+	}
+	std::vector<std::string> ListKeys(const std::string &prefix) const override {
+		return inner_->ListKeys(prefix);
+	}
+	const std::string &bucket() const override { return inner_->bucket(); }
+	int gets() const { return gets_; }
+
+  private:
+	std::shared_ptr<duckbox::s3::S3ControlClient> inner_;
+	mutable int remaining_ = 0;
+	mutable int gets_ = 0;
+};
+
+} // namespace
 
 void duckbox::test::RunS3ClientTests() {
 	using namespace duckbox;
@@ -90,4 +134,67 @@ void duckbox::test::RunS3ClientTests() {
 	probe.prefix = "leases/";
 	auto probe_err = ProbeControlPlaneS3(probe);
 	Expect(!probe_err.empty(), "lease probe against a closed port reports an error");
+
+	{
+		auto inner = MakeMemoryS3ControlClient("control");
+		Get404ThenInnerClient transient(inner, 2);
+		std::vector<int> sleeps;
+		ControlPlaneProbeOptions opts;
+		opts.max_get_attempts = 5;
+		opts.initial_backoff_ms = 100;
+		opts.sleep = [&](int ms) { sleeps.push_back(ms); };
+		auto err = ProbeControlPlaneS3(transient, "leases/", opts);
+		Expect(err.empty(), "lease probe succeeds after transient 404 then GET 200");
+		Expect(transient.gets() == 3, "lease probe GET retried twice then succeeded");
+		Expect(sleeps.size() == 2 && sleeps[0] == 100 && sleeps[1] == 200,
+			   "lease probe backs off 100ms then 200ms");
+	}
+
+	{
+		auto inner = MakeMemoryS3ControlClient("control");
+		Get404ThenInnerClient persistent(inner, 100);
+		std::vector<int> sleeps;
+		ControlPlaneProbeOptions opts;
+		opts.max_get_attempts = 5;
+		opts.initial_backoff_ms = 100;
+		opts.sleep = [&](int ms) { sleeps.push_back(ms); };
+		auto err = ProbeControlPlaneS3(persistent, "leases/", opts);
+		Expect(!err.empty() && err.find("404") != std::string::npos,
+			   "persistent probe GET 404 stays fatal");
+		Expect(persistent.gets() == 5, "persistent 404 exhausts five GET attempts");
+		Expect(sleeps.size() == 4 && sleeps[0] == 100 && sleeps[1] == 200 && sleeps[2] == 400 &&
+				   sleeps[3] == 800,
+			   "persistent 404 backs off 100/200/400/800ms");
+	}
+
+	{
+		auto mem = MakeMemoryS3ControlClient("control");
+		auto err = ProbeControlPlaneS3(*mem, "leases/");
+		Expect(err.empty(), "memory lease probe succeeds on first GET");
+		auto leftover = mem->ListKeys("leases/.duckbox-cw-probe");
+		Expect(leftover.empty(), "successful probe deletes its own unique key");
+	}
+
+	{
+		auto shared = MakeMemoryS3ControlClient("control");
+		std::atomic<int> ok{0};
+		std::vector<std::thread> ts;
+		for (int i = 0; i < 3; i++) {
+			ts.emplace_back([&, i] {
+				ControlPlaneProbeOptions opts;
+				opts.node_id = "node-" + std::to_string(i);
+				opts.sleep = [](int) {};
+				auto err = ProbeControlPlaneS3(*shared, "leases/", opts);
+				if (err.empty()) {
+					ok++;
+				}
+			});
+		}
+		for (auto &t : ts) {
+			t.join();
+		}
+		Expect(ok == 3, "three concurrent probes on a shared prefix all succeed");
+		auto leftover = shared->ListKeys("leases/.duckbox-cw-probe");
+		Expect(leftover.empty(), "concurrent probes each delete their own unique key");
+	}
 }
