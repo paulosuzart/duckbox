@@ -80,6 +80,7 @@
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/statement/set_statement.hpp"
 #include "duckdb/parser/tableref.hpp"
+#include "duckdb/parser/tableref/at_clause.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/parser/tableref/expressionlistref.hpp"
 #include "duckdb/parser/tableref/joinref.hpp"

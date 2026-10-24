@@ -1,11 +1,15 @@
 #include "metrics/metrics.hpp"
-#include "config/policy.hpp"
-#include "rewriter/tenant_key.hpp"
-#include "node/daemon_config.hpp"
 #include "common/error.hpp"
 #include "common/json.hpp"
+#include "config/policy.hpp"
+#include "lake/lake.hpp"
+#include "node/daemon_config.hpp"
+#include "rewriter/tenant_key.hpp"
 
 #include "httplib.h"
+
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
 
 #include <algorithm>
 #include <cctype>
@@ -33,13 +37,6 @@ const std::vector<double> kQueryBuckets = {0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 
 const std::vector<double> kLifeBuckets = {0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30};
 const std::vector<double> kFwdBuckets = {0.001, 0.005, 0.01, 0.025, 0.05, 0.1,
                                          0.25,  0.5,   1,    2.5,   5};
-
-std::string Lower(std::string s) {
-    for (char &c : s) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    return s;
-}
 
 bool AllowedName(const std::string &s) {
     if (s.empty() || s.size() > 32) {
@@ -194,47 +191,43 @@ const char *ClassifyRejection(const std::exception &e) {
     if (dynamic_cast<const PlanRejected *>(&e)) {
         return "plan";
     }
-    auto msg = Lower(e.what());
-    if (msg.find("table function") != std::string::npos) {
+    auto msg = absl::AsciiStrToLower(e.what());
+    if (absl::StrContains(msg, "table function")) {
         return "table_function";
     }
-    if (msg.find("function not allowlisted") != std::string::npos ||
-        msg.find("window function not allowlisted") != std::string::npos) {
+    if (absl::StrContains(msg, "function not allowlisted") ||
+        absl::StrContains(msg, "window function not allowlisted")) {
         return "function";
     }
-    if (msg.find("table not allowlisted") != std::string::npos) {
+    if (absl::StrContains(msg, "table not allowlisted")) {
         return "table";
     }
-    if (msg.find("column") != std::string::npos && msg.find("allowlist") != std::string::npos) {
+    if (absl::StrContains(msg, "column") && absl::StrContains(msg, "allowlist")) {
         return "column";
     }
-    if (msg.find("parser") != std::string::npos || msg.find("syntax error") != std::string::npos) {
+    if (absl::StrContains(msg, "parser") || absl::StrContains(msg, "syntax error")) {
         return "parse";
     }
-    if (msg.find("only select") != std::string::npos ||
-        msg.find("single statement") != std::string::npos ||
-        msg.find("empty query") != std::string::npos ||
-        msg.find("unsupported from") != std::string::npos) {
+    if (absl::StrContains(msg, "only select") || absl::StrContains(msg, "single statement") ||
+        absl::StrContains(msg, "empty query") || absl::StrContains(msg, "unsupported from")) {
         return "statement";
     }
     return nullptr;
 }
 
 const char *ClassifyLimit(const std::exception &e) {
-    auto msg = Lower(e.what());
-    if (msg.find("timeout") != std::string::npos) {
+    auto msg = absl::AsciiStrToLower(e.what());
+    if (absl::StrContains(msg, "timeout")) {
         return "timeout";
     }
-    if (msg.find("out of memory") != std::string::npos ||
-        msg.find("memory_limit") != std::string::npos ||
-        msg.find("memory limit") != std::string::npos) {
+    if (absl::StrContains(msg, "out of memory") || absl::StrContains(msg, "memory_limit") ||
+        absl::StrContains(msg, "memory limit")) {
         return "memory";
     }
-    if (msg.find("sandbox") != std::string::npos && msg.find("cap") != std::string::npos) {
+    if (absl::StrContains(msg, "sandbox") && absl::StrContains(msg, "cap")) {
         return "sandbox_cap";
     }
-    if (msg.find("max_result_rows") != std::string::npos ||
-        msg.find("row limit") != std::string::npos) {
+    if (absl::StrContains(msg, "max_result_rows") || absl::StrContains(msg, "row limit")) {
         return "rows";
     }
     return nullptr;
@@ -550,10 +543,7 @@ void SetMetrics(std::shared_ptr<IMetrics> m) {
 std::string RedactSecretsForAudit(const std::string &sql) {
     std::string s = sql;
     auto redact_quoted_after = [&](const std::string &kw) {
-        std::string lower = s;
-        for (char &c : lower) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
+        std::string lower = absl::AsciiStrToLower(s);
         std::string k = kw;
         size_t pos = 0;
         while ((pos = lower.find(k, pos)) != std::string::npos) {
@@ -649,7 +639,17 @@ void ObserveFailure(IMetrics &m, const Policy *policy, const TenantKey *key,
     }
     m.ObserveQuery(cls, outcome, cold, seconds, 0, 0);
     if (key && policy) {
-        WriteAuditLog(*key, *policy, seconds, 0, 0, outcome, rej ? rej : (lim ? lim : e.what()));
+        std::string sanitized;
+        const char *reason = nullptr;
+        if (rej) {
+            reason = rej;
+        } else if (lim) {
+            reason = lim;
+        } else {
+            sanitized = lake::RedactSecretText(e.what());
+            reason = sanitized.c_str();
+        }
+        WriteAuditLog(*key, *policy, seconds, 0, 0, outcome, reason);
     }
 }
 

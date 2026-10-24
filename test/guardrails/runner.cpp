@@ -7,6 +7,9 @@
 #include "rewriter/tenant_key.hpp"
 #include "sandbox/sandbox.hpp"
 
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+
 #include <iostream>
 #include <map>
 #include <memory>
@@ -22,14 +25,11 @@ using duckbox::test::TestDaemon;
 using duckbox::test::TestPolicy;
 
 std::string Trim(std::string s) {
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) {
-        s.pop_back();
-    }
-    return s;
+    return std::string(absl::StripTrailingAsciiWhitespace(s));
 }
 
 bool HasNeedle(const std::string &hay, const std::string &needle) {
-    return hay.find(needle) != std::string::npos;
+    return absl::StrContains(hay, needle);
 }
 
 } // namespace

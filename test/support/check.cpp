@@ -66,6 +66,29 @@ void ExpectThrowExact(const std::function<void()> &fn, const std::string &exact,
     }
 }
 
+std::string NormalizeGuess(std::string text, const std::string &guess) {
+    if (guess.empty()) {
+        return text;
+    }
+    size_t pos = 0;
+    while ((pos = text.find(guess, pos)) != std::string::npos) {
+        text.replace(pos, guess.size(), "<guess>");
+        pos += 7;
+    }
+    // DuckDB LINE/caret snippets, "did you mean", and gRPC debug vary
+    // with identifier length and call metadata. The oracle is the
+    // tenant-visible diagnostic once the guess itself is normalized.
+    const char *cuts[] = {"\n\nLINE ", "LINE 1:", "Candidate bindings", ". gRPC client debug",
+                          "gRPC client debug"};
+    for (auto *c : cuts) {
+        auto cut = text.find(c);
+        if (cut != std::string::npos) {
+            text.resize(cut);
+        }
+    }
+    return text;
+}
+
 int ReportAndExit(const char *suite) {
     std::cout << suite << " passed=" << g_passed << " failed=" << g_failed << "\n";
     return g_failed == 0 ? 0 : 1;

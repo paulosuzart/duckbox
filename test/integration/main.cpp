@@ -19,5 +19,6 @@ int main() {
     RunLambdaNewSyntaxRuntimeTests();
     RunLambdaOldSyntaxRuntimeTests();
     RunStorageFormatRuntimeTests();
+    RunSecretFlightTests();
     return ReportAndExit("integration");
 }

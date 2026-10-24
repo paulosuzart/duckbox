@@ -31,5 +31,6 @@ int main() {
     RunLambdaOldSyntaxTests();
     RunStorageFormatTests();
     RunDuckLakeAttachSqlTests();
+    RunLakeAttachSecretTests();
     return ReportAndExit("unit");
 }

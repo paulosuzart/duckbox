@@ -9,6 +9,7 @@ ARROW_APT_VERSION="${ARROW_APT_VERSION:-${ARROW_VERSION}-1}"
 ARROW_BUILD_PACKAGES=(
   ca-certificates lsb-release wget g++ cmake unzip curl zip tar
   pkg-config ninja-build git libssl-dev libcurl4-openssl-dev zlib1g-dev
+  libabsl-dev
 )
 ARROW_DEV_PACKAGES=(
   "libarrow-dev=${ARROW_APT_VERSION}"
@@ -110,7 +111,7 @@ EOF
   fi
   echo "Arrow ${installed} with Flight SQL (pinned ${ARROW_APT_VERSION})"
 elif [[ "$os" == "Darwin" ]]; then
-  brew install apache-arrow aws-sdk-cpp openssl@4 cmake ninja
+  brew install apache-arrow aws-sdk-cpp openssl@4 abseil cmake ninja
   echo "Arrow + aws-sdk-cpp via Homebrew (openssl@4; Flight SQL enabled in recent formulae)"
 else
   echo "Install Apache Arrow C++ with ARROW_FLIGHT=ON ARROW_FLIGHT_SQL=ON" >&2

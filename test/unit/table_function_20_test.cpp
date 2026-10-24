@@ -26,6 +26,8 @@ void duckbox::test::RunTableFunction20Tests() {
         "parquet_bloom_probe",
         "json_execute_serialized_sql",
         "load_aws_credentials",
+        "which_secret",
+        "duckdb_secrets",
         "glue_partitions",
         "odbc_query",
         "start_ui",

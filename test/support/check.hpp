@@ -20,6 +20,8 @@ void ExpectThrowContains(const std::function<void()> &fn, const std::string &nee
                          const std::string &msg);
 void ExpectThrowExact(const std::function<void()> &fn, const std::string &exact,
                       const std::string &msg);
+// Replace every occurrence of `guess` so right/wrong secret guesses compare equal.
+std::string NormalizeGuess(std::string text, const std::string &guess);
 int ReportAndExit(const char *suite);
 
 node::DaemonConfig TestDaemon();

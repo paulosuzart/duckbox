@@ -15,7 +15,10 @@
 #include "httplib.h"
 
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
+#include <iostream>
+#include <sstream>
 #include <thread>
 
 void duckbox::test::RunSandboxExecTests() {
@@ -43,6 +46,207 @@ void duckbox::test::RunSandboxExecTests() {
 
     auto yaml_out = box_yaml.Execute("SELECT id, title, amount FROM deals ORDER BY id");
     Expect(yaml_out.row_count == 1, "yaml policy execute tenant 21");
+    {
+        const char *pw = "duckbox-exec-catalog-secret-aa01";
+        const char *dsn = "dbname=lake host=127.0.0.1 port=5432 user=duckbox "
+                          "password=duckbox-exec-catalog-secret-aa01";
+        auto injected = std::string("IO Error: Failed to query most recent snapshot for DuckLake: "
+                                    "Unable to connect to Postgres at \"") +
+                        dsn + "\"";
+        QueryErrorInjection down(injected);
+        std::ostringstream log;
+        auto *old = std::clog.rdbuf(log.rdbuf());
+        std::string err;
+        try {
+            box_yaml.Execute("SELECT count(*) FROM deals");
+            std::clog.rdbuf(old);
+            Expect(false, "catalog-down Execute must fail");
+        } catch (const std::exception &e) {
+            std::clog.rdbuf(old);
+            err = e.what();
+        }
+        Expect(err.find(kCatalogUnavailableClientError) != std::string::npos,
+               "catalog-down Execute uses the generic catalog message");
+        Expect(err.find(pw) == std::string::npos && err.find(dsn) == std::string::npos,
+               "catalog-down Execute must not include password or DSN");
+        auto logged = log.str();
+        Expect(logged.find(pw) == std::string::npos, "operator log redacts catalog password");
+        Expect(logged.find(kCatalogUnavailableClientError) != std::string::npos ||
+                   logged.find("lake catalog unavailable") != std::string::npos,
+               "operator log records the catalog-down event");
+    }
+    {
+        // Single-connection failure (injection): keyword and URL DSNs must not
+        // leak on Execute, Describe, prepared, ExtractPlan.
+        struct DsnCase {
+            const char *label;
+            const char *pw;
+            const char *injected;
+        };
+        const DsnCase cases[] = {
+            {"keyword", "duckbox-kw-catalog-secret-aa11",
+             "IO Error: Unable to connect to Postgres at \"dbname=lake host=127.0.0.1 "
+             "port=5432 user=duckbox password=duckbox-kw-catalog-secret-aa11\""},
+            {"url", "duckbox-url-catalog-secret-bb22",
+             "IO Error: Unable to connect to Postgres at "
+             "\"postgresql://duckbox:duckbox-url-catalog-secret-bb22@127.0.0.1:5432/lake\""},
+        };
+        auto expect_generic = [&](const std::string &err, const char *pw,
+                                  const std::string &label) {
+            Expect(err.find(kCatalogUnavailableClientError) != std::string::npos,
+                   label + " uses the generic catalog message");
+            Expect(err.find(pw) == std::string::npos && err.find("password=") == std::string::npos,
+                   label + " must not include password or password=");
+        };
+        for (const auto &c : cases) {
+            QueryErrorInjection down(c.injected);
+            std::string exec_err;
+            try {
+                box_yaml.Execute("SELECT count(*) FROM deals");
+                Expect(false, std::string(c.label) + " Execute must fail");
+            } catch (const std::exception &e) {
+                exec_err = e.what();
+            }
+            expect_generic(exec_err, c.pw, std::string(c.label) + " Execute");
+
+            std::string desc_err;
+            try {
+                (void)box_yaml.DescribeRewritten("SELECT id FROM deals");
+                Expect(false, std::string(c.label) + " Describe must fail");
+            } catch (const std::exception &e) {
+                desc_err = e.what();
+            }
+            expect_generic(desc_err, c.pw, std::string(c.label) + " Describe");
+
+            std::string arrow_err;
+            try {
+                (void)box_yaml.DescribeRewrittenArrow("SELECT id FROM deals");
+                Expect(false, std::string(c.label) + " DescribeArrow must fail");
+            } catch (const std::exception &e) {
+                arrow_err = e.what();
+            }
+            expect_generic(arrow_err, c.pw, std::string(c.label) + " DescribeArrow");
+
+            std::string prep_err;
+            try {
+                std::vector<ddb::Value> params;
+                params.push_back(ddb::Value::INTEGER(1));
+                box_yaml.ExecuteRewritten("SELECT id FROM deals WHERE id = ?", params);
+                Expect(false, std::string(c.label) + " prepared must fail");
+            } catch (const std::exception &e) {
+                prep_err = e.what();
+            }
+            expect_generic(prep_err, c.pw, std::string(c.label) + " prepared");
+
+            std::string plan_err;
+            try {
+                (void)box_yaml.ExtractPlan("SELECT id FROM deals");
+                Expect(false, std::string(c.label) + " ExtractPlan must fail");
+            } catch (const std::exception &e) {
+                plan_err = e.what();
+            }
+            expect_generic(plan_err, c.pw, std::string(c.label) + " ExtractPlan");
+        }
+        std::string binder_err;
+        try {
+            (void)box_yaml.ExtractPlan("SELECT no_such_column FROM deals");
+        } catch (const std::exception &e) {
+            binder_err = e.what();
+        }
+        Expect(!binder_err.empty() &&
+                   binder_err.find(kCatalogUnavailableClientError) == std::string::npos,
+               "ExtractPlan binder errors stay as-is");
+    }
+    {
+        auto leaky = policy;
+        leaky.lake.catalog = "ducklake:postgres:dbname=lake password=dummysecretvalue";
+        TenantSandbox box_oracle(daemon, leaky, key_a, spec_dir);
+        (void)box_oracle.Execute("SELECT id FROM deals");
+        const std::string secret = "dummysecretvalue";
+        const std::string other = "notthesecretxxxx";
+        const char *casts[] = {
+            "IO Error %s",
+            "HTTP Error %s",
+            "Connection Error %s",
+            "Failed to attach %s",
+            "Unable to connect %s",
+            "CREATE SECRET %s",
+            "Failed to query most recent snapshot %s",
+            "ducklake Unable to connect %s",
+        };
+        for (auto *fmt : casts) {
+            char right_trig[256];
+            char wrong_trig[256];
+            std::snprintf(right_trig, sizeof(right_trig), fmt, secret.c_str());
+            std::snprintf(wrong_trig, sizeof(wrong_trig), fmt, other.c_str());
+            auto right_q = std::string("SELECT CAST('") + right_trig + "' AS INTEGER)";
+            auto wrong_q = std::string("SELECT CAST('") + wrong_trig + "' AS INTEGER)";
+            std::string right;
+            std::string wrong;
+            try {
+                box_oracle.Execute(right_q);
+            } catch (const std::exception &e) {
+                right = e.what();
+            }
+            try {
+                box_oracle.Execute(wrong_q);
+            } catch (const std::exception &e) {
+                wrong = e.what();
+            }
+            Expect(!right.empty() && !wrong.empty(),
+                   std::string("CAST trigger fails on both guesses: ") + fmt);
+            Expect(right.find("<redacted>") == std::string::npos &&
+                       wrong.find("<redacted>") == std::string::npos,
+                   std::string("CAST trigger is not exact-redacted: ") + fmt);
+            Expect(NormalizeGuess(right, secret) == NormalizeGuess(wrong, other),
+                   std::string("right vs wrong CAST guess is byte-identical: ") + fmt);
+        }
+        auto expect_equal = [&](const std::string &right_sql, const std::string &wrong_sql,
+                                const char *label) {
+            std::string right;
+            std::string wrong;
+            try {
+                box_oracle.Execute(right_sql);
+            } catch (const std::exception &e) {
+                right = e.what();
+            }
+            try {
+                box_oracle.Execute(wrong_sql);
+            } catch (const std::exception &e) {
+                wrong = e.what();
+            }
+            Expect(!right.empty() && !wrong.empty(), std::string(label) + " fails on both guesses");
+            Expect(right.find("<redacted>") == std::string::npos &&
+                       wrong.find("<redacted>") == std::string::npos,
+                   std::string(label) + " is not exact-redacted");
+            Expect(NormalizeGuess(right, secret) == NormalizeGuess(wrong, other),
+                   std::string(label) + " right vs wrong guess is byte-identical");
+        };
+        expect_equal("SELECT id FROM deals AT (TIMESTAMP => '" + secret + "')",
+                     "SELECT id FROM deals AT (TIMESTAMP => '" + other + "')",
+                     "AT timestamp literal");
+        expect_equal("SELECT * FROM read_csv('" + secret + ".csv')",
+                     "SELECT * FROM read_csv('" + other + ".csv')", "read_csv");
+        expect_equal("SELECT " + secret + " FROM deals", "SELECT " + other + " FROM deals",
+                     "binder name");
+        {
+            std::string right;
+            try {
+                box_oracle.DescribeRewritten("SELECT " + secret + " FROM deals");
+            } catch (const std::exception &e) {
+                right = e.what();
+            }
+            std::string wrong;
+            try {
+                box_oracle.DescribeRewritten("SELECT " + other + " FROM deals");
+            } catch (const std::exception &e) {
+                wrong = e.what();
+            }
+            Expect(!right.empty() && !wrong.empty(), "Describe binder fails on both guesses");
+            Expect(NormalizeGuess(right, secret) == NormalizeGuess(wrong, other),
+                   "Describe binder right vs wrong guess is byte-identical");
+        }
+    }
 
     auto out_a = box_a.Execute("SELECT id, title, amount FROM deals ORDER BY id");
     auto out_b = box_b.Execute("SELECT id, title, amount FROM deals ORDER BY id");
@@ -445,6 +649,7 @@ void duckbox::test::RunSandboxExecTests() {
         rec.key = key_a.raw;
         rec.spec.id = rec.id;
         rec.spec.bound_key = rec.key;
+        rec.spec.lake.catalog = "ducklake:postgres:dbname=lake password=sandbox-a-secret-yy";
         defs->Create(rec);
         DaemonConfig cfg = daemon;
         cfg.debug_http = "127.0.0.1:18481";
@@ -537,5 +742,86 @@ void duckbox::test::RunSandboxExecTests() {
         auto quoted =
             cli.Post("/v1/query", hdr, "{\"sql\":\"SELECT 1 AS \\\"x\\\"\"}", "application/json");
         Expect(static_cast<bool>(quoted), "debug HTTP parses JSON string escapes in sql");
+        {
+            struct HttpDsn {
+                const char *label;
+                const char *pw;
+                const char *injected;
+            };
+            const HttpDsn http_cases[] = {
+                {"keyword", "duckbox-http-catalog-secret-bb02",
+                 "IO Error: Failed to query most recent snapshot for DuckLake: "
+                 "Unable to connect to Postgres at \"dbname=lake host=127.0.0.1 port=5432 "
+                 "user=duckbox password=duckbox-http-catalog-secret-bb02\""},
+                {"url", "duckbox-http-url-catalog-secret-cc03",
+                 "IO Error: Unable to connect to Postgres at "
+                 "\"postgresql://duckbox:duckbox-http-url-catalog-secret-cc03@127.0.0.1:5432/"
+                 "lake\""},
+            };
+            for (const auto &c : http_cases) {
+                QueryErrorInjection down(c.injected);
+                auto cat = cli.Post("/v1/query", hdr, "{\"sql\":\"SELECT count(*) FROM deals\"}",
+                                    "application/json");
+                Expect(cat && cat->status == 400,
+                       std::string("debug HTTP ") + c.label + " catalog-down is 400");
+                Expect(cat->body.find(c.pw) == std::string::npos &&
+                           cat->body.find("password=") == std::string::npos,
+                       std::string("debug HTTP ") + c.label +
+                           " catalog-down must not include password");
+                Expect(cat->body.find(kCatalogUnavailableClientError) != std::string::npos,
+                       std::string("debug HTTP ") + c.label +
+                           " catalog-down uses the generic catalog message");
+            }
+        }
+        {
+            auto rec_b = rec;
+            rec_b.id = "http-b";
+            rec_b.spec.id = rec_b.id;
+            rec_b.spec.lake.catalog = "ducklake:postgres:dbname=lake password=sandbox-b-secret-zz";
+            defs->Create(rec_b);
+            httplib::Headers hdr_a = {{"X-Duckbox-Sandbox", "http-a"}};
+            httplib::Headers hdr_b = {{"X-Duckbox-Sandbox", "http-b"}};
+            const char *guess_a = "sandbox-a-secret-yy";
+            const char *guess_b = "sandbox-b-secret-zz";
+            auto body_a = std::string("{\"sql\":\"SELECT CAST('") + guess_a + "' AS INTEGER)\"}";
+            auto body_b = std::string("{\"sql\":\"SELECT CAST('") + guess_b + "' AS INTEGER)\"}";
+            auto a_on_a = cli.Post("/v1/query", hdr_a, body_a, "application/json");
+            auto b_on_a = cli.Post("/v1/query", hdr_a, body_b, "application/json");
+            auto a_on_b = cli.Post("/v1/query", hdr_b, body_a, "application/json");
+            auto b_on_b = cli.Post("/v1/query", hdr_b, body_b, "application/json");
+            Expect(a_on_a && a_on_a->status == 400 && b_on_a && b_on_a->status == 400 && a_on_b &&
+                       a_on_b->status == 400 && b_on_b && b_on_b->status == 400,
+                   "two-sandbox CAST guesses fail on both sandboxes");
+            Expect(a_on_a->body.find("<redacted>") == std::string::npos &&
+                       b_on_a->body.find("<redacted>") == std::string::npos &&
+                       a_on_b->body.find("<redacted>") == std::string::npos &&
+                       b_on_b->body.find("<redacted>") == std::string::npos,
+                   "two-sandbox CAST errors are never exact-redacted");
+            Expect(NormalizeGuess(a_on_a->body, guess_a) == NormalizeGuess(b_on_a->body, guess_b),
+                   "sandbox A: right vs wrong guess is byte-identical");
+            Expect(NormalizeGuess(a_on_b->body, guess_a) == NormalizeGuess(b_on_b->body, guess_b),
+                   "sandbox B: right vs wrong guess is byte-identical");
+            Expect(NormalizeGuess(a_on_a->body, guess_a) == NormalizeGuess(a_on_b->body, guess_a),
+                   "same guess on two sandboxes is byte-identical");
+        }
     }
+#ifdef DUCKBOX_BIN_PATH
+    {
+        auto cmd = std::string("nm -C '") + DUCKBOX_BIN_PATH +
+                   "' 2>/dev/null | grep -F QueryErrorInjection || true";
+        FILE *pipe = popen(cmd.c_str(), "r");
+        Expect(pipe != nullptr, "nm duckbox for QueryErrorInjection");
+        if (pipe) {
+            char buf[256];
+            std::string out;
+            while (fgets(buf, sizeof(buf), pipe)) {
+                out += buf;
+            }
+            int rc = pclose(pipe);
+            (void)rc;
+            Expect(out.find("QueryErrorInjection") == std::string::npos,
+                   "release duckbox has no QueryErrorInjection symbols");
+        }
+    }
+#endif
 }

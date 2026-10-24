@@ -35,8 +35,6 @@ void ValidateSecretRefSyntax(const SecretRef &ref, const std::string &field_path
 std::string ResolveSecret(const std::string &env_name, const std::string &inline_value,
                           const std::string &field_path);
 
-std::string TrimCopy(const std::string &s);
-
 } // namespace s3
 
 } // namespace duckbox

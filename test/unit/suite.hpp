@@ -31,6 +31,7 @@ void RunLambdaNewSyntaxTests();
 void RunLambdaOldSyntaxTests();
 void RunStorageFormatTests();
 void RunDuckLakeAttachSqlTests();
+void RunLakeAttachSecretTests();
 
 } // namespace test
 } // namespace duckbox

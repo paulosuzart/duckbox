@@ -104,6 +104,7 @@ class TenantSandbox {
     std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
     int64_t last_used_wall_ms_ = 0;
     int warmup_count_ = 0;
+    std::vector<std::string> secret_values_;
 };
 
 // Test seam: while alive, Warmup treats any hardening SET whose SQL contains
@@ -136,6 +137,20 @@ class WarmupHardeningReadError {
     WarmupHardeningReadError(const WarmupHardeningReadError &) = delete;
     WarmupHardeningReadError &operator=(const WarmupHardeningReadError &) = delete;
 };
+
+#ifdef DUCKBOX_TESTING
+// Test seam (compiled only with DUCKBOX_TESTING). While alive, RunTimed /
+// Describe / ExtractPlan pretends DuckDB returned this error (process-wide
+// so a Flight worker thread sees it). The text is classified by
+// RethrowQueryError (type / catalog marker / leak pattern), not always-generic.
+class QueryErrorInjection {
+  public:
+    explicit QueryErrorInjection(std::string duckdb_error);
+    ~QueryErrorInjection();
+    QueryErrorInjection(const QueryErrorInjection &) = delete;
+    QueryErrorInjection &operator=(const QueryErrorInjection &) = delete;
+};
+#endif
 
 // List item for ListSandboxes. state is warm | passive | defined.
 struct SandboxSummary {
