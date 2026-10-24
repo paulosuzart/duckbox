@@ -34,6 +34,8 @@ The rewriter does **not** expand macros. Spec validation and warmup reject an al
 
 - `duckbox_init_sql_seconds`. Drop it from dashboards and alerts. Use `duckbox_sandbox_warmup_seconds` if you were tracking seed/warmup duration.
 
+**Daemon identity** — `name` (and `lease.node_id` when set) must match `[A-Za-z0-9._-]` and be at most 128 bytes on **every** daemon, including single-node / no-lease. The same string is the S3 lease-probe key suffix, so a name such as `memory dev:1` is now refused (`name: must match [A-Za-z0-9._-]`). Use something like `memory-dev-1`.
+
 `lake.bootstrap_sql` (and the `lake.init_sql` alias) is **memory-lake seed data only**: `CREATE TABLE`, `CREATE SCHEMA`, and `INSERT`, including `CREATE TABLE AS SELECT`. `CREATE VIEW`, `CREATE MACRO`, and other catalog objects tenants can query are rejected at static validation (create/update) so bootstrap cannot expose unwrapped wrappers around base tables. On DuckLake, `lake.bootstrap_sql` is a validation error — the lake already has its catalog; the field is no longer silently ignored.
 
 **Trusted SaaS input.** `lake.bootstrap_sql` is written by the SaaS, not by the agent. It runs during warmup **before** `enable_external_access=false`. `CREATE TABLE AS SELECT` and `INSERT … SELECT` may therefore read files (`read_csv`, `query()`, and similar). That is intentional for seeding. Agent queries are still rewriter-wrapped (`tenant_col =` the bound key) and cannot `COPY` / `read_*` except for prefixes the spec already declared.

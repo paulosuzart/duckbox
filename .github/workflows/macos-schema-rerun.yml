@@ -1,0 +1,93 @@
+name: macOS schema crash repro
+
+# Temporary investigation for #36: 10× duckbox_schema_tests on d7eb7b4
+# (Collection().GetValue) and on this head, under lldb. Not a required check.
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: schema test repeats per ref
+        default: "10"
+  push:
+    branches:
+      - cursor/duckdb20-hardening-port-9a59
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-schema-repro-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  ARROW_VERSION: "26.0.0"
+  DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+
+jobs:
+  schema-loop:
+    name: schema ×10 (${{ matrix.name }})
+    runs-on: macos-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [d7eb7b4, head]
+    steps:
+      - name: Checkout workflow scripts (flush + lldb loop)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: .pr-overlay
+      - name: Checkout build ref
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ matrix.name == 'd7eb7b4' && 'd7eb7b4861a990601f049ba25759345b3fe80e06' || github.sha }}
+      - name: Overlay schema flush breadcrumbs and lldb loop
+        run: |
+          cp .pr-overlay/test/schema/main.cpp test/schema/main.cpp
+          cp .pr-overlay/test/schema/flight_schema_test.cpp test/schema/flight_schema_test.cpp
+          mkdir -p scripts
+          cp .pr-overlay/scripts/ci_macos_schema_loop.sh scripts/ci_macos_schema_loop.sh
+          chmod +x scripts/ci_macos_schema_loop.sh
+          rm -rf .pr-overlay
+          echo "BUILD_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git rev-parse HEAD
+      - name: Require Apple Silicon
+        run: test "$(uname -m)" = "arm64"
+      - name: Install Arrow, aws-sdk-cpp, openssl@4 (Homebrew)
+        run: bash scripts/install_arrow.sh
+      - name: Cache DuckDB deps
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            .deps
+            ~/.duckdb
+          key: duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-jwtcli11cppcodec-brewaws-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            duckdb-v2.0.0-nanoarrow-yamlcpp090-nlohmann3113-awssdk-s3-jwtcli11cppcodec-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch DuckDB and C++ headers
+        run: bash scripts/fetch_deps.sh
+      - name: Build schema tests
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix)"
+          JOBS="$(sysctl -n hw.ncpu)"
+          cmake --build build --parallel "$JOBS" --target duckbox_schema_tests
+      - name: pyarrow (arm64 Flight SQL metadata alignment)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r examples/python/requirements.txt
+      - name: Schema loop under lldb
+        env:
+          DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+          DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: |
+          repeats="${{ github.event.inputs.repeats || '10' }}"
+          echo "ref=${{ env.BUILD_REF }} matrix=${{ matrix.name }} repeats=$repeats"
+          bash scripts/ci_macos_schema_loop.sh "$repeats"
+      - name: Upload lldb logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: schema-lldb-${{ matrix.name }}-${{ github.run_id }}
+          path: schema-lldb-logs/
+          if-no-files-found: warn

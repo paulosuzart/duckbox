@@ -259,7 +259,7 @@ void duckbox::test::RunRuntimeTests() {
 		TenantSandbox box(daemon, loaded, key_a, spec_dir);
 		ExpectThrowExact(
 			[&] { box.Warmup(false); },
-			"sandbox hardening failed: current_setting('allowed_configs') is '[memory_limit]', "
+			"sandbox hardening failed: current_setting('allowed_configs') is '[max_memory]', "
 			"expected '[]'",
 			"allowed_configs read-back mismatch uses the exact comparison error");
 		Expect(!box.Warm(), "non-empty allowed_configs does not hand out a connection");

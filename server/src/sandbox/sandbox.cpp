@@ -57,13 +57,10 @@ std::string TrimAscii(std::string s) {
     return s;
 }
 
-// Booleans compare case-insensitively. Empty VARCHAR[] read-back is [], null, or blank.
+// Booleans compare case-insensitively after trim. allowed_configs must
+// read back as exactly [] — empty / null / none is not accepted.
 std::string NormalizeSettingText(std::string s) {
-    s = LowerAscii(TrimAscii(std::move(s)));
-    if (s.empty() || s == "null" || s == "none") {
-        return "[]";
-    }
-    return s;
+    return LowerAscii(TrimAscii(std::move(s)));
 }
 
 void ExecHardeningOrThrow(ddb::Connection &con, const std::string &sql) {
@@ -89,6 +86,9 @@ void RequireHardeningSetting(ddb::Connection &con, const char *name, const char 
         throw Error(std::string("sandbox hardening failed: current_setting('") + name +
                     "'): " + why);
     }
+    // Complete() ends the query; ~QueryResult calls Close(). Do not Close()
+    // here — it is a no-op and is not a SIGSEGV fix. Fetch() reads the first
+    // chunk (DuckDB 2.0 in-memory collection) instead of Collection().GetValue.
     got->Complete();
     std::string text;
     if (auto chunk = got->Fetch()) {
@@ -96,7 +96,6 @@ void RequireHardeningSetting(ddb::Connection &con, const char *name, const char 
             text = chunk->GetValue(0, 0).ToString();
         }
     }
-    got->Close();
     if (!g_hardening_mismatch_setting.empty() && g_hardening_mismatch_setting == name) {
         auto want = LowerAscii(expected);
         if (want == "true") {
@@ -104,7 +103,7 @@ void RequireHardeningSetting(ddb::Connection &con, const char *name, const char 
         } else if (want == "false") {
             text = "true";
         } else {
-            text = "[memory_limit]";
+            text = "[max_memory]";
         }
     }
     if (NormalizeSettingText(text) != NormalizeSettingText(expected)) {

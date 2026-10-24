@@ -128,7 +128,7 @@ Under `lease:` in the daemon YAML (all optional except the S3 endpoint block you
 | `proxy_timeout` / `proxy_timeout_ms` | `5s` | Deadline for peer Flight proxy RPCs. |
 | `max_leases` | `0` (unlimited) | Optional cap of sandboxes this node will own. |
 
-Startup lists `{prefix}.duckbox-cw-probe-<node_id>-` and deletes leftover objects whose remainder is a 16-hex nonce and whose `LastModified` is older than five minutes (crash between PUT and DELETE). In-flight probes — including another process of the same `node_id`, or a longer id such as `a-b` when this node is `a` — are left alone. A list failure is logged (`s3_list` / `lease_probe_list`) and does not fail startup. Each DELETE is logged (`lease_probe_delete`).
+Startup lists `{prefix}.duckbox-cw-probe-<node_id>-` and deletes leftover objects whose remainder is a 16-hex nonce and whose `LastModified` is older than five minutes (crash between PUT and DELETE). In-flight probes — including another process of the same `node_id`, or a longer id such as `a-b` when this node is `a` — are left alone. A list failure is logged (`s3_list` / `lease_probe_list`) and does not fail startup. Each DELETE is logged (`lease_probe_delete`). Nodes need **NTP-synced clocks** for that five-minute cutoff: cleanup compares S3 `LastModified` to the local clock. A node more than five minutes ahead can delete a peer's in-flight probe; a node behind leaves stale objects longer.
 
 Top-level / `auth:`:
 
@@ -184,7 +184,7 @@ A failed **node heartbeat** PUT does **not** immediately exit. While the publish
 
 ## Clock skew
 
-Steal compares `expiry_ms` in the object to the node's local clock (injectable in tests), plus `lease.skew` (default 1s). A node is treated as expired only when `expiry_ms + skew_ms <= now`, which delays an early steal if our clock is ahead. If B is **behind**, failover is delayed by TTL plus skew. Keep NTP (or equivalent) within a small fraction of `lease.ttl`. duckbox does not wait on a centralized clock.
+Steal compares `expiry_ms` in the object to the node's local clock (injectable in tests), plus `lease.skew` (default 1s). A node is treated as expired only when `expiry_ms + skew_ms <= now`, which delays an early steal if our clock is ahead. If B is **behind**, failover is delayed by TTL plus skew. Keep NTP (or equivalent) within a small fraction of `lease.ttl`. The lease-probe leftover cutoff (five minutes, `LastModified`) also uses the local clock — keep nodes NTP-synced so one node cannot treat another's in-flight probe as stale. duckbox does not wait on a centralized clock.
 
 ## Limits
 
