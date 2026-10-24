@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from duckbox_client import connect, format_error  # noqa: E402
+from duckbox_client import connect, format_error, resolve_token  # noqa: E402
 
 
 def main() -> int:
@@ -25,6 +25,11 @@ def main() -> int:
     p.add_argument("--url", default=None, help="Flight SQL URL (default grpc://127.0.0.1:4747)")
     p.add_argument("--sandbox", default="acme-analyst", help="named sandbox id")
     p.add_argument("--key", default="", help="optional per-query key (definition key is used otherwise)")
+    p.add_argument(
+        "--token",
+        default=None,
+        help="Bearer token (JWT or auth.bearer_secrets); else DUCKBOX_TOKEN",
+    )
     p.add_argument("--sql", default="SELECT id, title, amount FROM deals ORDER BY id")
     p.add_argument("--params", nargs="*", default=None, help="positional bind values")
     args = p.parse_args()
@@ -32,7 +37,9 @@ def main() -> int:
     if args.params:
         params = tuple(int(x) if x.isdigit() else x for x in args.params)
     try:
-        with connect(sandbox=args.sandbox, key=args.key, url=args.url) as db:
+        with connect(
+            sandbox=args.sandbox, key=args.key, url=args.url, token=resolve_token(args.token)
+        ) as db:
             df = db.query(args.sql, params)
     except Exception as exc:  # noqa: BLE001
         print(format_error(exc), file=sys.stderr)
