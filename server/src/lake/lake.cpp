@@ -36,11 +36,123 @@ std::string ResolvePath(const std::string &base_dir, const std::string &path) {
     return (fs::path(base_dir) / p).string();
 }
 
+namespace {
+
+bool CiEq(const std::string &s, size_t pos, const std::string &pat) {
+    if (pos + pat.size() > s.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < pat.size(); i++) {
+        char a = s[pos + i];
+        char b = pat[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = static_cast<char>(a - 'A' + 'a');
+        }
+        if (b >= 'A' && b <= 'Z') {
+            b = static_cast<char>(b - 'A' + 'a');
+        }
+        if (a != b) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsIdentChar(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+void RedactKeyEquals(std::string &s, const std::string &key) {
+    size_t i = 0;
+    while (i < s.size()) {
+        if (CiEq(s, i, key) && (i == 0 || !IsIdentChar(s[i - 1]))) {
+            size_t after = i + key.size();
+            if (after < s.size() && s[after] == '=') {
+                size_t vs = after + 1;
+                size_t ve = vs;
+                if (ve < s.size() && (s[ve] == '\'' || s[ve] == '"')) {
+                    char q = s[ve++];
+                    while (ve < s.size() && s[ve] != q) {
+                        ve++;
+                    }
+                    if (ve < s.size()) {
+                        ve++;
+                    }
+                } else {
+                    while (ve < s.size() && s[ve] != ' ' && s[ve] != '\t' && s[ve] != '\n' &&
+                           s[ve] != '\r' && s[ve] != ';' && s[ve] != ',' && s[ve] != ')' &&
+                           s[ve] != '&') {
+                        ve++;
+                    }
+                }
+                s.replace(vs, ve - vs, "<redacted>");
+                i = vs + 10;
+                continue;
+            }
+        }
+        i++;
+    }
+}
+
+void RedactSqlQuoted(std::string &s, const std::string &keyword) {
+    size_t i = 0;
+    while (i < s.size()) {
+        if (CiEq(s, i, keyword) && (i == 0 || !IsIdentChar(s[i - 1]))) {
+            size_t j = i + keyword.size();
+            while (j < s.size() && (s[j] == ' ' || s[j] == '\t' || s[j] == '=')) {
+                j++;
+            }
+            if (j < s.size() && s[j] == '\'') {
+                size_t vs = j + 1;
+                size_t ve = vs;
+                while (ve < s.size()) {
+                    if (s[ve] == '\'' && ve + 1 < s.size() && s[ve + 1] == '\'') {
+                        ve += 2;
+                        continue;
+                    }
+                    if (s[ve] == '\'') {
+                        break;
+                    }
+                    ve++;
+                }
+                s.replace(vs, ve - vs, "<redacted>");
+                i = vs + 10;
+                continue;
+            }
+        }
+        i++;
+    }
+}
+
+void ExecSensitiveOrThrow(ddb::Connection &con, const std::string &sql, const char *log_prefix,
+                          const char *client_error) {
+    EnsureLinkedDuckDb();
+    auto r = con.Query(sql);
+    if (r->HasError()) {
+        std::clog << log_prefix << RedactSecretText(r->GetError()) << "\n";
+        throw Error(client_error);
+    }
+}
+
+} // namespace
+
+std::string RedactSecretText(const std::string &text) {
+    std::string out = text;
+    RedactKeyEquals(out, "aws_secret_access_key");
+    RedactKeyEquals(out, "secret_access_key");
+    RedactKeyEquals(out, "password");
+    RedactKeyEquals(out, "secret");
+    RedactSqlQuoted(out, "SECRET");
+    RedactSqlQuoted(out, "password");
+    RedactSqlQuoted(out, "secret");
+    return out;
+}
+
 void ExecOrThrow(ddb::Connection &con, const std::string &sql) {
     EnsureLinkedDuckDb();
     auto r = con.Query(sql);
     if (r->HasError()) {
-        throw Error(r->GetError());
+        throw Error(RedactSecretText(r->GetError()));
     }
 }
 
@@ -204,7 +316,8 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
                   << s3.access_key.Spec() << "/" << s3.secret_key.Spec()
                   << ", values not logged)\n";
     }
-    ExecOrThrow(con, BuildDuckDbS3SecretSql(creds));
+    ExecSensitiveOrThrow(con, BuildDuckDbS3SecretSql(creds),
+                         "sandbox: lake S3 secret creation failed: ", kS3SecretClientError);
 
     std::string catalog = ResolveLakeCatalog(spec, secrets);
     if (catalog.empty()) {
@@ -229,7 +342,8 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
         add("READ_ONLY");
     }
     attach << ")";
-    ExecOrThrow(con, attach.str());
+    ExecSensitiveOrThrow(con, attach.str(),
+                         "sandbox: ducklake catalog attach failed: ", kCatalogAttachClientError);
     ExecOrThrow(con, "USE " + alias);
 }
 

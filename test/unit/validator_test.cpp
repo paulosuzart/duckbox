@@ -6,6 +6,8 @@
 #include "config/policy.hpp"
 #include "config/spec_validator.hpp"
 #include "lake/lake.hpp"
+#include "rewriter/rewriter.hpp"
+#include "rewriter/tenant_key.hpp"
 
 #include <filesystem>
 
@@ -497,6 +499,47 @@ void duckbox::test::RunValidatorTests() {
         Expect(has_path(iss, "tables.deals", "must be keyed as") ||
                    has_path(iss, "tables.memory.main.deals", "duplicate catalog.schema.table"),
                "ValidateStatic rejects a second map entry for the same catalog.schema.table");
+    }
+
+    {
+        using namespace rewriter;
+        auto policy = TestPolicy();
+        auto key = ParseTenantKey("tenant_21:user_sergio", policy.key);
+        auto at_ok = RewriteUserSql("SELECT id FROM deals AT (VERSION => 1)", policy, key);
+        Expect(at_ok.find("AT") != std::string::npos || at_ok.find("VERSION") != std::string::npos,
+               "constant VERSION AT is rewritten");
+        auto ts_ok =
+            RewriteUserSql("SELECT id FROM deals AT (TIMESTAMP => '2020-01-01')", policy, key);
+        Expect(ts_ok.find("deals") != std::string::npos, "string TIMESTAMP AT is rewritten");
+        auto ts_cast = RewriteUserSql(
+            "SELECT id FROM deals AT (TIMESTAMP => '2020-01-01'::TIMESTAMP)", policy, key);
+        Expect(ts_cast.find("deals") != std::string::npos,
+               "literal-cast TIMESTAMP AT is rewritten");
+        auto ts_typed = RewriteUserSql(
+            "SELECT id FROM deals AT (TIMESTAMP => TIMESTAMP '2020-01-01')", policy, key);
+        Expect(ts_typed.find("deals") != std::string::npos, "typed TIMESTAMP AT is rewritten");
+        ExpectThrowContains(
+            [&] {
+                RewriteUserSql("SELECT id FROM deals AT (VERSION => md5('a')::INT)", policy, key);
+            },
+            "AT clause must be a constant literal", "md5 in AT VERSION is rejected");
+        ExpectThrowContains(
+            [&] {
+                RewriteUserSql("SELECT id FROM deals AT (VERSION => len(list_transform([1], x -> "
+                               "x)))",
+                               policy, key);
+            },
+            "AT clause must be a constant literal", "single-arrow lambda in AT is rejected");
+        ExpectThrowContains(
+            [&] {
+                RewriteUserSql("SELECT id FROM deals AT (TIMESTAMP => "
+                               "current_setting('allowed_paths')::VARCHAR)",
+                               policy, key);
+            },
+            "AT clause must be a constant literal", "current_setting in AT TIMESTAMP is rejected");
+        ExpectThrowContains(
+            [&] { RewriteUserSql("SELECT id FROM deals AT (VERSION => id)", policy, key); },
+            "AT clause must be a constant literal", "column ref in AT VERSION is rejected");
     }
 
     Expect(RunValidateCommand(TestDaemon(), "") == 1, "validate without --spec fails");

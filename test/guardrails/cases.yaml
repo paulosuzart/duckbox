@@ -644,3 +644,32 @@ cases:
     stage: spec
     extra_functions:
       - parquet_metadata
+
+  - id: at_timestamp_current_setting
+    sql: "SELECT id FROM deals AT (TIMESTAMP => current_setting('allowed_paths')::VARCHAR)"
+    expect: deny
+    reason: AT clause must be a constant literal
+    stage: rewrite
+
+  - id: at_timestamp_s3_setting
+    sql: "SELECT id FROM deals AT (TIMESTAMP => current_setting('s3_secret_access_key'))"
+    expect: deny
+    reason: AT clause must be a constant literal
+    stage: rewrite
+
+  - id: at_version_md5
+    sql: "SELECT id FROM deals AT (VERSION => md5('a')::INT)"
+    expect: deny
+    reason: AT clause must be a constant literal
+    stage: rewrite
+
+  - id: at_version_lambda
+    sql: "SELECT id FROM deals AT (VERSION => len(list_transform([1], x -> x)))"
+    expect: deny
+    reason: AT clause must be a constant literal
+    stage: rewrite
+
+  - id: at_version_literal
+    sql: "SELECT id FROM deals AT (VERSION => 1)"
+    expect: allow
+    stage: rewrite

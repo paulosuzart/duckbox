@@ -1,6 +1,7 @@
 #include "rewriter/validator.hpp"
 #include "common/error.hpp"
 
+#include "duckdb/parser/tableref/at_clause.hpp"
 #include "duckdb/parser/tableref/pivotref.hpp"
 
 namespace duckbox {
@@ -51,6 +52,60 @@ void ValidateCteMap(ddb::QueryNode &node, ValidationContext &ctx) {
     }
 }
 
+bool IsConstantExpr(const ddb::ParsedExpression &expr) {
+    return expr.GetExpressionClass() == ddb::ExpressionClass::CONSTANT;
+}
+
+bool IsLiteralCast(const ddb::ParsedExpression &expr) {
+    if (expr.GetExpressionClass() != ddb::ExpressionClass::CAST) {
+        return false;
+    }
+    auto &cast = expr.Cast<ddb::CastExpression>();
+    const auto &child = cast.Child();
+    return IsConstantExpr(child) || IsLiteralCast(child);
+}
+
+bool IsIntegerLiteral(const ddb::ParsedExpression &expr) {
+    if (IsConstantExpr(expr)) {
+        auto &c = expr.Cast<ddb::ConstantExpression>();
+        return c.GetLiteral().kind == ddb::LiteralKind::INTEGER;
+    }
+    if (expr.GetExpressionClass() == ddb::ExpressionClass::CAST) {
+        return IsIntegerLiteral(expr.Cast<ddb::CastExpression>().Child());
+    }
+    return false;
+}
+
+bool IsTimestampLiteral(const ddb::ParsedExpression &expr) {
+    if (IsConstantExpr(expr)) {
+        return expr.Cast<ddb::ConstantExpression>().GetLiteral().kind == ddb::LiteralKind::STRING;
+    }
+    return IsLiteralCast(expr);
+}
+
+// DuckDB's EnumerateTableRefChildren does not visit BaseTableRef.at_clause.
+// Require a constant literal so settings, scalars, and lambdas cannot run there.
+void ValidateAtClause(ddb::AtClause &at) {
+    if (!at.ExpressionMutable()) {
+        throw SqlRejected("AT clause must be a constant literal");
+    }
+    auto unit = Lower(IdentName(at.Unit()));
+    auto &expr = *at.ExpressionMutable();
+    if (unit == "version") {
+        if (!IsIntegerLiteral(expr)) {
+            throw SqlRejected("AT clause must be a constant literal");
+        }
+        return;
+    }
+    if (unit == "timestamp") {
+        if (!IsTimestampLiteral(expr)) {
+            throw SqlRejected("AT clause must be a constant literal");
+        }
+        return;
+    }
+    throw SqlRejected("AT clause must be a constant literal");
+}
+
 } // namespace
 
 std::unique_ptr<ddb::Parser> ParseSql(const std::string &sql) {
@@ -93,6 +148,9 @@ void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx) {
     switch (ref.type) {
     case ddb::TableReferenceType::BASE_TABLE: {
         auto &base = ref.Cast<ddb::BaseTableRef>();
+        if (base.at_clause) {
+            ValidateAtClause(*base.at_clause);
+        }
         if (IsCte(ctx, base)) {
             break;
         }

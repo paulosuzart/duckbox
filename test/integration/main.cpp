@@ -16,5 +16,6 @@ int main() {
     RunQuackRuntimeTests();
     RunExtensionCapiRuntimeTests();
     RunAgentModeRuntimeTests();
+    RunSecretFlightTests();
     return ReportAndExit("integration");
 }
