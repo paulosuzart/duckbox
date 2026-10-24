@@ -16,13 +16,14 @@
 #include <arrow/flight/sql/client.h>
 #include <arrow/io/memory.h>
 #include <arrow/ipc/dictionary.h>
-#include <arrow/ipc/options.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
 
 #include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -146,6 +147,157 @@ std::shared_ptr<::arrow::Schema> SchemaFromIpcMessage(const uint8_t *data, int32
     return *got;
 }
 
+void ExpectAlignedTable(const ::arrow::Table &tbl, const std::string &msg) {
+    for (int c = 0; c < tbl.num_columns(); c++) {
+        auto col = tbl.column(c);
+        auto id = col->type()->id();
+        if (id != ::arrow::Type::STRING && id != ::arrow::Type::BINARY) {
+            continue;
+        }
+        for (int ch = 0; ch < col->num_chunks(); ch++) {
+            auto chunk = col->chunk(ch);
+            if (!chunk || !chunk->data() || chunk->data()->buffers.size() < 2 ||
+                !chunk->data()->buffers[1]) {
+                continue;
+            }
+            auto addr = reinterpret_cast<uintptr_t>(chunk->data()->buffers[1]->data());
+            duckbox::test::Expect(
+                addr % 4 == 0,
+                msg + " " + tbl.field(c)->name() + " offsets at " + std::to_string(addr) +
+                    " align=" + std::to_string(addr % 8) + " (need 4/8)");
+        }
+    }
+}
+
+std::shared_ptr<::arrow::Table> TicketTable(::arrow::flight::FlightClient &raw,
+                                            const ::arrow::flight::FlightCallOptions &opt,
+                                            const ::arrow::flight::FlightInfo &info,
+                                            const std::string &msg) {
+    duckbox::test::Expect(!info.endpoints().empty(), msg + " has a ticket");
+    if (info.endpoints().empty()) {
+        return nullptr;
+    }
+    auto stream_res = raw.DoGet(opt, info.endpoints()[0].ticket);
+    duckbox::test::Expect(stream_res.ok(), msg + " DoGet: " + stream_res.status().ToString());
+    if (!stream_res.ok()) {
+        return nullptr;
+    }
+    auto tbl = stream_res.ValueOrDie()->ToTable();
+    duckbox::test::Expect(tbl.ok(), msg + " ToTable: " + tbl.status().ToString());
+    if (!tbl.ok()) {
+        return nullptr;
+    }
+    ExpectAlignedTable(**tbl, msg);
+    return *tbl;
+}
+
+void ExpectServerPayloadAligned(const std::shared_ptr<::arrow::RecordBatch> &batch,
+                                const std::string &msg) {
+    auto stream_res = duckbox::flight::MakeAlignedBatchStream(batch);
+    duckbox::test::Expect(stream_res.ok(), msg + " MakeAlignedBatchStream: " +
+                                               stream_res.status().ToString());
+    if (!stream_res.ok()) {
+        return;
+    }
+    auto next = (*stream_res)->Next();
+    duckbox::test::Expect(next.ok(), msg + " payload Next: " + next.status().ToString());
+    if (!next.ok()) {
+        return;
+    }
+    for (const auto &buf : next->ipc_message.body_buffers) {
+        if (!buf || !buf->data() || buf->size() == 0) {
+            continue;
+        }
+        duckbox::test::Expect((reinterpret_cast<uintptr_t>(buf->data()) % 8) == 0,
+                              msg + " server-sent body buffer is 8-byte aligned");
+    }
+}
+
+void ExpectMetadataStreams(::arrow::flight::sql::FlightSqlClient &sql,
+                           ::arrow::flight::FlightClient &raw,
+                           const ::arrow::flight::FlightCallOptions &opt) {
+    using SqlSchema = ::arrow::flight::sql::SqlSchema;
+    {
+        auto info = sql.GetCatalogs(opt);
+        duckbox::test::Expect(info.ok(), "GetCatalogs: " + info.status().ToString());
+        if (info.ok()) {
+            auto tbl = TicketTable(raw, opt, **info, "GetCatalogs");
+            duckbox::test::Expect(tbl && tbl->num_rows() >= 1, "GetCatalogs has a catalog");
+        }
+        ::arrow::StringBuilder b;
+        duckbox::test::Expect(b.Append("lake").ok(), "payload catalogs append");
+        std::shared_ptr<::arrow::Array> arr;
+        duckbox::test::Expect(b.Finish(&arr).ok(), "payload catalogs finish");
+        ExpectServerPayloadAligned(
+            ::arrow::RecordBatch::Make(SqlSchema::GetCatalogsSchema(), 1, {arr}), "GetCatalogs");
+    }
+    {
+        auto info = sql.GetDbSchemas(opt, nullptr, nullptr);
+        duckbox::test::Expect(info.ok(), "GetDbSchemas: " + info.status().ToString());
+        if (info.ok()) {
+            (void)TicketTable(raw, opt, **info, "GetDbSchemas");
+        }
+        ::arrow::StringBuilder cat, sch;
+        duckbox::test::Expect(cat.Append("lake").ok() && sch.Append("main").ok(),
+                              "payload schemas append");
+        std::shared_ptr<::arrow::Array> a, b;
+        duckbox::test::Expect(cat.Finish(&a).ok() && sch.Finish(&b).ok(), "payload schemas finish");
+        ExpectServerPayloadAligned(
+            ::arrow::RecordBatch::Make(SqlSchema::GetDbSchemasSchema(), 1, {a, b}), "GetDbSchemas");
+    }
+    {
+        auto info = sql.GetTables(opt, nullptr, nullptr, nullptr, false, nullptr);
+        duckbox::test::Expect(info.ok(), "GetTables: " + info.status().ToString());
+        if (info.ok()) {
+            (void)TicketTable(raw, opt, **info, "GetTables");
+        }
+    }
+    {
+        auto info = sql.GetTableTypes(opt);
+        duckbox::test::Expect(info.ok(), "GetTableTypes: " + info.status().ToString());
+        if (info.ok()) {
+            (void)TicketTable(raw, opt, **info, "GetTableTypes");
+        }
+        ::arrow::StringBuilder b;
+        duckbox::test::Expect(b.Append("TABLE").ok(), "payload table types append");
+        std::shared_ptr<::arrow::Array> arr;
+        duckbox::test::Expect(b.Finish(&arr).ok(), "payload table types finish");
+        ExpectServerPayloadAligned(
+            ::arrow::RecordBatch::Make(SqlSchema::GetTableTypesSchema(), 1, {arr}), "GetTableTypes");
+    }
+    {
+        ::arrow::StringBuilder cat, db, name, typ;
+        ::arrow::BinaryBuilder schb;
+        duckbox::test::Expect(cat.Append("lake").ok() && db.Append("main").ok() &&
+                                  name.Append("nested_t").ok() && typ.Append("TABLE").ok() &&
+                                  schb.Append("schema").ok(),
+                              "payload include_schema append");
+        std::shared_ptr<::arrow::Array> a, b, n, t, s;
+        duckbox::test::Expect(cat.Finish(&a).ok() && db.Finish(&b).ok() && name.Finish(&n).ok() &&
+                                  typ.Finish(&t).ok() && schb.Finish(&s).ok(),
+                              "payload include_schema finish");
+        ExpectServerPayloadAligned(
+            ::arrow::RecordBatch::Make(SqlSchema::GetTablesSchemaWithIncludedSchema(), 1,
+                                       {a, b, n, t, s}),
+            "GetTables include_schema");
+    }
+}
+
+void MaybeRunPyarrowMetadata(int port, const std::string &sandbox) {
+    const char *py_env = std::getenv("DUCKBOX_PYTHON");
+    std::string py = py_env && *py_env ? py_env : "python3";
+    std::string probe = py + " -c \"import pyarrow.flight, adbc_driver_flightsql\"";
+    if (std::system(probe.c_str()) != 0) {
+        return;
+    }
+    std::string script = std::string(DUCKBOX_SOURCE_DIR) + "/test/schema/flight_metadata_pyarrow.py";
+    std::ostringstream cmd;
+    cmd << py << " " << script << " --url grpc://127.0.0.1:" << port << " --sandbox " << sandbox
+        << " --key tenant_21:user_sergio --caller analyst-svc";
+    duckbox::test::Expect(std::system(cmd.str().c_str()) == 0,
+                          "pyarrow/ADBC GetTables include_schema + metadata streams");
+}
+
 std::shared_ptr<::arrow::Schema> IncludedTableSchema(::arrow::flight::sql::FlightSqlClient &sql,
                                                    ::arrow::flight::FlightClient &raw,
                                                    const ::arrow::flight::FlightCallOptions &opt,
@@ -181,6 +333,7 @@ std::shared_ptr<::arrow::Schema> IncludedTableSchema(::arrow::flight::sql::Fligh
     }
     auto name_arr = std::static_pointer_cast<::arrow::StringArray>(names->chunk(0));
     auto schema_arr = std::static_pointer_cast<::arrow::BinaryArray>(schemas->chunk(0));
+    ExpectAlignedTable(**tbl, table_name + " GetTables include_schema");
     for (int64_t i = 0; i < name_arr->length(); i++) {
         if (name_arr->GetString(i) != table_name) {
             continue;
@@ -250,11 +403,6 @@ void duckbox::test::RunFlightSchemaTests() {
         std::shared_ptr<::arrow::flight::FlightClient>(std::move(client_res).ValueOrDie());
 
     ::arrow::flight::FlightCallOptions opt;
-    // Flight DoGet zero-copies gRPC bodies; table_name offsets can land at
-    // align=1. GetString then SIGSEGV's on ARM64 (UBSan misaligned load on x86)
-    // after the nested-views query. IdentName-by-value / ThrowIfError are not
-    // on this path — copy into type-aligned buffers before reading.
-    opt.read_options.ensure_alignment = ::arrow::ipc::Alignment::kDataTypeSpecificAlignment;
     opt.headers.emplace_back("x-duckbox-caller", "analyst-svc");
     opt.headers.emplace_back("x-duckbox-sandbox", "schema-int");
     opt.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
@@ -263,6 +411,7 @@ void duckbox::test::RunFlightSchemaTests() {
     Expect(created.find("schema-int") != std::string::npos, "CreateSandbox for schema suite");
 
     ::arrow::flight::sql::FlightSqlClient sql_client(raw_client);
+    ExpectMetadataStreams(sql_client, *raw_client, opt);
 
     ExpectFlightMatch(sql_client, *raw_client, opt, "SELECT count(*) FROM deals", "count(*)");
     ExpectFlightMatch(sql_client, *raw_client, opt, "SELECT CAST(id AS BIGINT) AS id64 FROM deals",
@@ -432,6 +581,7 @@ void duckbox::test::RunFlightSchemaTests() {
                        "mp is MAP, not utf8");
             }
         }
+        MaybeRunPyarrowMetadata(port, "schema-views");
     }
 
     (void)server->Shutdown();

@@ -16,6 +16,7 @@
 #include <arrow/flight/client.h>
 #include <arrow/flight/sql/server.h>
 #include <arrow/flight/server.h>
+#include <arrow/record_batch.h>
 
 #include <memory>
 #include <mutex>
@@ -243,6 +244,15 @@ private:
 	node::DaemonConfig daemon_;
 	node::ListenerPlane plane_ = node::ListenerPlane::Public;
 };
+
+// FlightDataStream whose IPC payload body buffers are 8-byte aligned.
+// GetCatalogs / GetDbSchemas / GetTables / GetTableTypes use this so
+// third-party readers (pyarrow, ADBC, Go) can load StringArray offsets
+// without IpcReadOptions::ensure_alignment.
+::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>>
+MakeAlignedBatchStream(const std::shared_ptr<::arrow::RecordBatch> &batch);
+::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>>
+MakeAlignedBatchStream(const std::shared_ptr<::arrow::RecordBatchReader> &reader);
 
 } // namespace flight
 

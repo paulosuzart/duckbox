@@ -90,9 +90,14 @@ jobs:
             -DCMAKE_PREFIX_PATH="$(brew --prefix)"
           JOBS="$(sysctl -n hw.ncpu)"
           cmake --build build --parallel "$JOBS" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests duckbox_schema_tests duckbox_s3_credentials_tests duckbox_s3_secret_guardrail_tests duckbox_s3_sts_tests
+      - name: pyarrow (arm64 Flight SQL metadata alignment)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r examples/python/requirements.txt
       - name: Unit, guardrail, and integration tests
         env:
           DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+          DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: ctest --test-dir build -L 'unit|guardrails|integration' --output-on-failure
 
   coverage:
@@ -201,6 +206,9 @@ jobs:
           ./build/duckbox sandbox create --url grpc://127.0.0.1:4747 \
             --spec ./policies/ducklake/analyst.yaml \
             --id acme-analyst --key tenant_21:user_sergio
+          DUCKBOX_URL=grpc://127.0.0.1:4747 DUCKBOX_SANDBOX=acme-analyst \
+            DUCKBOX_KEY=tenant_21:user_sergio DUCKBOX_CALLER=local \
+            .venv/bin/python test/schema/flight_metadata_pyarrow.py
           .venv/bin/python examples/python/quickstart.py
           curl -sf http://127.0.0.1:9477/metrics > /tmp/duckbox-metrics.txt
           grep -q 'duckbox_query_duration_seconds' /tmp/duckbox-metrics.txt
