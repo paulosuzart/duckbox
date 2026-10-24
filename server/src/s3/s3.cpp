@@ -248,6 +248,9 @@ class MemoryS3ControlClient final : public S3ControlClient {
         Obj obj;
         obj.body = body;
         obj.etag = Sha256Hex(body).substr(0, 16);
+        obj.last_modified_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
         objects_[key] = obj;
         S3Object out;
         out.status = 200;
@@ -276,14 +279,32 @@ class MemoryS3ControlClient final : public S3ControlClient {
     }
 
     std::vector<std::string> ListKeys(const std::string &prefix) const override {
-        std::lock_guard<std::mutex> hold(mu_);
         std::vector<std::string> keys;
-        for (auto &kv : objects_) {
-            if (prefix.empty() || kv.first.rfind(prefix, 0) == 0) {
-                keys.push_back(kv.first);
-            }
+        for (auto &o : ListObjects(prefix).objects) {
+            keys.push_back(o.key);
         }
         return keys;
+    }
+
+    S3ListResult ListObjects(const std::string &prefix) const override {
+        std::lock_guard<std::mutex> hold(mu_);
+        S3ListResult out;
+        for (auto &kv : objects_) {
+            if (prefix.empty() || kv.first.rfind(prefix, 0) == 0) {
+                out.objects.push_back(S3ListedObject{kv.first, kv.second.last_modified_ms});
+            }
+        }
+        return out;
+    }
+
+    bool SetLastModified(const std::string &key, int64_t last_modified_ms) {
+        std::lock_guard<std::mutex> hold(mu_);
+        auto it = objects_.find(key);
+        if (it == objects_.end()) {
+            return false;
+        }
+        it->second.last_modified_ms = last_modified_ms;
+        return true;
     }
 
     const std::string &bucket() const override { return bucket_; }
@@ -292,6 +313,7 @@ class MemoryS3ControlClient final : public S3ControlClient {
     struct Obj {
         std::string body;
         std::string etag;
+        int64_t last_modified_ms = 0;
     };
     std::string bucket_;
     mutable std::mutex mu_;
@@ -397,6 +419,14 @@ class AwsS3ControlClient final : public S3ControlClient {
 
     std::vector<std::string> ListKeys(const std::string &prefix) const override {
         std::vector<std::string> keys;
+        for (auto &o : ListObjects(prefix).objects) {
+            keys.push_back(o.key);
+        }
+        return keys;
+    }
+
+    S3ListResult ListObjects(const std::string &prefix) const override {
+        S3ListResult out;
         Aws::S3::Model::ListObjectsV2Request req;
         req.SetBucket(bucket_.c_str());
         req.SetPrefix(prefix.c_str());
@@ -408,17 +438,30 @@ class AwsS3ControlClient final : public S3ControlClient {
             }
             auto outc = client_->ListObjectsV2(req);
             if (!outc.IsSuccess()) {
-                return keys;
+                auto err = FromAwsError(outc.GetError(), "LIST", prefix);
+                out.status = err.status;
+                out.error = err.error.empty() ? "s3 ListObjectsV2 failed" : err.error;
+                out.objects.clear();
+                Json log;
+                log["event"] = "s3_list";
+                log["prefix"] = prefix;
+                log["status"] = out.status;
+                log["error"] = out.error;
+                std::clog << log.dump() << "\n";
+                return out;
             }
             for (const auto &obj : outc.GetResult().GetContents()) {
-                keys.push_back(obj.GetKey());
+                S3ListedObject item;
+                item.key = obj.GetKey();
+                item.last_modified_ms = static_cast<int64_t>(obj.GetLastModified().Millis());
+                out.objects.push_back(std::move(item));
             }
             if (!outc.GetResult().GetIsTruncated()) {
                 break;
             }
             token = outc.GetResult().GetNextContinuationToken();
         } while (!token.empty());
-        return keys;
+        return out;
     }
 
     const std::string &bucket() const override { return bucket_; }
@@ -450,6 +493,15 @@ std::shared_ptr<S3ControlClient> MakeS3ControlClient(LeaseSettings lease) {
 
 std::shared_ptr<S3ControlClient> MakeMemoryS3ControlClient(std::string bucket) {
     return std::make_shared<MemoryS3ControlClient>(std::move(bucket));
+}
+
+bool MemoryS3SetLastModified(S3ControlClient &client, const std::string &key,
+                             int64_t last_modified_ms) {
+    auto *mem = dynamic_cast<MemoryS3ControlClient *>(&client);
+    if (!mem) {
+        return false;
+    }
+    return mem->SetLastModified(key, last_modified_ms);
 }
 
 FaultyS3ControlClient::FaultyS3ControlClient(std::shared_ptr<S3ControlClient> inner)
@@ -527,17 +579,25 @@ std::string ProbeControlPlaneS3(const LeaseSettings &lease) {
 
 namespace {
 
-std::string SanitizeProbeToken(std::string s) {
-    if (s.empty()) {
-        return "node";
+constexpr int64_t kDefaultStaleAfterMs = 300000;
+constexpr size_t kProbeNonceHexLen = 16;
+
+int64_t WallMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+bool IsHexNonce16(const std::string &s) {
+    if (s.size() != kProbeNonceHexLen) {
+        return false;
     }
-    for (char &c : s) {
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-              c == '-' || c == '_' || c == '.')) {
-            c = '-';
+    for (char c : s) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return false;
         }
     }
-    return s;
+    return true;
 }
 
 std::string ControlPlaneProbePrefix(const std::string &prefix, const std::string &node_id) {
@@ -546,15 +606,14 @@ std::string ControlPlaneProbePrefix(const std::string &prefix, const std::string
         key += '/';
     }
     key += ".duckbox-cw-probe-";
-    key += SanitizeProbeToken(node_id);
+    key += node_id.empty() ? "node" : node_id;
     key += '-';
     return key;
 }
 
 std::string ControlPlaneProbeKey(const std::string &prefix, const std::string &node_id,
                                  const std::string &nonce) {
-    return ControlPlaneProbePrefix(prefix, node_id) +
-           (nonce.empty() ? RandomHex(8) : SanitizeProbeToken(nonce));
+    return ControlPlaneProbePrefix(prefix, node_id) + (nonce.empty() ? RandomHex(8) : nonce);
 }
 
 S3Object DeleteProbeObject(const S3ControlClient &client, const std::string &key,
@@ -578,9 +637,35 @@ S3Object DeleteProbeObject(const S3ControlClient &client, const std::string &key
     return del;
 }
 
-void DeleteStaleProbes(const S3ControlClient &client, const std::string &stale_prefix) {
-    for (auto &k : client.ListKeys(stale_prefix)) {
-        DeleteProbeObject(client, k, "", "stale");
+void DeleteStaleProbes(const S3ControlClient &client, const std::string &stale_prefix,
+                       int64_t now_ms, int64_t stale_after_ms) {
+    auto listed = client.ListObjects(stale_prefix);
+    if (!listed.error.empty()) {
+        Json log;
+        log["event"] = "lease_probe_list";
+        log["prefix"] = stale_prefix;
+        log["status"] = listed.status;
+        log["error"] = listed.error;
+        std::clog << log.dump() << "\n";
+        return;
+    }
+    if (now_ms <= 0) {
+        now_ms = WallMs();
+    }
+    if (stale_after_ms <= 0) {
+        stale_after_ms = kDefaultStaleAfterMs;
+    }
+    for (auto &o : listed.objects) {
+        if (o.key.rfind(stale_prefix, 0) != 0) {
+            continue;
+        }
+        if (!IsHexNonce16(o.key.substr(stale_prefix.size()))) {
+            continue;
+        }
+        if (o.last_modified_ms <= 0 || now_ms - o.last_modified_ms < stale_after_ms) {
+            continue;
+        }
+        DeleteProbeObject(client, o.key, "", "stale");
     }
 }
 
@@ -590,7 +675,15 @@ std::string ProbeControlPlaneS3(const S3ControlClient &client, const std::string
                                 const ControlPlaneProbeOptions &opts) {
     std::string key;
     try {
-        DeleteStaleProbes(client, ControlPlaneProbePrefix(prefix, opts.node_id));
+        std::string nid = opts.node_id.empty() ? "node" : opts.node_id;
+        if (!ValidNodeIdChars(nid)) {
+            return "node_id must match [A-Za-z0-9._-]";
+        }
+        if (nid.size() > kMaxNodeIdBytes) {
+            return "node_id must be at most 128 bytes";
+        }
+        DeleteStaleProbes(client, ControlPlaneProbePrefix(prefix, opts.node_id), opts.now_ms,
+                          opts.stale_after_ms);
         key = ControlPlaneProbeKey(prefix, opts.node_id, opts.nonce);
         auto put = client.Put(key, "duckbox-lease-probe", "", "*");
         if (put.status != 200 && put.status != 204 && put.status != 412) {

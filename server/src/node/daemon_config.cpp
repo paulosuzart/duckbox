@@ -512,10 +512,14 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     ValidateLeaseCredentialFields(cfg.lease, cfg.allow_insecure_dev, issues);
     {
         const std::string &nid = cfg.lease.node_id.empty() ? cfg.name : cfg.lease.node_id;
+        const char *nid_path = cfg.lease.node_id.empty() ? "name" : "lease.node_id";
         if (nid.size() > kMaxNodeIdBytes) {
-            add(cfg.lease.node_id.empty() ? "name" : "lease.node_id",
+            add(nid_path,
                 "must be at most 128 bytes so the lease probe key stays under the S3 1024-byte "
                 "limit");
+        }
+        if (!ValidNodeIdChars(nid)) {
+            add(nid_path, "must match [A-Za-z0-9._-] so probe keys cannot collide");
         }
     }
     if (!endpoint.empty() && !cfg.lease.skip_probe) {

@@ -200,19 +200,129 @@ void duckbox::test::RunS3ClientTests() {
 
 	{
 		auto mem = MakeMemoryS3ControlClient("control");
-		mem->Put("leases/.duckbox-cw-probe-node-a-dead1", "orphan", "", "*");
-		mem->Put("leases/.duckbox-cw-probe-node-a-dead2", "orphan", "", "*");
-		mem->Put("leases/.duckbox-cw-probe-node-b-keep", "other", "", "*");
+		const int64_t now = 1'000'000'000;
+		const int64_t old_ms = now - 400'000;
+		mem->Put("leases/.duckbox-cw-probe-node-a-0123456789abcdef", "orphan", "", "*");
+		mem->Put("leases/.duckbox-cw-probe-node-a-fedcba9876543210", "orphan", "", "*");
+		mem->Put("leases/.duckbox-cw-probe-node-b-0123456789abcdef", "other", "", "*");
+		Expect(MemoryS3SetLastModified(*mem, "leases/.duckbox-cw-probe-node-a-0123456789abcdef",
+									  old_ms),
+			   "age node-a orphan 1");
+		Expect(MemoryS3SetLastModified(*mem, "leases/.duckbox-cw-probe-node-a-fedcba9876543210",
+									  old_ms),
+			   "age node-a orphan 2");
+		Expect(MemoryS3SetLastModified(*mem, "leases/.duckbox-cw-probe-node-b-0123456789abcdef",
+									  old_ms),
+			   "age node-b leftover");
 		ControlPlaneProbeOptions opts;
 		opts.node_id = "node-a";
 		opts.nonce = "live";
 		opts.sleep = [](int) {};
+		opts.now_ms = now;
+		opts.stale_after_ms = 300'000;
 		auto err = ProbeControlPlaneS3(*mem, "leases/", opts);
 		Expect(err.empty(), "probe after leftover orphans succeeds");
 		auto leftover_a = mem->ListKeys("leases/.duckbox-cw-probe-node-a-");
-		Expect(leftover_a.empty(), "startup deletes this node's stale probe objects");
+		Expect(leftover_a.empty(), "startup deletes this node's old 16-hex probe objects");
 		auto leftover_b = mem->ListKeys("leases/.duckbox-cw-probe-node-b-");
-		Expect(leftover_b.size() == 1 && leftover_b[0].find("node-b-keep") != std::string::npos,
+		Expect(leftover_b.size() == 1 && leftover_b[0].find("node-b-") != std::string::npos,
 			   "other node's leftover probe is left alone");
+	}
+
+	{
+		auto mem = MakeMemoryS3ControlClient("control");
+		const int64_t now = 1'000'000'000;
+		const int64_t old_ms = now - 400'000;
+		mem->Put("leases/.duckbox-cw-probe-a-0123456789abcdef", "a-old", "", "*");
+		mem->Put("leases/.duckbox-cw-probe-a-b-0123456789abcdef", "ab-old", "", "*");
+		Expect(MemoryS3SetLastModified(*mem, "leases/.duckbox-cw-probe-a-0123456789abcdef", old_ms),
+			   "age a orphan");
+		Expect(MemoryS3SetLastModified(*mem, "leases/.duckbox-cw-probe-a-b-0123456789abcdef", old_ms),
+			   "age a-b leftover");
+		ControlPlaneProbeOptions opts;
+		opts.node_id = "a";
+		opts.nonce = "ffffffffffffffff";
+		opts.sleep = [](int) {};
+		opts.now_ms = now;
+		opts.stale_after_ms = 300'000;
+		auto err = ProbeControlPlaneS3(*mem, "leases/", opts);
+		Expect(err.empty(), "node a probe succeeds while a-b leftover exists");
+		Expect(mem->Get("leases/.duckbox-cw-probe-a-0123456789abcdef").status == 404,
+			   "node a deletes only its own 16-hex leftover");
+		Expect(mem->Get("leases/.duckbox-cw-probe-a-b-0123456789abcdef").status == 200,
+			   "node a does not delete node a-b's probe");
+	}
+
+	{
+		auto mem = MakeMemoryS3ControlClient("control");
+		const int64_t now = 1'000'000'000;
+		mem->Put("leases/.duckbox-cw-probe-a-aaaaaaaaaaaaaaaa", "fresh", "", "*");
+		mem->Put("leases/.duckbox-cw-probe-a-bbbbbbbbbbbbbbbb", "old", "", "*");
+		Expect(MemoryS3SetLastModified(*mem, "leases/.duckbox-cw-probe-a-aaaaaaaaaaaaaaaa",
+									  now - 1'000),
+			   "age same-id in-flight probe");
+		Expect(MemoryS3SetLastModified(*mem, "leases/.duckbox-cw-probe-a-bbbbbbbbbbbbbbbb",
+									  now - 400'000),
+			   "age same-id crash leftover");
+		ControlPlaneProbeOptions opts;
+		opts.node_id = "a";
+		opts.nonce = "cccccccccccccccc";
+		opts.sleep = [](int) {};
+		opts.now_ms = now;
+		opts.stale_after_ms = 300'000;
+		auto err = ProbeControlPlaneS3(*mem, "leases/", opts);
+		Expect(err.empty(), "same node_id probe succeeds");
+		Expect(mem->Get("leases/.duckbox-cw-probe-a-aaaaaaaaaaaaaaaa").status == 200,
+			   "same node_id leaves a fresh in-flight probe");
+		Expect(mem->Get("leases/.duckbox-cw-probe-a-bbbbbbbbbbbbbbbb").status == 404,
+			   "same node_id deletes an old leftover");
+	}
+
+	{
+		auto inner = MakeMemoryS3ControlClient("control");
+		class ListErrorClient final : public S3ControlClient {
+		  public:
+			explicit ListErrorClient(std::shared_ptr<S3ControlClient> inner)
+				: inner_(std::move(inner)) {}
+			S3Object Get(const std::string &key) const override { return inner_->Get(key); }
+			S3Object Put(const std::string &key, const std::string &body, const std::string &if_match,
+						 const std::string &if_none_match) const override {
+				return inner_->Put(key, body, if_match, if_none_match);
+			}
+			S3Object Delete(const std::string &key, const std::string &if_match) const override {
+				return inner_->Delete(key, if_match);
+			}
+			std::vector<std::string> ListKeys(const std::string &prefix) const override {
+				(void)prefix;
+				return {};
+			}
+			S3ListResult ListObjects(const std::string &prefix) const override {
+				(void)prefix;
+				S3ListResult out;
+				out.status = 0;
+				out.error = "s3 ListObjectsV2 failed";
+				return out;
+			}
+			const std::string &bucket() const override { return inner_->bucket(); }
+
+		  private:
+			std::shared_ptr<S3ControlClient> inner_;
+		};
+		ListErrorClient listing(inner);
+		ControlPlaneProbeOptions opts;
+		opts.node_id = "a";
+		opts.nonce = "dddddddddddddddd";
+		opts.sleep = [](int) {};
+		auto err = ProbeControlPlaneS3(listing, "leases/", opts);
+		Expect(err.empty(), "list failure is non-fatal; probe still completes");
+	}
+
+	{
+		ControlPlaneProbeOptions opts;
+		opts.node_id = "a/b";
+		opts.sleep = [](int) {};
+		auto err = ProbeControlPlaneS3(*MakeMemoryS3ControlClient("control"), "leases/", opts);
+		Expect(!err.empty() && err.find("[A-Za-z0-9._-]") != std::string::npos,
+			   "probe rejects node_id characters outside [A-Za-z0-9._-]");
 	}
 }

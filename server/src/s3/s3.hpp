@@ -26,6 +26,17 @@ struct S3Object { // HTTP status + body; error is a transport message, never a s
     std::string error;
 };
 
+struct S3ListedObject {
+    std::string key;
+    int64_t last_modified_ms = 0; // 0 = unknown
+};
+
+struct S3ListResult {
+    std::vector<S3ListedObject> objects;
+    int status = 200;
+    std::string error; // empty = ok; cleanup logs and skips deletes
+};
+
 class S3ControlClient {
   public:
     virtual ~S3ControlClient() = default;
@@ -37,6 +48,13 @@ class S3ControlClient {
     virtual S3Object Delete(const std::string &key, const std::string &if_match = "") const = 0;
     virtual std::vector<std::string>
     ListKeys(const std::string &prefix) const = 0; // ListObjectsV2, path-style
+    virtual S3ListResult ListObjects(const std::string &prefix) const {
+        S3ListResult out;
+        for (auto &k : ListKeys(prefix)) {
+            out.objects.push_back(S3ListedObject{k, 0});
+        }
+        return out;
+    }
 
     virtual const std::string &bucket() const = 0;
 };
@@ -50,6 +68,9 @@ bool LeaseStsAssumeRoleAvailable();
 std::string LeaseStsAssumeRoleUnavailableMessage();
 // In-memory If-Match / If-None-Match client for tests.
 std::shared_ptr<S3ControlClient> MakeMemoryS3ControlClient(std::string bucket = "control");
+// Test helper: set LastModified on a memory-client object. Returns false if not memory.
+bool MemoryS3SetLastModified(S3ControlClient &client, const std::string &key,
+                             int64_t last_modified_ms);
 
 // Test helper: wrap another client and fail every op with status 0 while down.
 class FaultyS3ControlClient final : public S3ControlClient {
@@ -74,17 +95,21 @@ class FaultyS3ControlClient final : public S3ControlClient {
     bool down_ = false;
 };
 // Conditional PUT If-None-Match:*. Empty string = ok (200/204/412); else error.
-// Each probe uses prefix/.duckbox-cw-probe-<node_id>-<nonce> so concurrent
-// daemons never share a key. Startup lists that node prefix and deletes
-// leftover objects from a crash between PUT and DELETE. GET after PUT
-// retries a transient 404; every DELETE is logged. Persistent GET failure
-// is still fatal.
+// Each probe uses prefix/.duckbox-cw-probe-<node_id>-<16-hex-nonce>. Startup
+// lists that prefix and deletes leftovers whose remainder is exactly 16 hex
+// and whose LastModified is older than stale_after_ms (default 5 minutes),
+// so node "a" cannot delete "a-b" and a second process of the same id cannot
+// delete an in-flight probe. node_id must match [A-Za-z0-9._-]. A list
+// failure is logged and does not fail startup. Persistent GET failure is
+// still fatal.
 struct ControlPlaneProbeOptions {
     int max_get_attempts = 5;
     int initial_backoff_ms = 100;
     std::function<void(int milliseconds)> sleep; // empty = this_thread::sleep_for
     std::string node_id;                         // empty = "node"
     std::string nonce;                           // empty = RandomHex(8)
+    int64_t now_ms = 0;                          // 0 = wall clock
+    int64_t stale_after_ms = 300000;             // 5 minutes
 };
 
 std::string ProbeControlPlaneS3(const node::LeaseSettings &lease);
