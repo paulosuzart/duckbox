@@ -2,13 +2,16 @@
 #include "suite.hpp"
 
 #include "rewriter/rewriter.hpp"
-#include "sandbox/sandbox.hpp"
 #include "rewriter/tenant_key.hpp"
+#include "sandbox/sandbox.hpp"
+
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
 
 namespace {
 
 bool HasCol(const std::string &text, const char *col) {
-    return duckbox::ddb::StringUtil::Lower(text).find(col) != std::string::npos;
+    return absl::StrContains(absl::AsciiStrToLower(text), col);
 }
 
 void ExpectTenant21Live(const duckbox::sandbox::QueryOutput &out, const std::string &msg) {

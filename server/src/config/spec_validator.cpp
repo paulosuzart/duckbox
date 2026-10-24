@@ -31,7 +31,7 @@ void CollectParams(const ddb::ParsedExpression &expr, std::unordered_set<std::st
     if (expr.GetExpressionClass() == ddb::ExpressionClass::PARAMETER) {
         auto &p = expr.Cast<ddb::ParameterExpression>();
         if (!p.Identifier().empty()) {
-            out.insert(ddb::StringUtil::Lower(IdentName(p.Identifier())));
+            out.insert(NormalizeSqlIdent(IdentName(p.Identifier())));
         }
     }
     if (expr.GetExpressionClass() == ddb::ExpressionClass::SUBQUERY) {
@@ -123,7 +123,7 @@ void CollectColumns(const ddb::ParsedExpression &expr, std::unordered_set<std::s
     if (expr.GetExpressionClass() == ddb::ExpressionClass::COLUMN_REF) {
         auto &c = expr.Cast<ddb::ColumnRefExpression>();
         if (!c.ColumnNames().empty()) {
-            out.insert(ddb::StringUtil::Lower(IdentName(c.ColumnNames().back())));
+            out.insert(NormalizeSqlIdent(IdentName(c.ColumnNames().back())));
         }
     }
     ddb::ParsedExpressionIterator::EnumerateChildren(
@@ -188,7 +188,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
     auto vars = spec.key.VariableNames();
     std::unordered_set<std::string> varset;
     for (auto &v : vars) {
-        varset.insert(ddb::StringUtil::Lower(v));
+        varset.insert(NormalizeSqlIdent(v));
     }
 
     if (spec.lake.kind == LakeKind::Memory && spec.lake.bootstrap_sql.empty() &&
@@ -216,7 +216,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         }
         std::unordered_set<std::string> need{"httpfs", "postgres", "ducklake"};
         for (auto &e : spec.lake.extensions) {
-            need.erase(ddb::StringUtil::Lower(e));
+            need.erase(NormalizeSqlIdent(e));
         }
         if (!need.empty()) {
             add("lake.extensions",
@@ -264,7 +264,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
             add(prefix + ".filters", "required (at least one mandatory filter)");
         }
         bool tenant_from_key = false;
-        auto tenant_col = ddb::StringUtil::Lower(kv.second.tenant_column);
+        auto tenant_col = NormalizeSqlIdent(kv.second.tenant_column);
         for (size_t i = 0; i < kv.second.filters.size(); i++) {
             auto path = prefix + ".filters[" + std::to_string(i) + "]";
             try {
@@ -284,14 +284,13 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
                         }
                         auto &c = e.Cast<ddb::ColumnRefExpression>();
                         return !c.ColumnNames().empty() &&
-                               ddb::StringUtil::Lower(IdentName(c.ColumnNames().back())) ==
-                                   tenant_col;
+                               NormalizeSqlIdent(IdentName(c.ColumnNames().back())) == tenant_col;
                     };
                     auto is_param = [&](ddb::ParsedExpression &e) -> std::string {
                         if (e.GetExpressionClass() != ddb::ExpressionClass::PARAMETER) {
                             return "";
                         }
-                        return ddb::StringUtil::Lower(
+                        return NormalizeSqlIdent(
                             IdentName(e.Cast<ddb::ParameterExpression>().Identifier()));
                     };
                     if (cmp.LeftMutable() && cmp.RightMutable() &&
@@ -358,8 +357,8 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         add("deny_table_functions", "false is refused (table functions are always denied)");
     }
     for (auto &fn : spec.functions) {
-        if (IsAlwaysDeniedTableFunction(fn)) {
-            add("functions", "table function '" + fn + "' is never allowlisted");
+        if (IsAlwaysDeniedFunction(fn)) {
+            add("functions", "'" + fn + "' is never allowlisted");
         } else if (!ValidSqlIdent(fn) && fn != "count_star") {
             add("functions", "not a valid function identifier: " + fn);
         }
@@ -370,7 +369,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         std::unordered_set<std::string> created;
         CollectCreatedMacros(spec.lake.bootstrap_sql, created);
         for (auto &fn : spec.functions) {
-            if (created.count(ddb::StringUtil::Lower(fn))) {
+            if (created.count(NormalizeSqlIdent(fn))) {
                 add("functions", MacroNotAllowlistedMessage(fn));
             }
         }
@@ -435,7 +434,7 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
                     break;
                 }
                 for (idx_t i = 0; i < chunk->size(); i++) {
-                    auto name = ddb::StringUtil::Lower(chunk->data[0].GetValue(i).ToString());
+                    auto name = NormalizeSqlIdent(chunk->data[0].GetValue(i).ToString());
                     auto typ = chunk->data[1].GetValue(i).ToString();
                     coltypes[name] = typ;
                     kv.second.lake_columns.push_back(ColumnMeta{name, typ});
@@ -455,7 +454,7 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
             continue;
         }
         for (auto &col : kv.second.columns) {
-            if (!coltypes.count(ddb::StringUtil::Lower(col))) {
+            if (!coltypes.count(NormalizeSqlIdent(col))) {
                 add(prefix + ".columns",
                     "column '" + col + "' does not exist on lake table '" + kv.second.name + "'");
             }
@@ -463,7 +462,7 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
         if (kv.second.filters.empty()) {
             add(prefix + ".filters", "required (at least one mandatory filter)");
         }
-        if (!coltypes.count(ddb::StringUtil::Lower(kv.second.tenant_column))) {
+        if (!coltypes.count(NormalizeSqlIdent(kv.second.tenant_column))) {
             add(prefix + ".tenant_column",
                 "column '" + kv.second.tenant_column + "' does not exist");
         }
@@ -498,7 +497,7 @@ bool IsAllowlistedMacroException(const std::string &name) {
         "count", "count_star", "sum",    "avg",      "min",   "max",
         "lower", "upper",      "length", "coalesce", "round", "abs",
     };
-    return kOk.count(ddb::StringUtil::Lower(name)) > 0;
+    return kOk.count(NormalizeSqlIdent(name)) > 0;
 }
 
 static bool IsTrustedSystemMacroException(const ddb::CatalogEntry &entry) {
@@ -506,7 +505,7 @@ static bool IsTrustedSystemMacroException(const ddb::CatalogEntry &entry) {
         return false;
     }
     try {
-        return ddb::StringUtil::Lower(IdentName(entry.ParentCatalog().GetName())) == "system";
+        return NormalizeSqlIdent(IdentName(entry.ParentCatalog().GetName())) == "system";
     } catch (...) {
         return false;
     }
@@ -533,7 +532,7 @@ void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string
             }
             auto &mi = cs.info->Cast<ddb::CreateMacroInfo>();
             if (!mi.GetFunctionName().empty()) {
-                out.insert(ddb::StringUtil::Lower(IdentName(mi.GetFunctionName())));
+                out.insert(NormalizeSqlIdent(IdentName(mi.GetFunctionName())));
             }
         }
     } catch (...) {
@@ -561,7 +560,7 @@ void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con) {
             if (entry.type == ddb::CatalogType::WINDOW_FUNCTION_ENTRY) {
                 return;
             }
-            auto n = ddb::StringUtil::Lower(IdentName(entry.name));
+            auto n = NormalizeSqlIdent(IdentName(entry.name));
             if (spec.functions.count(n) && !IsTrustedSystemMacroException(entry)) {
                 throw PolicyError(MacroNotAllowlistedMessage(n));
             }

@@ -4,6 +4,9 @@
 #include "config/policy.hpp"
 #include "lake/lake.hpp"
 
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+
 #include <algorithm>
 #include <cctype>
 #include <sstream>
@@ -16,19 +19,13 @@ using namespace node;
 using namespace config;
 namespace {
 
-std::string LowerCopy(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
-
 bool ListedExactly(const std::vector<std::string> &allow, const std::string &value) {
     return std::find(allow.begin(), allow.end(), value) != allow.end();
 }
 
 bool HasAwsExtension(const std::vector<std::string> &extensions) {
     for (auto &e : extensions) {
-        if (LowerCopy(e) == "aws") {
+        if (absl::EqualsIgnoreCase(e, "aws")) {
             return true;
         }
     }
@@ -53,7 +50,7 @@ void RequireListed(const std::vector<std::string> &allow, const std::string &val
 } // namespace
 
 S3CredentialProvider ParseS3Provider(const std::string &raw, const std::string &field_path) {
-    auto v = LowerCopy(TrimCopy(raw));
+    auto v = absl::AsciiStrToLower(absl::StripAsciiWhitespace(raw));
     if (v.empty() || v == "config") {
         return S3CredentialProvider::Config;
     }
@@ -104,7 +101,7 @@ bool ValidIamRoleArn(const std::string &arn) {
         return false;
     }
     auto rest = arn;
-    if (rest.rfind("arn:", 0) != 0) {
+    if (!rest.starts_with("arn:")) {
         return false;
     }
     rest = rest.substr(4);
@@ -117,7 +114,7 @@ bool ValidIamRoleArn(const std::string &arn) {
         return false;
     }
     rest = rest.substr(colon + 1);
-    if (rest.rfind("iam::", 0) != 0) {
+    if (!rest.starts_with("iam::")) {
         return false;
     }
     rest = rest.substr(5);
@@ -158,10 +155,10 @@ std::string CanonicalS3Endpoint(const std::string &endpoint) {
 }
 
 bool IsAwsS3Hostname(const std::string &host) {
-    auto h = LowerCopy(TrimCopy(host));
-    if (h.rfind("http://", 0) == 0) {
+    auto h = absl::AsciiStrToLower(absl::StripAsciiWhitespace(host));
+    if (h.starts_with("http://")) {
         h = h.substr(7);
-    } else if (h.rfind("https://", 0) == 0) {
+    } else if (h.starts_with("https://")) {
         h = h.substr(8);
     }
     auto slash = h.find('/');
@@ -175,7 +172,7 @@ bool IsAwsS3Hostname(const std::string &host) {
     if (h.empty() || h == "s3.amazonaws.com" || h == "s3.amazonaws.com.cn") {
         return true;
     }
-    return h.rfind("s3.", 0) == 0 && h.find(".amazonaws.com") != std::string::npos;
+    return h.starts_with("s3.") && absl::StrContains(h, ".amazonaws.com");
 }
 
 void ValidateS3CredentialFields(const S3Settings &s3, LakeKind kind,
