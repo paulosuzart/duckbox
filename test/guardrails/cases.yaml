@@ -612,6 +612,23 @@ cases:
     reason: agent mode is denied
     stage: both
 
+  - id: pragma_user_agent
+    sql: "PRAGMA user_agent"
+    expect: deny
+    reason: user_agent is denied
+    stage: both
+
+  - id: set_custom_user_agent
+    sql: "SET custom_user_agent='x'"
+    expect: deny
+    reason: user_agent is denied
+    stage: both
+
+  - id: select_user_agent_alias
+    sql: "SELECT title AS user_agent FROM deals"
+    expect: allow
+    stage: both
+
   - id: spec_quack_query_in_functions
     sql: "SELECT 1"
     expect: deny

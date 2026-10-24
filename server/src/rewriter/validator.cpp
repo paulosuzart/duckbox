@@ -283,6 +283,9 @@ void RejectDeniedStatement(const ddb::SQLStatement &st) {
         return;
     }
     auto named = SettingOrCallName(st);
+    if (named.find("user_agent") != std::string::npos) {
+        throw SqlRejected("user_agent is denied");
+    }
     if (named.find("agent") != std::string::npos) {
         throw SqlRejected("agent mode is denied");
     }

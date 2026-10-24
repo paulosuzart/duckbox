@@ -20,6 +20,12 @@ void duckbox::test::RunAgentModeRuntimeTests() {
                         "warm sandbox denies PRAGMA agent_mode");
     ExpectThrowContains([&] { box.Execute("CALL agent_mode()"); }, "agent mode is denied",
                         "warm sandbox denies CALL agent_mode");
+    ExpectThrowContains([&] { box.Execute("PRAGMA user_agent"); }, "user_agent is denied",
+                        "warm sandbox denies PRAGMA user_agent with an accurate message");
+    ExpectThrowContains([&] { box.Execute("SET custom_user_agent='x'"); }, "user_agent is denied",
+                        "warm sandbox denies SET custom_user_agent with an accurate message");
+    auto alias = box.Execute("SELECT title AS user_agent FROM deals");
+    Expect(alias.row_count > 0, "SELECT alias user_agent still runs");
     auto out = box.Execute("SELECT count(*) FROM deals");
     Expect(out.row_count == 1, "agent-mode denials do not break SELECT");
 }

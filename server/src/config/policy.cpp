@@ -521,7 +521,11 @@ bool IsAlwaysDeniedTableFunction(const std::string &name) {
         ddb::StringUtil::StartsWith(n, "http_") || ddb::StringUtil::StartsWith(n, "https_") ||
         ddb::StringUtil::StartsWith(n, "s3_") || ddb::StringUtil::StartsWith(n, "aws_") ||
         ddb::StringUtil::StartsWith(n, "__aws__") || ddb::StringUtil::StartsWith(n, "delta_") ||
-        ddb::StringUtil::StartsWith(n, "lance_") || ddb::StringUtil::EndsWith(n, "_scan")) {
+        ddb::StringUtil::StartsWith(n, "lance_") ||
+        ddb::StringUtil::StartsWith(n, "set_iceberg_") ||
+        ddb::StringUtil::StartsWith(n, "remove_iceberg_") ||
+        ddb::StringUtil::StartsWith(n, "fuzz") ||
+        n.find("external_resource") != std::string::npos || ddb::StringUtil::EndsWith(n, "_scan")) {
         return true;
     }
     static const std::unordered_set<std::string> kExact = {"glob",
@@ -551,7 +555,17 @@ bool IsAlwaysDeniedTableFunction(const std::string &name) {
                                                            "shapefile_meta",
                                                            "whoami",
                                                            "sql_tokenize",
-                                                           "check_peg_parser"};
+                                                           "check_peg_parser",
+                                                           "checkpoint",
+                                                           "force_checkpoint",
+                                                           "enable_logging",
+                                                           "disable_logging",
+                                                           "truncate_duckdb_logs",
+                                                           "enable_profiling",
+                                                           "disable_profiling",
+                                                           "sqlsmith",
+                                                           "fuzzyduck",
+                                                           "reduce_sql_statement"};
     return kExact.count(n) > 0;
 }
 

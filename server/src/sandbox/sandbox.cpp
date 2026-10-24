@@ -515,6 +515,13 @@ std::string StripOrderByLimitForExtract(const std::string &sql) {
     }
 }
 
+QueryOutput TenantSandbox::ExecuteUnrewritten(const std::string &sql) {
+    Warmup(false);
+    std::lock_guard<std::mutex> hold(mu_);
+    Touch();
+    return RunTimed(sql, {});
+}
+
 ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::string &sql) {
     Warmup(false);
     std::lock_guard<std::mutex> hold(mu_);

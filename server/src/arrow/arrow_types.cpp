@@ -150,7 +150,151 @@ NullCastShape(const ddb::vector<ddb::unique_ptr<ddb::ParsedExpression>> &exprs) 
                : nullptr;
 }
 
+bool IsBinaryArrowType(const std::shared_ptr<::arrow::DataType> &type) {
+    if (!type) {
+        return false;
+    }
+    auto id = type->id();
+    return id == ::arrow::Type::BINARY || id == ::arrow::Type::LARGE_BINARY ||
+           id == ::arrow::Type::FIXED_SIZE_BINARY;
+}
+
+bool IsUnshreddedVariantStruct(const std::shared_ptr<::arrow::DataType> &type) {
+    if (!type || type->id() != ::arrow::Type::STRUCT) {
+        return false;
+    }
+    auto *st = static_cast<const ::arrow::StructType *>(type.get());
+    if (!st || st->num_fields() != 2) {
+        return false;
+    }
+    auto meta = st->GetFieldByName("metadata");
+    auto value = st->GetFieldByName("value");
+    if (!meta || !value || st->GetFieldByName("typed_value")) {
+        return false;
+    }
+    return IsBinaryArrowType(meta->type()) && IsBinaryArrowType(value->type());
+}
+
+bool ContainsVariantLogicalType(const ddb::LogicalType &type) {
+    switch (type.id()) {
+    case ddb::LogicalTypeId::VARIANT:
+        return true;
+    case ddb::LogicalTypeId::LIST:
+        return ContainsVariantLogicalType(ddb::ListType::GetChildType(type));
+    case ddb::LogicalTypeId::ARRAY:
+        return ContainsVariantLogicalType(ddb::ArrayType::GetChildType(type));
+    case ddb::LogicalTypeId::STRUCT: {
+        for (ddb::idx_t i = 0; i < ddb::StructType::GetChildCount(type); i++) {
+            if (ContainsVariantLogicalType(ddb::StructType::GetChildType(type, i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+    case ddb::LogicalTypeId::MAP:
+        return ContainsVariantLogicalType(ddb::MapType::KeyType(type)) ||
+               ContainsVariantLogicalType(ddb::MapType::ValueType(type));
+    default:
+        return false;
+    }
+}
+
+std::shared_ptr<::arrow::DataType> ListChildArrowType(const std::shared_ptr<::arrow::DataType> &t) {
+    if (!t) {
+        return {};
+    }
+    if (t->id() == ::arrow::Type::LIST) {
+        return static_cast<const ::arrow::ListType *>(t.get())->value_type();
+    }
+    if (t->id() == ::arrow::Type::LARGE_LIST) {
+        return static_cast<const ::arrow::LargeListType *>(t.get())->value_type();
+    }
+    if (t->id() == ::arrow::Type::FIXED_SIZE_LIST) {
+        return static_cast<const ::arrow::FixedSizeListType *>(t.get())->value_type();
+    }
+    return {};
+}
+
 } // namespace
+
+bool IsAcceptedVariantArrowType(const std::shared_ptr<::arrow::DataType> &type) {
+    if (!type) {
+        return false;
+    }
+    if (type->id() == ::arrow::Type::EXTENSION) {
+        auto *ext = static_cast<const ::arrow::ExtensionType *>(type.get());
+        if (!ext || ext->extension_name() != "arrow.parquet.variant") {
+            return false;
+        }
+        auto storage = ext->storage_type();
+        return !storage || IsUnshreddedVariantStruct(storage);
+    }
+    return IsUnshreddedVariantStruct(type);
+}
+
+void RequireVariantArrowMapping(const ddb::LogicalType &logical,
+                                const std::shared_ptr<::arrow::DataType> &arrow) {
+    switch (logical.id()) {
+    case ddb::LogicalTypeId::VARIANT:
+        if (!IsAcceptedVariantArrowType(arrow)) {
+            throw Error("VARIANT columns cannot be mapped to Arrow");
+        }
+        return;
+    case ddb::LogicalTypeId::LIST:
+        RequireVariantArrowMapping(ddb::ListType::GetChildType(logical), ListChildArrowType(arrow));
+        return;
+    case ddb::LogicalTypeId::ARRAY:
+        RequireVariantArrowMapping(ddb::ArrayType::GetChildType(logical),
+                                   ListChildArrowType(arrow));
+        return;
+    case ddb::LogicalTypeId::STRUCT: {
+        const ::arrow::StructType *st = (arrow && arrow->id() == ::arrow::Type::STRUCT)
+                                            ? static_cast<const ::arrow::StructType *>(arrow.get())
+                                            : nullptr;
+        auto n = ddb::StructType::GetChildCount(logical);
+        for (ddb::idx_t i = 0; i < n; i++) {
+            std::shared_ptr<::arrow::DataType> child;
+            if (st) {
+                auto name = IdentName(ddb::StructType::GetChildName(logical, i));
+                auto field = st->GetFieldByName(name);
+                if (!field && i < static_cast<ddb::idx_t>(st->num_fields())) {
+                    field = st->field(static_cast<int>(i));
+                }
+                if (field) {
+                    child = field->type();
+                }
+            }
+            RequireVariantArrowMapping(ddb::StructType::GetChildType(logical, i), child);
+        }
+        return;
+    }
+    case ddb::LogicalTypeId::MAP: {
+        std::shared_ptr<::arrow::DataType> key;
+        std::shared_ptr<::arrow::DataType> val;
+        if (arrow && arrow->id() == ::arrow::Type::MAP) {
+            auto *mt = static_cast<const ::arrow::MapType *>(arrow.get());
+            key = mt->key_type();
+            val = mt->item_type();
+        } else if (arrow && arrow->id() == ::arrow::Type::STRUCT) {
+            auto *st = static_cast<const ::arrow::StructType *>(arrow.get());
+            auto entries = st->GetFieldByName("entries");
+            auto list_child = entries ? ListChildArrowType(entries->type()) : nullptr;
+            if (list_child && list_child->id() == ::arrow::Type::STRUCT) {
+                auto *entry = static_cast<const ::arrow::StructType *>(list_child.get());
+                auto kf = entry->GetFieldByName("key");
+                auto vf = entry->GetFieldByName("value");
+                key = kf ? kf->type() : nullptr;
+                val = vf ? vf->type() : nullptr;
+            }
+        }
+        RequireVariantArrowMapping(ddb::MapType::KeyType(logical), key);
+        RequireVariantArrowMapping(ddb::MapType::ValueType(logical), val);
+        return;
+    }
+    default:
+        return;
+    }
+}
 
 ddb::ClientProperties DefaultArrowClientProperties() {
     return ddb::ClientProperties();
@@ -221,7 +365,7 @@ std::shared_ptr<::arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::s
     if (!schema_res.ok()) {
         bool has_variant = false;
         for (size_t i = 0; i < n; i++) {
-            if (types[i].id() == ddb::LogicalTypeId::VARIANT) {
+            if (ContainsVariantLogicalType(types[i])) {
                 has_variant = true;
                 break;
             }
@@ -234,30 +378,15 @@ std::shared_ptr<::arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::s
     }
     auto schema = *schema_res;
     for (size_t i = 0; i < n; i++) {
-        if (types[i].id() != ddb::LogicalTypeId::VARIANT) {
+        if (!ContainsVariantLogicalType(types[i])) {
             continue;
         }
-        if (!schema || i >= static_cast<size_t>(schema->num_fields()) ||
-            !schema->field(static_cast<int>(i)) || !schema->field(static_cast<int>(i))->type()) {
-            throw Error("VARIANT columns cannot be mapped to Arrow");
+        std::shared_ptr<::arrow::DataType> field_type;
+        if (schema && i < static_cast<size_t>(schema->num_fields()) &&
+            schema->field(static_cast<int>(i))) {
+            field_type = schema->field(static_cast<int>(i))->type();
         }
-        auto field_type = schema->field(static_cast<int>(i))->type();
-        bool ok = false;
-        if (field_type->id() == ::arrow::Type::EXTENSION) {
-            auto *ext = static_cast<const ::arrow::ExtensionType *>(field_type.get());
-            ok = ext && ext->extension_name() == "arrow.parquet.variant";
-        } else if (field_type->id() == ::arrow::Type::STRUCT) {
-            // DuckDB 2.0 unshredded layout: struct(metadata, value). Arrow 26
-            // also registers this as arrow.parquet.variant; accept the storage
-            // form so a column still round-trips when the extension metadata
-            // is stripped by the C Data import.
-            auto *st = static_cast<const ::arrow::StructType *>(field_type.get());
-            ok = st && st->num_fields() >= 2 && st->GetFieldByName("metadata") &&
-                 st->GetFieldByName("value");
-        }
-        if (!ok) {
-            throw Error("VARIANT columns cannot be mapped to Arrow");
-        }
+        RequireVariantArrowMapping(types[i], field_type);
     }
     return schema;
 }

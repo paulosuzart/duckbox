@@ -4,6 +4,8 @@
 #include "common/duckdb_layer.hpp"
 #include "config/policy.hpp"
 #include "config/spec_validator.hpp"
+#include "rewriter/rewriter.hpp"
+#include "rewriter/tenant_key.hpp"
 
 void duckbox::test::RunMacroCatalog20Tests() {
     using namespace duckbox;
@@ -31,7 +33,14 @@ void duckbox::test::RunMacroCatalog20Tests() {
     windows.functions.insert("rank");
     windows.functions.insert("dense_rank");
     RejectAllowlistedMacros(windows, con);
-    Expect(true, "window functions may be allowlisted on the 2.0 catalog");
+    Expect(windows.functions.count("row_number") == 1 && windows.functions.count("rank") == 1 &&
+               windows.functions.count("dense_rank") == 1,
+           "window functions remain on the allowlist after the 2.0 catalog check");
+    auto key = rewriter::ParseTenantKey("tenant_21:user_sergio", windows.key);
+    auto rewritten = rewriter::RewriteUserSql(
+        "SELECT id FROM deals QUALIFY row_number() OVER (ORDER BY id) = 1", windows, key);
+    Expect(rewritten.find("row_number") != std::string::npos,
+           "QUALIFY row_number rewrites on the 2.0 catalog");
 
     auto denied_tf = loaded;
     denied_tf.functions.insert("quack_query");
