@@ -82,6 +82,9 @@ struct DaemonConfig {
     int64_t idle_evict_ms = 300000; // default instance idle timeout (ms)
     int64_t max_idle_evict_ms = 0;  // 0 = no cap; spec idle_timeout is clamped to this
     size_t max_sandboxes = 600;
+    // Optional absolute base for per-sandbox DuckDB temp_directory. Empty =
+    // unset (DuckDB default). Never tenant-controllable.
+    std::string temp_directory;
     LeaseSettings lease;
     std::vector<CallerRule> callers;
     std::vector<std::string> operators; // DrainNode / node-admin; empty = deny all

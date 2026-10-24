@@ -14,10 +14,12 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <fnmatch.h>
 #include <iostream>
 #include <sstream>
 #include <sys/stat.h>
+#include <system_error>
 
 namespace duckbox {
 namespace node {
@@ -261,7 +263,7 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
     }
     if (auto *lim = root.Get("limits")) {
         YamlRejectUnknownKeys(*lim, {"handle_ttl_seconds", "idle_evict_ms", "idle_timeout",
-                                     "max_idle_timeout", "max_sandboxes"});
+                                     "max_idle_timeout", "max_sandboxes", "temp_directory"});
         d.handle_ttl_seconds = lim->GetInt("handle_ttl_seconds", d.handle_ttl_seconds);
         d.idle_evict_ms = lim->GetInt("idle_evict_ms", d.idle_evict_ms);
         auto idle_raw = lim->GetString("idle_timeout");
@@ -282,6 +284,8 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
         }
         d.max_sandboxes = static_cast<size_t>(
             lim->GetInt("max_sandboxes", static_cast<int64_t>(d.max_sandboxes)));
+        d.temp_directory =
+            std::string(absl::StripAsciiWhitespace(lim->GetString("temp_directory")));
     }
     if (auto *allow = root.Get("lake_allow")) {
         YamlRejectUnknownKeys(*allow, {"s3_endpoints", "secret_refs", "aws_profiles", "role_arns",
@@ -433,6 +437,22 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     }
     if (cfg.max_sandboxes == 0) {
         add("limits.max_sandboxes", "must be >= 1");
+    }
+    if (!cfg.temp_directory.empty()) {
+        std::filesystem::path root(cfg.temp_directory);
+        if (!root.is_absolute()) {
+            add("limits.temp_directory", "must be an absolute path");
+        }
+        for (const auto &part : root) {
+            if (part == "..") {
+                add("limits.temp_directory", "must not contain '..'");
+                break;
+            }
+        }
+        std::error_code ec;
+        if (std::filesystem::exists(root, ec) && !ec && !std::filesystem::is_directory(root)) {
+            add("limits.temp_directory", "must be a directory");
+        }
     }
     if (cfg.handle_secret.empty()) {
         add("handle_secret", "required (or handle_secret_env)");

@@ -249,9 +249,29 @@ Daemon startup validates **only** daemon config (listen, limits, optional lease 
 
 Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, then `lock_configuration`. Warmup aborts if any hardening step fails. Global `max_sandboxes` still applies; there is no per-key cap. Spec `lifecycle.idle_timeout` overrides the daemon default (capped by `limits.max_idle_timeout`). Spec `lifecycle.ttl` / `expires_at` tombstone the named definition when due.
 
-DuckDB `allowed_directories`/`allowed_paths` are derived from `lake.data_path`, path-like `attachments`, and optional `extra_paths` before external access is disabled (prefixes are canonicalized: no `..`, no extra `//`, no query string, trailing slash). Agent SQL cannot `COPY`/`read_*` except for prefixes the spec already declared. `lake.bootstrap_sql` (memory lakes) is trusted SaaS seed SQL — `CREATE TABLE` / `CREATE SCHEMA` / `INSERT` only — and cannot create views, macros, or other objects tenants can query. Because it runs before `enable_external_access=false`, `CREATE TABLE AS SELECT` / `INSERT … SELECT` may read files (`read_csv`, `query()`). Agent queries remain rewriter-wrapped. On DuckLake the field is rejected.
+Optional daemon `limits.temp_directory` is an **absolute** host path. When it is set, warmup creates a 0700 subdirectory named after the sandbox id and sets that sandbox’s DuckDB `temp_directory` there (spill files). The directory is added to `allowed_directories` / `allowed_paths` before `enable_external_access=false`, so spilling still works while agent SQL cannot read or write arbitrary files. Passivate / teardown deletes that subdirectory. When the option is unset, DuckDB keeps its default (in-memory `.tmp`) — same as today. Specs cannot set `temp_directory` (unknown key). Tenant `SET` / `RESET temp_directory` is rejected by the rewriter and by `lock_configuration`. Sandbox ids are already `[a-z0-9][a-z0-9_-]{0,63}`, so they cannot traverse out of the base.
+
+DuckDB `allowed_directories`/`allowed_paths` are derived from `lake.data_path`, path-like `attachments`, optional `extra_paths`, and the per-sandbox temp directory when `limits.temp_directory` is set, before external access is disabled (prefixes are canonicalized: no `..`, no extra `//`, no query string, trailing slash). Agent SQL cannot `COPY`/`read_*` except for prefixes the spec already declared. `lake.bootstrap_sql` (memory lakes) is trusted SaaS seed SQL — `CREATE TABLE` / `CREATE SCHEMA` / `INSERT` only — and cannot create views, macros, or other objects tenants can query. Because it runs before `enable_external_access=false`, `CREATE TABLE AS SELECT` / `INSERT … SELECT` may read files (`read_csv`, `query()`). Agent queries remain rewriter-wrapped. On DuckLake the field is rejected.
 
 Spec table and column names are ASCII-only unquoted identifiers. A DuckLake table or column whose real name is unicode or quoted cannot be listed in the spec.
+
+### Daemon config reference (`limits`)
+
+Operator YAML only (`daemons/*.yaml`). These keys are not on the sandbox spec and are not tenant-controllable.
+
+| Key | Default | What |
+| --- | --- | --- |
+| `limits.handle_ttl_seconds` | `300` | Prepared-handle TTL |
+| `limits.idle_timeout` / `idle_evict_ms` | `5m` / `300000` | Default instance idle passivate |
+| `limits.max_idle_timeout` | unset (no cap) | Cap for spec `lifecycle.idle_timeout` |
+| `limits.max_sandboxes` | `600` | Process-wide warm+passive cap |
+| `limits.temp_directory` | unset | Optional **absolute** base directory for DuckDB spill/temp files. Each sandbox that has an id gets `{base}/{id}` as `temp_directory` (0700, removed on teardown). Unset = DuckDB default (unchanged). Relative paths and `..` are refused at daemon load. Specs cannot set this (unknown key); there is no spec override and therefore no conflict to resolve. |
+
+```yaml
+limits:
+  max_sandboxes: 600
+  temp_directory: /var/lib/duckbox/tmp   # optional; omit to keep DuckDB's default
+```
 
 ### Metrics
 

@@ -281,6 +281,7 @@ set(DUCKBOX_SOURCES
   server/src/metrics/metrics.cpp
   server/src/cluster/lease.cpp
   server/src/sandbox/sandbox_registry.cpp
+  server/src/sandbox/temp_directory.cpp
   server/src/arrow/arrow_ipc.cpp
   server/src/arrow/arrow_types.cpp
   server/src/flight/auth.cpp
@@ -480,7 +481,8 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/agent_mode_deny_test.cpp
   test/unit/table_function_20_test.cpp
   test/unit/macro_catalog_20_test.cpp
-  test/unit/lake_attach_test.cpp)
+  test/unit/lake_attach_test.cpp
+  test/unit/temp_directory_test.cpp)
 
 duckbox_add_test(duckbox_guardrail_tests
   test/support/check.cpp
@@ -505,7 +507,8 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/quack_runtime_test.cpp
   test/integration/extension_capi_runtime_test.cpp
   test/integration/agent_mode_runtime_test.cpp
-  test/integration/secret_flight_test.cpp)
+  test/integration/secret_flight_test.cpp
+  test/integration/temp_directory_test.cpp)
 add_dependencies(duckbox_integration_tests duckbox)
 target_compile_definitions(duckbox_integration_tests PRIVATE
   DUCKBOX_BIN_PATH="$<TARGET_FILE:duckbox>")
