@@ -188,6 +188,11 @@ void TenantSandbox::Warmup(bool validate_lake) {
         }
     }
     try {
+        // In-memory only. duckbox never creates a persistent local .db.
+        // storage_compatibility_version is left at the DuckDB 2.0 default
+        // (v2.0.0 / version 69 for any new file an operator attaches). We
+        // do not pin an older format: the engine is 2.0-only, and an
+        // existing file catalog keeps its own storage version on write.
         db_ = std::make_unique<ddb::DuckDB>(nullptr);
         con_ = std::make_unique<ddb::Connection>(*db_);
         ExecHardeningOrThrow(*con_, "SET autoinstall_known_extensions=false");
@@ -304,11 +309,16 @@ void TenantSandbox::Warmup(bool validate_lake) {
         ExecHardeningOrThrow(*con_, "SET allow_extensions_metadata_mismatch=false");
         ExecHardeningOrThrow(*con_, "SET allow_extension_repositories='forbidden'");
         ExecHardeningOrThrow(*con_, "SET allow_parser_override_extension='default'");
+        // DuckDB 2.0 disables single-arrow lambdas (`x -> expr`) by default;
+        // 2.1 removes them. Lock the explicit disable so a leftover
+        // enable_single_arrow cannot survive lock_configuration.
+        ExecHardeningOrThrow(*con_, "SET lambda_syntax='disable_single_arrow'");
         RequireHardeningSetting(*con_, "allow_community_extensions", "false");
         RequireHardeningSetting(*con_, "allow_unsigned_extensions", "false");
         RequireHardeningSetting(*con_, "allow_extensions_metadata_mismatch", "false");
         RequireHardeningSetting(*con_, "allow_extension_repositories", "forbidden");
         RequireHardeningSetting(*con_, "allow_parser_override_extension", "default");
+        RequireHardeningSetting(*con_, "lambda_syntax", "disable_single_arrow");
         // allowed_configs is a lock exception list. Empty it (default) and
         // read back so a leftover entry cannot survive lock_configuration.
         ExecHardeningOrThrow(*con_, "SET allowed_configs=[]");

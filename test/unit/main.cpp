@@ -27,5 +27,9 @@ int main() {
     RunAgentModeDenyTests();
     RunTableFunction20Tests();
     RunMacroCatalog20Tests();
+    RunLambdaNewSyntaxTests();
+    RunLambdaOldSyntaxTests();
+    RunStorageFormatTests();
+    RunDuckLakeAttachSqlTests();
     return ReportAndExit("unit");
 }

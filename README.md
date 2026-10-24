@@ -2,7 +2,7 @@
 
 A **deny-by-default SQL sandbox** for untrusted, often AI-generated, SQL over a shared DuckLake (Parquet on S3, catalog in Postgres or a DuckDB file). In the spirit of smolvm/microVM CLIs: a sandbox sees **nothing** except what its spec hands it.
 
-This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/src/common/duckdb_layer.hpp`. Development is DuckDB **2.0.0**.
+This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/src/common/duckdb_layer.hpp`. Development is DuckDB **2.0.0** only (1.5.x is not supported). Sandboxes are in-memory; duckbox does not pin `storage_compatibility_version` ([docs/storage.md](docs/storage.md)). Agent SQL may use Python-style lambdas (`lambda x : …`); single-arrow `x -> …` is denied ([docs/lambda-syntax.md](docs/lambda-syntax.md)). An existing DuckLake (Postgres catalog, Parquet on S3) is attached without catalog migration ([docs/ducklake-compatibility.md](docs/ducklake-compatibility.md)).
 
 ## Actors and trust model
 
@@ -51,7 +51,7 @@ attachments:
 
 ## Run everything locally (macOS and Linux)
 
-Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (compose → seed → serve → CLI create → quickstart). Job `enforcement` runs the test commands. Job `macos-arm64` builds with AppleClang and runs unit + guardrail tests (no Docker).
+Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (compose → seed with DuckDB 2.0 → serve → CLI create → quickstart). Job `ducklake-compat` reads a pre-existing lake (prefer a catalog seeded with DuckDB 1.5.6, then duckbox 2.0; see [docs/ducklake-compatibility.md](docs/ducklake-compatibility.md)). Job `enforcement` runs the test commands. Job `macos-arm64` builds with AppleClang and runs unit + guardrail tests (no Docker). Job `multi-node` is lease failover (RustFS, memory policy) — not DuckLake catalog compat.
 
 ### Prerequisites
 
@@ -145,7 +145,7 @@ print(db.query("SELECT id, title, amount FROM deals"))
 
 `lake.bootstrap_sql` file paths are **relative to the spec file**, not the working directory (`policies/memory/analyst.yaml` uses `../../examples/sql/memory_init.sql`). Inlined SQL is also accepted. The daemon never re-reads that host path at warmup — LoadSpecFile inlines the file first. That SQL is trusted SaaS seed input (it can `read_csv` / `query()` via `CREATE TABLE AS SELECT` or `INSERT … SELECT` before external access is disabled). Agent queries stay tenant-wrapped. On DuckLake the field is a validation error.
 
-**RustFS** is the only S3-compatible store in `docker-compose.yml` (pinned `rustfs/rustfs:1.0.3`). The README runbook, STS suite, and multi-node e2e all use it at `127.0.0.1:9000`. Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads — that client is **aws-sdk-cpp S3Client** (vcpkg: S3, STS, identity-management) with endpoint override and path-style addressing. Arrow `S3FileSystem` has no conditional-write headers, so it is not used for the control plane. Tests inject an in-memory `S3ControlClient`.
+**RustFS** is the only S3-compatible store in `docker-compose.yml` (pinned `rustfs/rustfs:1.0.3`). The README runbook, STS suite, multi-node e2e, and DuckLake compatibility job all use it at `127.0.0.1:9000`. Never add MinIO or a fork. Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads — that client is **aws-sdk-cpp S3Client** (vcpkg: S3, STS, identity-management) with endpoint override and path-style addressing. Arrow `S3FileSystem` has no conditional-write headers, so it is not used for the control plane. Tests inject an in-memory `S3ControlClient`.
 
 ## Named sandboxes
 
@@ -292,6 +292,7 @@ The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl 
 | --- | --- |
 | `daemons/` | Control-plane YAML (listen, limits, optional lease) |
 | `policies/` | Sandbox specs (lake + tables + key + functions) |
+| `docs/` | Multi-node leases; lake S3 credentials; DuckDB 2.0 storage, lambda syntax, DuckLake compat |
 | `server/src/<area>/` | C++ node + enforcement, headers next to sources |
 | `examples/python/` | Quickstart notebook/script, `duckbox_client`, CLI utility |
 | `test/` | CTest suites: `unit`, `guardrails` (YAML SQL corpus), `integration` |

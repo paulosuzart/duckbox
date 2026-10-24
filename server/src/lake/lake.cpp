@@ -211,6 +211,12 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
         throw PolicyError("lake.catalog or lake.catalog_env is required for ducklake");
     }
 
+    ExecOrThrow(con, BuildDuckLakeAttachSql(spec, catalog));
+    auto alias = spec.lake.alias.empty() ? "lake" : spec.lake.alias;
+    ExecOrThrow(con, "USE " + alias);
+}
+
+std::string BuildDuckLakeAttachSql(const SandboxSpec &spec, const std::string &catalog) {
     auto alias = spec.lake.alias.empty() ? "lake" : spec.lake.alias;
     std::ostringstream attach;
     attach << "ATTACH '" << EscapeSqlString(catalog) << "' AS " << alias << " (";
@@ -228,9 +234,10 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
     if (spec.lake.read_only) {
         add("READ_ONLY");
     }
+    // Do not add AUTOMATIC_MIGRATION, DUCKLAKE_VERSION, or STORAGE_VERSION.
+    // DuckDB 2.0's ducklake extension reads DuckLake 1.0 catalogs as-is.
     attach << ")";
-    ExecOrThrow(con, attach.str());
-    ExecOrThrow(con, "USE " + alias);
+    return attach.str();
 }
 
 } // namespace lake

@@ -419,7 +419,11 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/extension_capi_deny_test.cpp
   test/unit/agent_mode_deny_test.cpp
   test/unit/table_function_20_test.cpp
-  test/unit/macro_catalog_20_test.cpp)
+  test/unit/macro_catalog_20_test.cpp
+  test/unit/lambda_new_syntax_test.cpp
+  test/unit/lambda_old_syntax_test.cpp
+  test/unit/storage_format_test.cpp
+  test/unit/ducklake_attach_sql_test.cpp)
 
 duckbox_add_test(duckbox_guardrail_tests
   test/support/check.cpp
@@ -440,7 +444,10 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/trigger_runtime_test.cpp
   test/integration/quack_runtime_test.cpp
   test/integration/extension_capi_runtime_test.cpp
-  test/integration/agent_mode_runtime_test.cpp)
+  test/integration/agent_mode_runtime_test.cpp
+  test/integration/lambda_new_syntax_runtime_test.cpp
+  test/integration/lambda_old_syntax_runtime_test.cpp
+  test/integration/storage_format_runtime_test.cpp)
 add_dependencies(duckbox_integration_tests duckbox)
 target_compile_definitions(duckbox_integration_tests PRIVATE
   DUCKBOX_BIN_PATH="$<TARGET_FILE:duckbox>")

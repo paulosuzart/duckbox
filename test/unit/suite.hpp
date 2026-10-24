@@ -27,6 +27,10 @@ void RunExtensionCapiDenyTests();
 void RunAgentModeDenyTests();
 void RunTableFunction20Tests();
 void RunMacroCatalog20Tests();
+void RunLambdaNewSyntaxTests();
+void RunLambdaOldSyntaxTests();
+void RunStorageFormatTests();
+void RunDuckLakeAttachSqlTests();
 
 } // namespace test
 } // namespace duckbox

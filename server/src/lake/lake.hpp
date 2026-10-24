@@ -3,9 +3,9 @@
 // Lake attach for a sandbox DuckDB instance. Called only during create/warmup
 // from the named sandbox definition, never by the daemon control plane.
 
-#include "node/daemon_config.hpp"
 #include "common/duckdb_layer.hpp"
 #include "config/policy.hpp"
+#include "node/daemon_config.hpp"
 #include "s3/secrets.hpp"
 
 #include <string>
@@ -21,13 +21,19 @@ void ExecOrThrow(ddb::Connection &con, const std::string &sql);
 // VIEW, INDEX, MACRO, FUNCTION, TYPE, ATTACH, and SET are rejected.
 void CheckBootstrapSql(const std::string &sql);
 void CheckBootstrapSql(const std::string &sql, const config::SandboxSpec &spec);
-void ConstrainLakeAgainstDaemon(const config::SandboxSpec &spec,
-                                const node::DaemonConfig &daemon); // lake_allow; common::PolicyError
+void ConstrainLakeAgainstDaemon(
+    const config::SandboxSpec &spec,
+    const node::DaemonConfig &daemon); // lake_allow; common::PolicyError
 // Resolved catalog DSN for attach. Never log the value.
 std::string ResolveLakeCatalog(const config::SandboxSpec &spec, const s3::SecretResolver &secrets);
+// DuckLake ATTACH SQL. DATA_PATH and READ_ONLY only — no AUTOMATIC_MIGRATION,
+// DUCKLAKE_VERSION, or STORAGE_VERSION. Existing 1.0 catalogs stay unmigrated;
+// duckbox is DuckDB 2.0-only and does not rewrite storage for older engines.
+std::string BuildDuckLakeAttachSql(const config::SandboxSpec &spec, const std::string &catalog);
 // LOAD then INSTALL-on-miss. Does not disable external access (sandbox does after attach).
-void AttachLakeFromSpec(ddb::Connection &con, const config::SandboxSpec &spec, const std::string &spec_dir,
-                        const s3::SecretResolver &secrets, const node::DaemonConfig &daemon = {});
+void AttachLakeFromSpec(ddb::Connection &con, const config::SandboxSpec &spec,
+                        const std::string &spec_dir, const s3::SecretResolver &secrets,
+                        const node::DaemonConfig &daemon = {});
 
 } // namespace lake
 

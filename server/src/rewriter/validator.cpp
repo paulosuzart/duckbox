@@ -82,6 +82,15 @@ void ValidateExpression(ddb::ParsedExpression &expr, ValidationContext &ctx) {
         }
         break;
     }
+    case ddb::ExpressionClass::LAMBDA: {
+        auto &lam = expr.Cast<ddb::LambdaExpression>();
+        auto syntax = lam.GetLambdaSyntaxType();
+        if (syntax == ddb::LambdaSyntaxType::SINGLE_ARROW ||
+            syntax == ddb::LambdaSyntaxType::SINGLE_ARROW_STORAGE) {
+            throw SqlRejected("single-arrow lambda syntax is denied");
+        }
+        break;
+    }
     default:
         break;
     }

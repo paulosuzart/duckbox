@@ -11,6 +11,8 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.venv-ducklake-1.5.6/
+ducklake-compat-result.txt
 *.arrows
 *.duckdb
 *.ducklake

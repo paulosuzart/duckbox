@@ -68,6 +68,7 @@ def seed(args: argparse.Namespace) -> None:
     host = args.s3_endpoint.replace("http://", "").replace("https://", "")
     use_ssl = args.s3_endpoint.startswith("https://")
     con = duckdb.connect()
+    print(f"seed duckdb_version={duckdb.__version__}")
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute("INSTALL postgres; LOAD postgres;")
     con.execute("INSTALL ducklake; LOAD ducklake;")
@@ -110,6 +111,11 @@ def seed(args: argparse.Namespace) -> None:
     else:
         print(f"deals already has {count} rows; leaving as-is")
     print(con.execute("SELECT tenant_id, id, title, amount, _deleted FROM deals ORDER BY id").fetchall())
+    try:
+        snaps = con.execute("SELECT * FROM ducklake_snapshots() LIMIT 3").fetchall()
+        print(f"ducklake_snapshots={snaps}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"ducklake_snapshots unavailable: {exc}")
 
 
 def main() -> None:

@@ -16,5 +16,8 @@ int main() {
     RunQuackRuntimeTests();
     RunExtensionCapiRuntimeTests();
     RunAgentModeRuntimeTests();
+    RunLambdaNewSyntaxRuntimeTests();
+    RunLambdaOldSyntaxRuntimeTests();
+    RunStorageFormatRuntimeTests();
     return ReportAndExit("integration");
 }
