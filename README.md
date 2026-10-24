@@ -2,7 +2,7 @@
 
 A **deny-by-default SQL sandbox** for untrusted, often AI-generated, SQL over a shared DuckLake (Parquet on S3, catalog in Postgres or a DuckDB file). In the spirit of smolvm/microVM CLIs: a sandbox sees **nothing** except what its spec hands it.
 
-This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/src/common/duckdb_layer.hpp`. Development is DuckDB **2.0.0**.
+This is **not** a DuckDB fork. Parser/planner/settings stay behind `server/src/common/duckdb_layer.hpp`. Development is DuckDB **2.0.0** only (1.5.x is not supported). Sandboxes are in-memory; duckbox does not pin `storage_compatibility_version` ([docs/storage.md](docs/storage.md)). Agent SQL may use Python-style lambdas (`lambda x : …`); single-arrow `x -> …` is denied ([docs/lambda-syntax.md](docs/lambda-syntax.md)). An existing DuckLake (Postgres catalog, Parquet on S3) is attached without catalog migration ([docs/ducklake-compatibility.md](docs/ducklake-compatibility.md)).
 
 ## Actors and trust model
 
@@ -39,8 +39,9 @@ The rewriter does **not** expand macros. Spec validation and warmup reject an al
 - `now()`, `current_timestamp`, and `now() - INTERVAL '1 day'` (and any other non-literal timestamp expression)
 - `VERSION => '2'` (string; VERSION must be an integer literal)
 - `VERSION => CAST('2' AS INT)` (the child is a string literal, so this is denied)
+- functions, settings, and lambdas in `AT` (including `x -> …` and `lambda x : …`)
 
-Use `AT (VERSION => 2)` or `AT (TIMESTAMP => '2024-01-01 00:00:00')`.
+Use `AT (VERSION => 2)` or `AT (TIMESTAMP => '2024-01-01 00:00:00')`. Allowed `AT` still returns that tenant's older versions, including rows later marked `_deleted`.
 
 **Daemon identity** — `name` (and `lease.node_id` when set) must match `[A-Za-z0-9._-]` and be at most 128 bytes on **every** daemon, including single-node / no-lease. The same string is the S3 lease-probe key suffix, so a name such as `memory dev:1` is now refused (`name: must match [A-Za-z0-9._-]`). Use something like `memory-dev-1`.
 
@@ -59,7 +60,7 @@ attachments:
 
 ## Run everything locally (macOS and Linux)
 
-Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (compose → seed → serve → CLI create → quickstart). Job `enforcement` runs the test commands. Job `macos-arm64` builds with AppleClang and runs unit + guardrail tests (no Docker).
+Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (compose → seed with DuckDB 2.0 → serve → CLI create → quickstart). Job `enforcement` runs the test commands. Job `macos-arm64` builds with AppleClang and runs unit + guardrail tests (no Docker). Job `multi-node` is lease failover (RustFS, memory policy).
 
 ### Prerequisites
 
@@ -153,7 +154,7 @@ print(db.query("SELECT id, title, amount FROM deals"))
 
 `lake.bootstrap_sql` file paths are **relative to the spec file**, not the working directory (`policies/memory/analyst.yaml` uses `../../examples/sql/memory_init.sql`). Inlined SQL is also accepted. The daemon never re-reads that host path at warmup — LoadSpecFile inlines the file first. That SQL is trusted SaaS seed input (it can `read_csv` / `query()` via `CREATE TABLE AS SELECT` or `INSERT … SELECT` before external access is disabled). Agent queries stay tenant-wrapped. On DuckLake the field is a validation error.
 
-**RustFS** is the only S3-compatible store in `docker-compose.yml` (pinned `rustfs/rustfs:1.0.3`). The README runbook, STS suite, and multi-node e2e all use it at `127.0.0.1:9000`. Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads — that client is **aws-sdk-cpp S3Client** (vcpkg: S3, STS, identity-management) with endpoint override and path-style addressing. Arrow `S3FileSystem` has no conditional-write headers, so it is not used for the control plane. Tests inject an in-memory `S3ControlClient`.
+**RustFS** is the only S3-compatible store in `docker-compose.yml` (pinned `rustfs/rustfs:1.0.3`). The README runbook, STS suite, and multi-node e2e all use it at `127.0.0.1:9000`. Never add MinIO or a fork. Reads use DuckDB httpfs path-style S3. Conditional S3 (If-Match / If-None-Match) is for **leases and the named-sandbox registry**, not for lake reads — that client is **aws-sdk-cpp S3Client** (vcpkg: S3, STS, identity-management) with endpoint override and path-style addressing. Arrow `S3FileSystem` has no conditional-write headers, so it is not used for the control plane. Tests inject an in-memory `S3ControlClient`.
 
 ## Named sandboxes
 
@@ -300,6 +301,7 @@ The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl 
 | --- | --- |
 | `daemons/` | Control-plane YAML (listen, limits, optional lease) |
 | `policies/` | Sandbox specs (lake + tables + key + functions) |
+| `docs/` | Multi-node leases; lake S3 credentials; DuckDB 2.0 storage, lambda syntax, DuckLake compat |
 | `server/src/<area>/` | C++ node + enforcement, headers next to sources |
 | `examples/python/` | Quickstart notebook/script, `duckbox_client`, CLI utility |
 | `test/` | CTest suites: `unit`, `guardrails` (YAML SQL corpus), `integration` |

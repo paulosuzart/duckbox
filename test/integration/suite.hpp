@@ -19,6 +19,9 @@ void RunTriggerRuntimeTests();
 void RunQuackRuntimeTests();
 void RunExtensionCapiRuntimeTests();
 void RunAgentModeRuntimeTests();
+void RunLambdaNewSyntaxRuntimeTests();
+void RunLambdaOldSyntaxRuntimeTests();
+void RunStorageFormatRuntimeTests();
 void RunSecretFlightTests();
 
 } // namespace test

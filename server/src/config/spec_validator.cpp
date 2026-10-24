@@ -210,6 +210,13 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         if (spec.lake.data_path.empty()) {
             add("lake.data_path", "required when lake.kind=ducklake");
         }
+        if (!spec.lake.read_only) {
+            add("lake.read_only", "kind: ducklake requires read_only: true");
+        }
+        auto alias = spec.lake.alias.empty() ? "lake" : spec.lake.alias;
+        if (!ValidSqlIdent(alias)) {
+            add("lake.alias", "not a valid identifier");
+        }
         ValidateS3CredentialFields(spec.lake.s3, spec.lake.kind, spec.lake.extensions, issues);
         if (!spec.lake.catalog_ref.Empty()) {
             ValidateSecretRefSyntax(spec.lake.catalog_ref, "lake.catalog", issues);
