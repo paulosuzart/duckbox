@@ -144,9 +144,9 @@ std::string EncodeDoPutHandle(const std::string &handle) {
 }
 
 Status FromEx(const std::exception &e) {
-    // CatalogUnavailableError is already the fixed generic message (thrown at
-    // the attach / catalog-IO site). Every other tenant error is returned as-is.
-    const char *client = e.what();
+    // Pattern-only safety net (no secret ctx): password=, URI userinfo, or a
+    // catalog IO/CONNECTION/HTTP type / marker. Never substitute values.
+    std::string client = ClientFacingError(e.what(), ddb::ErrorData(e).Type());
     if (dynamic_cast<const ConflictError *>(&e)) {
         return Status::AlreadyExists(client);
     }

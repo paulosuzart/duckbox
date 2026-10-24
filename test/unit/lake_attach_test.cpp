@@ -20,6 +20,45 @@ void duckbox::test::RunLakeAttachSecretTests() {
     Expect(std::string(CatalogUnavailableError().what()) == kCatalogUnavailableClientError,
            "CatalogUnavailableError is the fixed generic catalog message");
 
+    Expect(IsCatalogTransportType(ddb::ExceptionType::IO) &&
+               IsCatalogTransportType(ddb::ExceptionType::CONNECTION) &&
+               IsCatalogTransportType(ddb::ExceptionType::HTTP) &&
+               !IsCatalogTransportType(ddb::ExceptionType::CONVERSION) &&
+               !IsCatalogTransportType(ddb::ExceptionType::BINDER) &&
+               !IsCatalogTransportType(ddb::ExceptionType::FATAL),
+           "catalog transport types are IO, CONNECTION, HTTP only");
+    Expect(HasCatalogIoMarker("Unable to connect to Postgres at dsn") &&
+               HasCatalogIoMarker("Failed to query most recent snapshot for DuckLake") &&
+               HasCatalogIoMarker("IO Error: failed to attach DuckLake") &&
+               !HasCatalogIoMarker("Unable to connect dummysecretvalue") &&
+               !HasCatalogIoMarker("Conversion Error: Could not convert"),
+           "catalog markers match DuckDB phrases that carry the DSN");
+    Expect(HasCredentialLeak("FATAL: starting up password=secret-value") &&
+               HasCredentialLeak("IO Error: postgresql://duckbox:secret-value@127.0.0.1/lake") &&
+               !HasCredentialLeak("Conversion Error: Could not convert string 'x'"),
+           "leak patterns are password= and URI userinfo");
+    SecretRedactionContext dsn_ctx;
+    dsn_ctx.exact_values = {"dbname=lake host=pg password=configured-dsn-secret",
+                            "configured-dsn-secret"};
+    Expect(HasCredentialLeak("echo dbname=lake host=pg password=configured-dsn-secret", dsn_ctx),
+           "configured DSN in the text is a leak");
+    Expect(!HasCredentialLeak("Conversion Error: Could not convert string 'configured-dsn-secret'",
+                              dsn_ctx),
+           "extracted password alone is not a leak (that would be an oracle)");
+    Expect(ClientFacingError("network reset", ddb::ExceptionType::IO) ==
+               kCatalogUnavailableClientError,
+           "IO type without a marker is generic");
+    Expect(ClientFacingError("Unable to connect to Postgres at x",
+                             ddb::ExceptionType::CONVERSION) == kCatalogUnavailableClientError,
+           "catalog marker without IO type is generic");
+    Expect(ClientFacingError("FATAL: starting up password=x", ddb::ExceptionType::FATAL) ==
+               kCatalogUnavailableClientError,
+           "password= safety net is generic even for FATAL");
+    Expect(ClientFacingError("Conversion Error: Could not convert string 'x'",
+                             ddb::ExceptionType::CONVERSION)
+                   .find("Conversion Error") != std::string::npos,
+           "conversion errors stay as-is");
+
     Expect(RedactSecretText("IO Error: Failed to attach DuckLake password=super-secret")
                    .find("super-secret") == std::string::npos,
            "RedactSecretText strips password= values");

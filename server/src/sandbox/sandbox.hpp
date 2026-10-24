@@ -140,8 +140,9 @@ class WarmupHardeningReadError {
 
 #ifdef DUCKBOX_TESTING
 // Test seam (compiled only with DUCKBOX_TESTING). While alive, RunTimed /
-// Describe pretends DuckDB returned this error (process-wide so a Flight
-// worker thread sees it).
+// Describe / ExtractPlan pretends DuckDB returned this error (process-wide
+// so a Flight worker thread sees it). The text is classified by
+// RethrowQueryError (type / catalog marker / leak pattern), not always-generic.
 class QueryErrorInjection {
   public:
     explicit QueryErrorInjection(std::string duckdb_error);

@@ -76,6 +76,88 @@ void duckbox::test::RunSandboxExecTests() {
                "operator log records the catalog-down event");
     }
     {
+        // Single-connection failure (injection): keyword and URL DSNs must not
+        // leak on Execute, Describe, prepared, ExtractPlan.
+        struct DsnCase {
+            const char *label;
+            const char *pw;
+            const char *injected;
+        };
+        const DsnCase cases[] = {
+            {"keyword", "duckbox-kw-catalog-secret-aa11",
+             "IO Error: Unable to connect to Postgres at \"dbname=lake host=127.0.0.1 "
+             "port=5432 user=duckbox password=duckbox-kw-catalog-secret-aa11\""},
+            {"url", "duckbox-url-catalog-secret-bb22",
+             "IO Error: Unable to connect to Postgres at "
+             "\"postgresql://duckbox:duckbox-url-catalog-secret-bb22@127.0.0.1:5432/lake\""},
+        };
+        auto expect_generic = [&](const std::string &err, const char *pw,
+                                  const std::string &label) {
+            Expect(err.find(kCatalogUnavailableClientError) != std::string::npos,
+                   label + " uses the generic catalog message");
+            Expect(err.find(pw) == std::string::npos && err.find("password=") == std::string::npos,
+                   label + " must not include password or password=");
+        };
+        for (const auto &c : cases) {
+            QueryErrorInjection down(c.injected);
+            std::string exec_err;
+            try {
+                box_yaml.Execute("SELECT count(*) FROM deals");
+                Expect(false, std::string(c.label) + " Execute must fail");
+            } catch (const std::exception &e) {
+                exec_err = e.what();
+            }
+            expect_generic(exec_err, c.pw, std::string(c.label) + " Execute");
+
+            std::string desc_err;
+            try {
+                (void)box_yaml.DescribeRewritten("SELECT id FROM deals");
+                Expect(false, std::string(c.label) + " Describe must fail");
+            } catch (const std::exception &e) {
+                desc_err = e.what();
+            }
+            expect_generic(desc_err, c.pw, std::string(c.label) + " Describe");
+
+            std::string arrow_err;
+            try {
+                (void)box_yaml.DescribeRewrittenArrow("SELECT id FROM deals");
+                Expect(false, std::string(c.label) + " DescribeArrow must fail");
+            } catch (const std::exception &e) {
+                arrow_err = e.what();
+            }
+            expect_generic(arrow_err, c.pw, std::string(c.label) + " DescribeArrow");
+
+            std::string prep_err;
+            try {
+                std::vector<ddb::Value> params;
+                params.push_back(ddb::Value::INTEGER(1));
+                box_yaml.ExecuteRewritten("SELECT id FROM deals WHERE id = ?", params);
+                Expect(false, std::string(c.label) + " prepared must fail");
+            } catch (const std::exception &e) {
+                prep_err = e.what();
+            }
+            expect_generic(prep_err, c.pw, std::string(c.label) + " prepared");
+
+            std::string plan_err;
+            try {
+                (void)box_yaml.ExtractPlan("SELECT id FROM deals");
+                Expect(false, std::string(c.label) + " ExtractPlan must fail");
+            } catch (const std::exception &e) {
+                plan_err = e.what();
+            }
+            expect_generic(plan_err, c.pw, std::string(c.label) + " ExtractPlan");
+        }
+        std::string binder_err;
+        try {
+            (void)box_yaml.ExtractPlan("SELECT no_such_column FROM deals");
+        } catch (const std::exception &e) {
+            binder_err = e.what();
+        }
+        Expect(!binder_err.empty() &&
+                   binder_err.find(kCatalogUnavailableClientError) == std::string::npos,
+               "ExtractPlan binder errors stay as-is");
+    }
+    {
         auto leaky = policy;
         leaky.lake.catalog = "ducklake:postgres:dbname=lake password=dummysecretvalue";
         TenantSandbox box_oracle(daemon, leaky, key_a, spec_dir);
@@ -145,28 +227,6 @@ void duckbox::test::RunSandboxExecTests() {
                      "AT timestamp literal");
         expect_equal("SELECT * FROM read_csv('" + secret + ".csv')",
                      "SELECT * FROM read_csv('" + other + ".csv')", "read_csv");
-        {
-            box_oracle.GetPolicyMut().lake.kind = LakeKind::Ducklake;
-            std::string conv;
-            try {
-                box_oracle.Execute("SELECT CAST('x' AS INTEGER)");
-            } catch (const std::exception &e) {
-                conv = e.what();
-            }
-            Expect(conv.find("Conversion Error") != std::string::npos,
-                   "DuckLake probe that succeeds leaves conversion errors as-is");
-            box_oracle.GetPolicyMut().Table("deals").catalog = "no_such_catalog";
-            std::string down;
-            try {
-                box_oracle.Execute("SELECT CAST('y' AS INTEGER)");
-            } catch (const std::exception &e) {
-                down = e.what();
-            }
-            Expect(down.find(kCatalogUnavailableClientError) != std::string::npos,
-                   "DuckLake probe failure is the generic catalog message");
-            box_oracle.GetPolicyMut().lake.kind = LakeKind::Memory;
-            box_oracle.GetPolicyMut().Table("deals").catalog = "memory";
-        }
         expect_equal("SELECT " + secret + " FROM deals", "SELECT " + other + " FROM deals",
                      "binder name");
         {
@@ -683,22 +743,35 @@ void duckbox::test::RunSandboxExecTests() {
             cli.Post("/v1/query", hdr, "{\"sql\":\"SELECT 1 AS \\\"x\\\"\"}", "application/json");
         Expect(static_cast<bool>(quoted), "debug HTTP parses JSON string escapes in sql");
         {
-            const char *pw = "duckbox-http-catalog-secret-bb02";
-            const char *dsn = "dbname=lake host=127.0.0.1 port=5432 user=duckbox "
-                              "password=duckbox-http-catalog-secret-bb02";
-            auto injected =
-                std::string("IO Error: Failed to query most recent snapshot for DuckLake: "
-                            "Unable to connect to Postgres at \"") +
-                dsn + "\"";
-            QueryErrorInjection down(injected);
-            auto cat = cli.Post("/v1/query", hdr, "{\"sql\":\"SELECT count(*) FROM deals\"}",
-                                "application/json");
-            Expect(cat && cat->status == 400, "debug HTTP catalog-down is 400");
-            Expect(cat->body.find(pw) == std::string::npos &&
-                       cat->body.find(dsn) == std::string::npos,
-                   "debug HTTP catalog-down must not include password or DSN");
-            Expect(cat->body.find(kCatalogUnavailableClientError) != std::string::npos,
-                   "debug HTTP catalog-down uses the generic catalog message");
+            struct HttpDsn {
+                const char *label;
+                const char *pw;
+                const char *injected;
+            };
+            const HttpDsn http_cases[] = {
+                {"keyword", "duckbox-http-catalog-secret-bb02",
+                 "IO Error: Failed to query most recent snapshot for DuckLake: "
+                 "Unable to connect to Postgres at \"dbname=lake host=127.0.0.1 port=5432 "
+                 "user=duckbox password=duckbox-http-catalog-secret-bb02\""},
+                {"url", "duckbox-http-url-catalog-secret-cc03",
+                 "IO Error: Unable to connect to Postgres at "
+                 "\"postgresql://duckbox:duckbox-http-url-catalog-secret-cc03@127.0.0.1:5432/"
+                 "lake\""},
+            };
+            for (const auto &c : http_cases) {
+                QueryErrorInjection down(c.injected);
+                auto cat = cli.Post("/v1/query", hdr, "{\"sql\":\"SELECT count(*) FROM deals\"}",
+                                    "application/json");
+                Expect(cat && cat->status == 400,
+                       std::string("debug HTTP ") + c.label + " catalog-down is 400");
+                Expect(cat->body.find(c.pw) == std::string::npos &&
+                           cat->body.find("password=") == std::string::npos,
+                       std::string("debug HTTP ") + c.label +
+                           " catalog-down must not include password");
+                Expect(cat->body.find(kCatalogUnavailableClientError) != std::string::npos,
+                       std::string("debug HTTP ") + c.label +
+                           " catalog-down uses the generic catalog message");
+            }
         }
         {
             auto rec_b = rec;

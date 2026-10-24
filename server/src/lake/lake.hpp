@@ -20,8 +20,8 @@ inline constexpr const char *kCatalogAttachClientError =
     "ducklake catalog attach failed; see operator logs";
 inline constexpr const char *kS3SecretClientError =
     "lake S3 secret creation failed; see operator logs";
-// Client-facing query-path catalog IO. Thrown only from the attach / catalog-IO
-// code site (never by classifying DuckDB message text).
+// Client-facing query-path catalog IO. Thrown when DuckDB reports IO /
+// CONNECTION / HTTP, an unambiguous catalog marker, or a credential leak.
 inline constexpr const char *kCatalogUnavailableClientError = common::kLakeCatalogUnavailable;
 inline constexpr const char *kRedactedMarker = "<redacted>";
 
@@ -45,6 +45,16 @@ std::string ResolvePath(const std::string &base_dir, const std::string &path);
 // Never apply this to tenant-visible error text.
 std::string RedactSecretText(const std::string &text);
 std::string RedactSecretText(const std::string &text, const SecretRedactionContext &ctx);
+
+// Tenant-facing catalog classification. Not a value oracle: the response does
+// not depend on any guessed secret. Never substitute or echo secret values.
+bool IsCatalogTransportType(ddb::ExceptionType type);
+bool HasCatalogIoMarker(const std::string &text);
+bool HasCredentialLeak(const std::string &text, const SecretRedactionContext &ctx = {});
+std::string ClientFacingError(const std::string &text,
+                              ddb::ExceptionType type = ddb::ExceptionType::INVALID,
+                              const SecretRedactionContext &ctx = {});
+
 void ExecOrThrow(ddb::Connection &con, const std::string &sql);
 
 // Memory-lake seed only: CREATE TABLE / SCHEMA (including CTAS) and INSERT.

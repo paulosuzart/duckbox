@@ -60,8 +60,7 @@ class NotFoundError : public Error {
     explicit NotFoundError(const std::string &msg) : Error(msg) {}
 };
 
-// Lake catalog attach / catalog IO failed at a duckbox code site (not by
-// inspecting DuckDB message text). Tenant-visible message is fixed.
+// Lake catalog attach / catalog IO failed. Tenant-visible message is fixed.
 inline constexpr const char *kLakeCatalogUnavailable =
     "lake catalog unavailable; see operator logs";
 

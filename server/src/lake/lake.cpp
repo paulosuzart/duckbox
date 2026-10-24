@@ -435,6 +435,82 @@ std::string RedactSecretText(const std::string &text, const SecretRedactionConte
     return out;
 }
 
+namespace {
+
+bool CiContains(const std::string &s, const std::string &pat) {
+    if (pat.empty() || s.size() < pat.size()) {
+        return false;
+    }
+    for (size_t i = 0; i + pat.size() <= s.size(); i++) {
+        if (CiEq(s, i, pat)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool LooksLikeConfiguredDsn(const std::string &v) {
+    if (v.size() < 4) {
+        return false;
+    }
+    if (CiContains(v, "dbname=")) {
+        return true;
+    }
+    if (v.find("://") != std::string::npos) {
+        return true;
+    }
+    return CiContains(v, "host=") && CiContains(v, "password=");
+}
+
+bool HasUriUserinfo(const std::string &text) {
+    size_t sep = 0;
+    while ((sep = text.find("://", sep)) != std::string::npos) {
+        size_t start = sep + 3;
+        size_t at = text.find('@', start);
+        if (at != std::string::npos && text.find(':', start) < at) {
+            return true;
+        }
+        sep += 3;
+    }
+    return false;
+}
+
+} // namespace
+
+bool IsCatalogTransportType(ddb::ExceptionType type) {
+    return type == ddb::ExceptionType::IO || type == ddb::ExceptionType::CONNECTION ||
+           type == ddb::ExceptionType::HTTP;
+}
+
+bool HasCatalogIoMarker(const std::string &text) {
+    return CiContains(text, "Unable to connect to Postgres") ||
+           CiContains(text, "Failed to query most recent snapshot") ||
+           CiContains(text, "failed to attach");
+}
+
+bool HasCredentialLeak(const std::string &text, const SecretRedactionContext &ctx) {
+    if (CiContains(text, "password=")) {
+        return true;
+    }
+    if (HasUriUserinfo(text)) {
+        return true;
+    }
+    for (const auto &v : ctx.exact_values) {
+        if (LooksLikeConfiguredDsn(v) && text.find(v) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string ClientFacingError(const std::string &text, ddb::ExceptionType type,
+                              const SecretRedactionContext &ctx) {
+    if (IsCatalogTransportType(type) || HasCatalogIoMarker(text) || HasCredentialLeak(text, ctx)) {
+        return common::kLakeCatalogUnavailable;
+    }
+    return text;
+}
+
 void ExecOrThrow(ddb::Connection &con, const std::string &sql) {
     EnsureLinkedDuckDb();
     auto r = con.Query(sql);

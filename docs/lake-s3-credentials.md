@@ -237,13 +237,19 @@ the mock.
 Warmup logs `profile=` / `role_arn=` and secret **refs** (`env:NAME`). Secret
 values are never logged. Tenant-facing errors never substitute configured
 secret values — that comparison is an oracle. Catalog attach / connection
-failures, detected at the duckbox attach or catalog-IO site (not by message
-text), return only `lake catalog unavailable; see operator logs`. Every other
-tenant error is returned as-is. Operator logs of those attach / catalog-IO
-failures apply DSN and password redaction (exact configured values, then
-`password=`, `postgresql://` userinfo, `CREATE SECRET` `KEY_ID` / `SECRET` /
-`SESSION_TOKEN`). Attach and `CREATE SECRET` warmup failures stay on their
-generic messages. The rewriter rejects tenant SQL that touches secrets.
+failures return only `lake catalog unavailable; see operator logs` when the
+DuckDB error is an IO, CONNECTION, or HTTP exception, or carries an
+unambiguous catalog marker (`Unable to connect to Postgres`, `Failed to
+query most recent snapshot`, `failed to attach`). A final safety net on
+Flight, debug HTTP, Describe, and prepared paths replaces any remaining
+message that contains `password=`, URI userinfo (`scheme://user:pass@`), or
+the configured DSN with that same generic text, without substituting or
+echoing values. Every other tenant error is returned as-is. Operator logs of
+those attach / catalog-IO failures apply DSN and password redaction (exact
+configured values, then `password=`, `postgresql://` userinfo, `CREATE
+SECRET` `KEY_ID` / `SECRET` / `SESSION_TOKEN`). Attach and `CREATE SECRET`
+warmup failures stay on their generic messages. The rewriter rejects tenant
+SQL that touches secrets.
 
 **Time travel `AT`.** Only constant literals are accepted. `now()`,
 `current_timestamp`, `now() - INTERVAL …`, `VERSION => '2'`, and

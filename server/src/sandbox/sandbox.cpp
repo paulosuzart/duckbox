@@ -177,25 +177,13 @@ SecretRedactionContext RedactCtxOf(const std::vector<std::string> &values) {
     throw CatalogUnavailableError();
 }
 
-bool LakeCatalogReachable(ddb::Connection &con, const Policy &policy) {
-    if (policy.lake.kind != LakeKind::Ducklake || policy.tables.empty()) {
-        return true;
-    }
-    const auto &table = policy.tables.begin()->second;
-    auto sql = "SELECT 1 FROM " + QuoteSqlIdent(table.catalog) + "." + QuoteSqlIdent(table.schema) +
-               "." + QuoteSqlIdent(table.name) + " LIMIT 0";
-    try {
-        auto r = con.Query(sql);
-        return r && !r->HasError();
-    } catch (...) {
-        return false;
-    }
-}
-
-[[noreturn]] void RethrowQueryError(ddb::Connection &con, const Policy &policy,
-                                    const std::string &raw,
+[[noreturn]] void RethrowQueryError(const std::string &raw, ddb::ExceptionType type,
                                     const std::vector<std::string> &secrets) {
-    if (policy.lake.kind == LakeKind::Ducklake && !LakeCatalogReachable(con, policy)) {
+    if (raw == kLakeCatalogUnavailable) {
+        throw CatalogUnavailableError();
+    }
+    auto ctx = RedactCtxOf(secrets);
+    if (IsCatalogTransportType(type) || HasCatalogIoMarker(raw) || HasCredentialLeak(raw, ctx)) {
         ThrowCatalogUnavailable(raw, secrets);
     }
     throw Error(raw);
@@ -442,7 +430,7 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
         auto injected = InjectedQueryError();
         if (!injected.empty()) {
             finish_watchdog();
-            ThrowCatalogUnavailable(injected, secret_values_);
+            RethrowQueryError(injected, ddb::ExceptionType::IO, secret_values_);
         }
 #endif
         std::unique_ptr<ddb::QueryResult> result;
@@ -453,7 +441,7 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
             if (ps->HasError()) {
                 finish_watchdog();
                 RecoverAfterFailure();
-                RethrowQueryError(*con_, policy_, ps->GetError(), secret_values_);
+                RethrowQueryError(ps->GetError(), ps->GetErrorObject().Type(), secret_values_);
             }
             auto dparams = ToDuckValues(params);
             result = ps->Execute(dparams, ddb::QueryParameters{});
@@ -464,7 +452,7 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
                 throw Error("query timeout");
             }
             RecoverAfterFailure();
-            RethrowQueryError(*con_, policy_, result->GetError(), secret_values_);
+            RethrowQueryError(result->GetError(), result->GetErrorType(), secret_values_);
         }
         result->Complete();
         out.text_table = result->ToString();
@@ -604,6 +592,14 @@ ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::stri
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();
     }
+#ifdef DUCKBOX_TESTING
+    {
+        auto injected = InjectedQueryError();
+        if (!injected.empty()) {
+            RethrowQueryError(injected, ddb::ExceptionType::IO, secret_values_);
+        }
+    }
+#endif
     try {
         try {
             return con_->ExtractPlan(sql);
@@ -619,9 +615,12 @@ ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::stri
             RecoverAfterFailure();
             return con_->ExtractPlan(stripped);
         }
-    } catch (const std::exception &) {
+    } catch (const CatalogUnavailableError &) {
         RecoverAfterFailure();
         throw;
+    } catch (const std::exception &e) {
+        RecoverAfterFailure();
+        RethrowQueryError(e.what(), ddb::ErrorData(e).Type(), secret_values_);
     } catch (...) {
         RecoverAfterFailure();
         throw;
@@ -639,14 +638,14 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
 #ifdef DUCKBOX_TESTING
         auto injected = InjectedQueryError();
         if (!injected.empty()) {
-            ThrowCatalogUnavailable(injected, secret_values_);
+            RethrowQueryError(injected, ddb::ExceptionType::IO, secret_values_);
         }
 #endif
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto ps = con_->Prepare(rewritten);
         if (ps->HasError()) {
             RecoverAfterFailure();
-            RethrowQueryError(*con_, policy_, ps->GetError(), secret_values_);
+            RethrowQueryError(ps->GetError(), ps->GetErrorObject().Type(), secret_values_);
         }
         std::vector<ColumnSchema> out;
         auto &names = ps->GetNames();
@@ -655,9 +654,12 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
             out.push_back(ColumnSchema{IdentName(names[i]), types[i].ToString()});
         }
         return out;
-    } catch (const std::exception &) {
+    } catch (const CatalogUnavailableError &) {
         RecoverAfterFailure();
         throw;
+    } catch (const std::exception &e) {
+        RecoverAfterFailure();
+        RethrowQueryError(e.what(), ddb::ErrorData(e).Type(), secret_values_);
     } catch (...) {
         RecoverAfterFailure();
         throw;
@@ -675,14 +677,14 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std
 #ifdef DUCKBOX_TESTING
         auto injected = InjectedQueryError();
         if (!injected.empty()) {
-            ThrowCatalogUnavailable(injected, secret_values_);
+            RethrowQueryError(injected, ddb::ExceptionType::IO, secret_values_);
         }
 #endif
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto ps = con_->Prepare(rewritten);
         if (ps->HasError()) {
             RecoverAfterFailure();
-            RethrowQueryError(*con_, policy_, ps->GetError(), secret_values_);
+            RethrowQueryError(ps->GetError(), ps->GetErrorObject().Type(), secret_values_);
         }
         auto &names = ps->GetNames();
         auto &types = ps->GetTypes();
@@ -696,9 +698,12 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std
         }
         auto opts = con_->context->GetClientProperties();
         return SchemaFromLogicalTypes(out_names, out_types, opts);
-    } catch (const std::exception &) {
+    } catch (const CatalogUnavailableError &) {
         RecoverAfterFailure();
         throw;
+    } catch (const std::exception &e) {
+        RecoverAfterFailure();
+        RethrowQueryError(e.what(), ddb::ErrorData(e).Type(), secret_values_);
     } catch (...) {
         RecoverAfterFailure();
         throw;
