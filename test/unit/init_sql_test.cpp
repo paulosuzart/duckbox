@@ -68,4 +68,13 @@ void duckbox::test::RunInitSqlTests() {
                         "lake bootstrap rejects CREATE VIEW");
     ExpectThrowContains([&] { CheckBootstrapSql("CREATE INDEX i ON t(i)"); },
                         "CREATE TABLE/SCHEMA/INSERT", "lake bootstrap rejects CREATE INDEX");
+    ExpectThrowContains(
+        [&] {
+            CheckBootstrapSql("CREATE TRIGGER trg AFTER INSERT ON t FOR EACH ROW "
+                              "INSERT INTO t VALUES (1)",
+                              policy);
+        },
+        "CREATE TRIGGER", "bootstrap rejects CREATE TRIGGER");
+    ExpectThrowContains([&] { CheckBootstrapSql("CONNECT 'quack:localhost'", policy); }, "CONNECT",
+                        "bootstrap rejects CONNECT");
 }

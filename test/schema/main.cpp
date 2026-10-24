@@ -13,5 +13,6 @@ int main() {
     std::clog << std::unitbuf;
     RunArrowTypeMapTests();
     RunFlightSchemaTests();
+    RunVariantTypeTests();
     return ReportAndExit("schema");
 }

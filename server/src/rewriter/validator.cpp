@@ -259,6 +259,69 @@ void SqlValidator::Validate(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>
     ValidateStatements(stmts, policy);
 }
 
+std::string SettingOrCallName(const ddb::SQLStatement &st) {
+    if (st.type == ddb::StatementType::SET_STATEMENT) {
+        return Lower(IdentName(st.Cast<ddb::SetStatement>().name));
+    }
+    if (st.type == ddb::StatementType::PRAGMA_STATEMENT) {
+        auto &pr = st.Cast<ddb::PragmaStatement>();
+        return pr.info ? Lower(IdentName(pr.info->name)) : std::string();
+    }
+    if (st.type == ddb::StatementType::CALL_STATEMENT) {
+        auto &call = st.Cast<ddb::CallStatement>();
+        if (call.function &&
+            call.function->GetExpressionClass() == ddb::ExpressionClass::FUNCTION) {
+            return Lower(IdentName(call.function->Cast<ddb::FunctionExpression>().FunctionName()));
+        }
+        return call.function ? Lower(call.function->ToString()) : std::string();
+    }
+    return {};
+}
+
+void RejectDeniedStatement(const ddb::SQLStatement &st) {
+    if (st.type == ddb::StatementType::SELECT_STATEMENT) {
+        return;
+    }
+    auto named = SettingOrCallName(st);
+    if (named.find("user_agent") != std::string::npos) {
+        throw SqlRejected("user_agent is denied");
+    }
+    if (named.find("agent") != std::string::npos) {
+        throw SqlRejected("agent mode is denied");
+    }
+    if (named.find("quack") != std::string::npos || named == "whoami") {
+        throw SqlRejected("Quack is denied");
+    }
+    switch (st.type) {
+    case ddb::StatementType::CONNECT_STATEMENT:
+    case ddb::StatementType::DISCONNECT_STATEMENT:
+    case ddb::StatementType::PASSTHROUGH_STATEMENT:
+        throw SqlRejected("CONNECT is denied");
+    case ddb::StatementType::EXTERNAL_RESOURCE_STATEMENT:
+        throw SqlRejected("external resources are denied");
+    case ddb::StatementType::LOAD_STATEMENT:
+    case ddb::StatementType::EXTENSION_STATEMENT:
+    case ddb::StatementType::UPDATE_EXTENSIONS_STATEMENT:
+        throw SqlRejected("extension loading is denied");
+    case ddb::StatementType::CREATE_STATEMENT: {
+        auto &create = st.Cast<ddb::CreateStatement>();
+        if (create.info && create.info->type == ddb::CatalogType::TRIGGER_ENTRY) {
+            throw SqlRejected("triggers are denied");
+        }
+        throw SqlRejected("only SELECT is allowed");
+    }
+    case ddb::StatementType::DROP_STATEMENT: {
+        auto &drop = st.Cast<ddb::DropStatement>();
+        if (drop.info && drop.info->type == ddb::CatalogType::TRIGGER_ENTRY) {
+            throw SqlRejected("triggers are denied");
+        }
+        throw SqlRejected("only SELECT is allowed");
+    }
+    default:
+        throw SqlRejected("only SELECT is allowed");
+    }
+}
+
 void ValidateStatements(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &stmts,
                         const Policy &policy) {
     if (stmts.empty()) {
@@ -267,9 +330,7 @@ void ValidateStatements(const ddb::vector<ddb::unique_ptr<ddb::SQLStatement>> &s
     if (stmts.size() != 1) {
         throw SqlRejected("only a single statement is allowed");
     }
-    if (stmts[0]->type != ddb::StatementType::SELECT_STATEMENT) {
-        throw SqlRejected("only SELECT is allowed");
-    }
+    RejectDeniedStatement(*stmts[0]);
     ValidationContext ctx;
     ctx.policy = &policy;
     ValidateSelect(stmts[0]->Cast<ddb::SelectStatement>(), ctx);

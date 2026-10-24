@@ -11,6 +11,11 @@ void RunS3RegistryTests();
 void RunAuthFlightTests();
 void RunClusterTests();
 void RunSignalShutdownTests();
+void RunConnectRuntimeTests();
+void RunTriggerRuntimeTests();
+void RunQuackRuntimeTests();
+void RunExtensionCapiRuntimeTests();
+void RunAgentModeRuntimeTests();
 
 } // namespace test
 } // namespace duckbox
