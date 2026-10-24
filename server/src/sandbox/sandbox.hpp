@@ -5,13 +5,13 @@
 // Passivate frees DuckDB; warmup recreates it, resolves credential refs,
 // attaches the spec's lake, then lock_configuration.
 
-#include "node/daemon_config.hpp"
-#include "common/duckdb_layer.hpp"
 #include "arrow/arrow_types.hpp"
+#include "common/duckdb_layer.hpp"
 #include "config/policy.hpp"
-#include "sandbox/sandbox_registry.hpp"
-#include "s3/secrets.hpp"
+#include "node/daemon_config.hpp"
 #include "rewriter/tenant_key.hpp"
+#include "s3/secrets.hpp"
+#include "sandbox/sandbox_registry.hpp"
 
 #include <arrow/type.h>
 #include <atomic>
@@ -30,7 +30,7 @@ class ILeaseManager;
 class IRouter;
 class S3NodeDirectory;
 class Clock;
-}
+} // namespace cluster
 namespace sandbox {
 
 // One query result. arrow_ipc is produced from the same materialized result as text_table (query
@@ -46,8 +46,8 @@ struct QueryOutput {
 // Execute on the same instance cannot interleave.
 class TenantSandbox {
   public:
-    TenantSandbox(node::DaemonConfig daemon, config::Policy policy, rewriter::TenantKey key, std::string spec_dir,
-                  std::string sandbox_id = "", int version = 0,
+    TenantSandbox(node::DaemonConfig daemon, config::Policy policy, rewriter::TenantKey key,
+                  std::string spec_dir, std::string sandbox_id = "", int version = 0,
                   std::shared_ptr<s3::SecretResolver> secrets = {});
     ~TenantSandbox();
 
@@ -69,6 +69,9 @@ class TenantSandbox {
     std::shared_ptr<::arrow::Schema> DescribeRewrittenArrow(const std::string &sql);
     ddb::unique_ptr<ddb::LogicalOperator>
     ExtractPlan(const std::string &sql); // tests: real bound plans
+    // Test seam: run SQL on the warm engine without the rewriter, so tests
+    // can prove lock_configuration holds after hardening.
+    QueryOutput ExecuteUnrewritten(const std::string &sql);
 
     const config::Policy &GetPolicy() const { return policy_; }
     config::Policy &GetPolicyMut() { return policy_; }
@@ -162,7 +165,8 @@ struct SandboxListFilter {
 class SandboxRuntime {
   public:
     SandboxRuntime(node::DaemonConfig daemon, std::shared_ptr<cluster::ILeaseManager> leases,
-                   std::shared_ptr<SandboxRegistry> defs, std::shared_ptr<cluster::IRouter> router = nullptr,
+                   std::shared_ptr<SandboxRegistry> defs,
+                   std::shared_ptr<cluster::IRouter> router = nullptr,
                    std::shared_ptr<s3::SecretResolver> secrets = {});
 
     std::shared_ptr<TenantSandbox>
@@ -172,7 +176,8 @@ class SandboxRuntime {
                      int keep_from_version = -1);
     void SetNodeDirectory(std::shared_ptr<cluster::S3NodeDirectory> nodes);
     void SetClock(std::shared_ptr<cluster::Clock> clock);
-    void SetFenceHook(std::function<void(const std::string &)> hook); // tests; production cluster::SelfFence
+    void SetFenceHook(
+        std::function<void(const std::string &)> hook); // tests; production cluster::SelfFence
     void Drain(int64_t timeout_ms = 0); // stop new leases, wait inflight, release, persist draining
     // Node-lease renew at ~1/3 TTL. Failed renew retries until published expiry;
     // then (or on missing/mismatch record) fences: stop sandboxes, fail inflight, exit.

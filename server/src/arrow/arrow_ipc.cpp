@@ -1,4 +1,5 @@
 #include "arrow/arrow_ipc.hpp"
+#include "arrow/arrow_types.hpp"
 #include "common/error.hpp"
 
 #include <arrow/buffer.h>
@@ -29,6 +30,15 @@ std::vector<uint8_t> MaterializedToArrowIpc(ddb::QueryResult &result) {
         throw Error("arrow schema import failed: " + schema_res.status().ToString());
     }
     auto schema = *schema_res;
+    auto types = result.GetTypes();
+    for (size_t i = 0; i < types.size(); i++) {
+        std::shared_ptr<::arrow::DataType> field_type;
+        if (schema && i < static_cast<size_t>(schema->num_fields()) &&
+            schema->field(static_cast<int>(i))) {
+            field_type = schema->field(static_cast<int>(i))->type();
+        }
+        RequireVariantArrowMapping(types[i], field_type);
+    }
     auto sink_res = ::arrow::io::BufferOutputStream::Create();
     if (!sink_res.ok()) {
         throw Error("arrow sink failed");

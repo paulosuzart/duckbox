@@ -507,17 +507,65 @@ std::vector<std::string> DeclaredAllowedPaths(const SandboxSpec &spec) {
 
 bool IsAlwaysDeniedTableFunction(const std::string &name) {
     // Spec validation deny-list (table-function names never allowlisted).
+    // Prefixes cover 2.0 surfaces that reach the network, filesystem, another
+    // instance, or config (Quack, Iceberg/Glue catalogs, parquet metadata, …).
     auto n = Lower(name);
     if (ddb::StringUtil::StartsWith(n, "postgres_") || ddb::StringUtil::StartsWith(n, "duckdb_") ||
         ddb::StringUtil::StartsWith(n, "ducklake_") || ddb::StringUtil::StartsWith(n, "pragma_") ||
         ddb::StringUtil::StartsWith(n, "sqlite_") || ddb::StringUtil::StartsWith(n, "mysql_") ||
-        ddb::StringUtil::StartsWith(n, "read_") || ddb::StringUtil::EndsWith(n, "_scan")) {
+        ddb::StringUtil::StartsWith(n, "read_") || ddb::StringUtil::StartsWith(n, "quack_") ||
+        ddb::StringUtil::StartsWith(n, "iceberg_") || ddb::StringUtil::StartsWith(n, "parquet_") ||
+        ddb::StringUtil::StartsWith(n, "glue_") ||
+        ddb::StringUtil::StartsWith(n, "cloudformation_") ||
+        ddb::StringUtil::StartsWith(n, "odbc_") || ddb::StringUtil::StartsWith(n, "azure_") ||
+        ddb::StringUtil::StartsWith(n, "http_") || ddb::StringUtil::StartsWith(n, "https_") ||
+        ddb::StringUtil::StartsWith(n, "s3_") || ddb::StringUtil::StartsWith(n, "aws_") ||
+        ddb::StringUtil::StartsWith(n, "__aws__") || ddb::StringUtil::StartsWith(n, "delta_") ||
+        ddb::StringUtil::StartsWith(n, "lance_") ||
+        ddb::StringUtil::StartsWith(n, "set_iceberg_") ||
+        ddb::StringUtil::StartsWith(n, "remove_iceberg_") ||
+        ddb::StringUtil::StartsWith(n, "fuzz") ||
+        n.find("external_resource") != std::string::npos || ddb::StringUtil::EndsWith(n, "_scan")) {
         return true;
     }
-    static const std::unordered_set<std::string> kExact = {
-        "glob",      "range",        "generate_series",   "repeat",
-        "unnest",    "query",        "query_table",       "pg_clear_cache",
-        "sniff_csv", "which_secret", "sql_auto_complete", "from_substrait"};
+    static const std::unordered_set<std::string> kExact = {"glob",
+                                                           "range",
+                                                           "generate_series",
+                                                           "repeat",
+                                                           "unnest",
+                                                           "query",
+                                                           "query_table",
+                                                           "pg_clear_cache",
+                                                           "sniff_csv",
+                                                           "which_secret",
+                                                           "sql_auto_complete",
+                                                           "from_substrait",
+                                                           "scan_data_from_quack_client",
+                                                           "json_execute_serialized_sql",
+                                                           "load_aws_credentials",
+                                                           "start_ui",
+                                                           "start_ui_server",
+                                                           "stop_ui_server",
+                                                           "ui_is_started",
+                                                           "avro_metadata",
+                                                           "st_read",
+                                                           "st_read_meta",
+                                                           "st_readosm",
+                                                           "st_readshp",
+                                                           "shapefile_meta",
+                                                           "whoami",
+                                                           "sql_tokenize",
+                                                           "check_peg_parser",
+                                                           "checkpoint",
+                                                           "force_checkpoint",
+                                                           "enable_logging",
+                                                           "disable_logging",
+                                                           "truncate_duckdb_logs",
+                                                           "enable_profiling",
+                                                           "disable_profiling",
+                                                           "sqlsmith",
+                                                           "fuzzyduck",
+                                                           "reduce_sql_statement"};
     return kExact.count(n) > 0;
 }
 
