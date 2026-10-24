@@ -6,14 +6,16 @@ form. DuckDB 2.1 removes the arrow form and the `lambda_syntax` flag.
 | Syntax | Example | duckbox |
 | --- | --- | --- |
 | Python-style (default) | `lambda x : x + 1` | Accepted by the rewriter. The lambda body is walked; every function still needs to be allowlisted. |
-| Single-arrow (removed in 2.1) | `x -> x + 1` | Denied. Warmup locks `lambda_syntax=disable_single_arrow`. The rewriter rejects a parsed arrow lambda (`single-arrow lambda syntax is denied`) or the 2.0 parser fails first. |
+| Single-arrow (removed in 2.1) | `x -> x + 1` | Denied. The rewriter rejects a parsed arrow lambda first (`single-arrow lambda syntax is denied`). If a statement reached the engine, the binder would fail later because warmup locked `lambda_syntax=disable_single_arrow`. |
+| JSON arrow | `col -> '$.a'` | Denied as a single-arrow lambda (`single-arrow lambda syntax is denied`). DuckDB still parses `->` as `LambdaExpression`. |
+| Multi-parameter | `lambda x, y : x + y` | Denied (`multi-parameter lambda is denied`). |
 
 `SET` / `RESET` of `lambda_syntax` is agent-denied (`only SELECT`). Bootstrap
 SQL cannot `SET` it either. There is no way to turn arrow lambdas back on
 inside a sandbox.
 
 `COLUMNS(lambda c : …)` is the same rule: Python-style is accepted and
-tenant-wrapped; `COLUMNS(c -> …)` is denied.
+tenant-wrapped; `COLUMNS(c -> …)` is denied as a single-arrow lambda.
 
 ## List functions and the 1.5.6 allowlist contract
 

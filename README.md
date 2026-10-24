@@ -51,7 +51,7 @@ attachments:
 
 ## Run everything locally (macOS and Linux)
 
-Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (compose → seed with DuckDB 2.0 → serve → CLI create → quickstart). Job `ducklake-compat` reads a pre-existing lake (prefer a catalog seeded with DuckDB 1.5.6, then duckbox 2.0; see [docs/ducklake-compatibility.md](docs/ducklake-compatibility.md)). Job `enforcement` runs the test commands. Job `macos-arm64` builds with AppleClang and runs unit + guardrail tests (no Docker). Job `multi-node` is lease failover (RustFS, memory policy) — not DuckLake catalog compat.
+Copy-paste from the repo root. CI job `readme-runbook` runs the DuckLake path (compose → seed with DuckDB 2.0 → serve → CLI create → quickstart). Job `ducklake-compat` reads a pre-existing lake (CI requires a catalog seeded with DuckDB 1.5.6 via `DUCKBOX_REQUIRE_LAKE_ENGINE=1.5.6`, then duckbox 2.0; see [docs/ducklake-compatibility.md](docs/ducklake-compatibility.md)). Job `enforcement` runs the test commands. Job `macos-arm64` builds with AppleClang and runs unit + guardrail tests (no Docker). Job `multi-node` is lease failover (RustFS, memory policy) — not DuckLake catalog compat.
 
 ### Prerequisites
 

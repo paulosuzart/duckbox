@@ -189,10 +189,11 @@ void TenantSandbox::Warmup(bool validate_lake) {
     }
     try {
         // In-memory only. duckbox never creates a persistent local .db.
-        // storage_compatibility_version is left at the DuckDB 2.0 default
-        // (v2.0.0 / version 69 for any new file an operator attaches). We
-        // do not pin an older format: the engine is 2.0-only, and an
-        // existing file catalog keeps its own storage version on write.
+        // storage_compatibility_version is left unset. current_setting
+        // reads back as 'latest' (DuckDB 2.0's default; new operator-created
+        // files are storage version 69 / v2.0.0). We do not pin an older
+        // format: the engine is 2.0-only, and an existing file catalog
+        // keeps its own storage version on write.
         db_ = std::make_unique<ddb::DuckDB>(nullptr);
         con_ = std::make_unique<ddb::Connection>(*db_);
         ExecHardeningOrThrow(*con_, "SET autoinstall_known_extensions=false");

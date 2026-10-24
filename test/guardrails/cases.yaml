@@ -688,6 +688,7 @@ cases:
   - id: lambda_old_syntax_literal
     sql: "SELECT list_transform([1, 2, 3], x -> x + 1)"
     expect: deny
+    reason: single-arrow lambda syntax is denied
     extra_functions:
       - list_transform
       - list_value
@@ -695,8 +696,22 @@ cases:
   - id: lambda_old_syntax_table
     sql: "SELECT list_transform([amount], x -> x + 1) FROM deals"
     expect: deny
+    reason: single-arrow lambda syntax is denied
     extra_functions:
       - list_transform
+      - list_value
+
+  - id: lambda_old_syntax_json_arrow
+    sql: "SELECT title -> '$.a' FROM deals"
+    expect: deny
+    reason: single-arrow lambda syntax is denied
+
+  - id: lambda_new_syntax_multi_param
+    sql: "SELECT list_reduce([1, 2, 3], lambda x, y : x + y)"
+    expect: deny
+    reason: multi-parameter lambda is denied
+    extra_functions:
+      - list_reduce
       - list_value
 
   - id: set_lambda_syntax_enable

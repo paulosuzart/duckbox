@@ -3,11 +3,16 @@
 duckbox 2.0 attaches an **existing** DuckLake. It does not create the lake
 and it does not migrate the catalog.
 
-`BuildDuckLakeAttachSql` emits:
+`BuildDuckLakeAttachSql` always emits:
 
 ```sql
 ATTACH '<catalog>' AS lake (DATA_PATH '<s3 path>', READ_ONLY)
 ```
+
+`kind: ducklake` specs must be `read_only: true` (the default).
+`read_only: false` is a spec-validation error
+(`kind: ducklake requires read_only: true`). The alias is quoted with
+`QuoteSqlIdent` after `ValidSqlIdent`.
 
 It does **not** pass `AUTOMATIC_MIGRATION`, `DUCKLAKE_VERSION`, or
 `STORAGE_VERSION`. DuckDB 2.0's `ducklake` extension reads DuckLake 1.0
@@ -20,11 +25,16 @@ Job **DuckLake compatibility (Postgres catalog, RustFS)**
 (`ducklake-compat`) runs `scripts/e2e_ducklake_compat.sh`.
 
 1. Start the repo Compose file (Postgres + RustFS only; never MinIO).
-2. Prefer seeding with **DuckDB 1.5.6** and that release's `ducklake`
-   extension (`pip install duckdb==1.5.6` in `.venv-ducklake-1.5.6`), so
-   the catalog looks like a lake that existed before the 2.0 bump.
-3. If 1.5.6 cannot be installed or `INSTALL ducklake` fails, seed with
-   DuckDB 2.0.0 and write the reason to `ducklake-compat-result.txt`.
+2. Seed with **DuckDB 1.5.6** and that release's `ducklake` extension
+   (`pip install duckdb==1.5.6` in `.venv-ducklake-1.5.6`), so the
+   catalog looks like a lake that existed before the 2.0 bump. CI sets
+   `DUCKBOX_REQUIRE_LAKE_ENGINE=1.5.6`; a failed 1.5.6 seed fails the
+   job instead of falling back to 2.0. Local runs without that variable
+   may still fall back and write the reason to
+   `ducklake-compat-result.txt`.
+3. The seed writes Parquet (inline threshold 0, plus more than 1000
+   filler rows) so duckbox reads files created by 1.5.6, not rows
+   inlined in the Postgres catalog.
 4. Start duckbox 2.0, create two named sandboxes on
    `policies/ducklake/analyst.yaml` (`compat-analyst` / tenant 21,
    `compat-kim` / tenant 22).

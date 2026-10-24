@@ -46,4 +46,8 @@ void duckbox::test::RunLambdaNewSyntaxTests() {
                            key);
         },
         "function not allowlisted", "lambda body still goes through FunctionAllowed");
+    policy.functions.insert("list_reduce");
+    ExpectThrowContains(
+        [&] { RewriteUserSql("SELECT list_reduce([1, 2, 3], lambda x, y : x + y)", policy, key); },
+        "multi-parameter lambda is denied", "rewriter rejects multi-parameter Python-style lambda");
 }

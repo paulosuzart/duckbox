@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # DuckLake compatibility e2e: read a pre-existing Postgres+S3 lake with duckbox 2.0.
 # Prefer creating the lake with DuckDB 1.5.6 + its ducklake extension (the last
-# 1.5.x engine). If that is not usable here, create it with 2.0 and print why.
-# duckbox ATTACH never sets AUTOMATIC_MIGRATION — either the read works as-is
-# or this script prints the exact migration ATTACH.
+# 1.5.x engine). Local runs may fall back to 2.0 and print why. CI sets
+# DUCKBOX_REQUIRE_LAKE_ENGINE=1.5.6 so a failed 1.5.6 seed exits instead of
+# falling back. duckbox ATTACH never sets AUTOMATIC_MIGRATION — either the
+# read works as-is or this script prints the exact migration ATTACH.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,8 +56,27 @@ seed_with() {
 		--s3-secret "$DUCKBOX_S3_SECRET"
 }
 
+require_legacy_engine() {
+	[[ "${DUCKBOX_REQUIRE_LAKE_ENGINE:-}" == "1.5.6" ]]
+}
+
+fallback_or_die() {
+	local why="$1"
+	if require_legacy_engine; then
+		echo "DUCKBOX_REQUIRE_LAKE_ENGINE=1.5.6: refusing 2.0 fallback ($why)" >&2
+		exit 1
+	fi
+	CREATED_WITH="2.0.0"
+	CREATED_WHY="$why"
+	seed_with "$PY" "DuckDB 2.0 (fallback)"
+}
+
 # Ideal: DuckDB 1.5.6 CLI/python + matching ducklake extension, then duckbox 2.0 reads.
 if [[ "${DUCKBOX_FORCE_LAKE_ENGINE:-}" == "2.0" ]]; then
+	if require_legacy_engine; then
+		echo "DUCKBOX_REQUIRE_LAKE_ENGINE=1.5.6 conflicts with DUCKBOX_FORCE_LAKE_ENGINE=2.0" >&2
+		exit 1
+	fi
 	CREATED_WITH="2.0.0"
 	CREATED_WHY="DUCKBOX_FORCE_LAKE_ENGINE=2.0"
 	seed_with "$PY" "DuckDB 2.0 (forced)"
@@ -71,9 +91,7 @@ else
 			"$LEGACY_VENV/bin/pip" install -q 'duckdb==1.5.6' boto3 'urllib3>=2'; then
 			true
 		else
-			CREATED_WITH="2.0.0"
-			CREATED_WHY="could not create a duckdb==1.5.6 venv (pip/venv failed)"
-			seed_with "$PY" "DuckDB 2.0 (fallback after venv failure)"
+			fallback_or_die "could not create a duckdb==1.5.6 venv (pip/venv failed)"
 		fi
 	fi
 	if [[ -z "$CREATED_WITH" ]]; then
@@ -82,9 +100,7 @@ else
 			CREATED_WITH="1.5.6"
 			CREATED_WHY="seeded with pip duckdb==1.5.6 and its ducklake extension"
 		else
-			CREATED_WITH="2.0.0"
-			CREATED_WHY="duckdb==1.5.6 installed but INSTALL/LOAD ducklake or seed failed; 1.5.6 extensions are not usable in this environment"
-			seed_with "$PY" "DuckDB 2.0 (fallback)"
+			fallback_or_die "duckdb==1.5.6 installed but INSTALL/LOAD ducklake or seed failed; 1.5.6 extensions are not usable in this environment"
 		fi
 	fi
 fi

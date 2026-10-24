@@ -168,6 +168,14 @@ void duckbox::test::RunValidatorTests() {
         dl.lake.bootstrap_sql_path = "seed.sql";
         Expect(has_path(validator.ValidateStatic(dl), "lake.bootstrap_sql", "lake.kind=memory"),
                "ValidateStatic rejects lake.bootstrap_sql_path on DuckLake");
+        dl = ducklake_spec;
+        dl.lake.read_only = false;
+        Expect(has_path(validator.ValidateStatic(dl), "lake.read_only", "read_only: true"),
+               "ValidateStatic rejects read_only: false for kind: ducklake");
+        dl = ducklake_spec;
+        dl.lake.alias = "lake;drop";
+        Expect(has_path(validator.ValidateStatic(dl), "lake.alias", "identifier"),
+               "ValidateStatic rejects a non-identifier lake.alias");
     }
 
     {

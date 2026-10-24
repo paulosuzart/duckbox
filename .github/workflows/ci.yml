@@ -343,6 +343,7 @@ jobs:
         timeout-minutes: 12
         env:
           DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
+          DUCKBOX_REQUIRE_LAKE_ENGINE: "1.5.6"
         run: bash scripts/e2e_ducklake_compat.sh
       - name: Compose logs on failure
         if: failure()

@@ -1,6 +1,8 @@
 # Storage format (DuckDB 2.0)
 
 DuckDB 2.0 writes new database files in storage format **v2.0.0** (version 69).
+`current_setting('storage_compatibility_version')` on an unset sandbox
+reads back as **`latest`** (that same default), not the number 69.
 Files created by 1.x stay readable; 2.0 writes to those files keep the older
 version so a 1.x process can still open them. A file created with the 2.0
 default cannot be opened by 1.5.x.

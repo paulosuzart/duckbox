@@ -32,11 +32,14 @@ void duckbox::test::RunLambdaOldSyntaxRuntimeTests() {
 
     ExpectThrowContains([&] { box.Execute("SET lambda_syntax='enable_single_arrow'"); },
                         "only SELECT", "warm sandbox cannot re-enable single-arrow lambdas");
-    ExpectThrowContains([&] { box.Execute("SELECT list_transform([1, 2, 3], x -> x + 1)"); }, "",
+    // list_transform is off the warm allowlist, so pin the lambda message on
+    // expressions that parse as LambdaExpression without a denied function.
+    ExpectThrowContains([&] { box.Execute("SELECT amount -> amount + 1 FROM deals"); },
+                        "single-arrow lambda syntax is denied",
                         "warm sandbox rejects single-arrow lambda SQL");
-    ExpectThrowContains(
-        [&] { box.Execute("SELECT COLUMNS(c -> c = 'id' OR c = 'title') FROM deals"); }, "",
-        "warm sandbox rejects single-arrow COLUMNS lambda");
+    ExpectThrowContains([&] { box.Execute("SELECT title -> '$.a' FROM deals"); },
+                        "single-arrow lambda syntax is denied",
+                        "warm sandbox rejects JSON arrow as a lambda");
 
     auto out = box.Execute("SELECT id FROM deals");
     Expect(out.row_count > 0, "control SELECT still runs after old-syntax denials");
