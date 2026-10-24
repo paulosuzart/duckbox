@@ -4,6 +4,7 @@
 #include "s3/s3_credentials.hpp"
 #include "sandbox/sandbox.hpp"
 #include "rewriter/tenant_key.hpp"
+#include "util/strings.hpp"
 
 #include <cctype>
 #include <filesystem>
@@ -31,7 +32,7 @@ void CollectParams(const ddb::ParsedExpression &expr, std::unordered_set<std::st
     if (expr.GetExpressionClass() == ddb::ExpressionClass::PARAMETER) {
         auto &p = expr.Cast<ddb::ParameterExpression>();
         if (!p.identifier.empty()) {
-            out.insert(ddb::StringUtil::Lower(p.identifier));
+            out.insert(duckbox::util::Lower(p.identifier));
         }
     }
     if (expr.GetExpressionClass() == ddb::ExpressionClass::SUBQUERY) {
@@ -123,7 +124,7 @@ void CollectColumns(const ddb::ParsedExpression &expr, std::unordered_set<std::s
     if (expr.GetExpressionClass() == ddb::ExpressionClass::COLUMN_REF) {
         auto &c = expr.Cast<ddb::ColumnRefExpression>();
         if (!c.column_names.empty()) {
-            out.insert(ddb::StringUtil::Lower(c.column_names.back()));
+            out.insert(duckbox::util::Lower(c.column_names.back()));
         }
     }
     ddb::ParsedExpressionIterator::EnumerateChildren(
@@ -188,7 +189,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
     auto vars = spec.key.VariableNames();
     std::unordered_set<std::string> varset;
     for (auto &v : vars) {
-        varset.insert(ddb::StringUtil::Lower(v));
+        varset.insert(duckbox::util::Lower(v));
     }
 
     if (spec.lake.kind == LakeKind::Memory && spec.lake.bootstrap_sql.empty() &&
@@ -216,7 +217,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         }
         std::unordered_set<std::string> need{"httpfs", "postgres", "ducklake"};
         for (auto &e : spec.lake.extensions) {
-            need.erase(ddb::StringUtil::Lower(e));
+            need.erase(duckbox::util::Lower(e));
         }
         if (!need.empty()) {
             add("lake.extensions",
@@ -264,7 +265,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
             add(prefix + ".filters", "required (at least one mandatory filter)");
         }
         bool tenant_from_key = false;
-        auto tenant_col = ddb::StringUtil::Lower(kv.second.tenant_column);
+        auto tenant_col = duckbox::util::Lower(kv.second.tenant_column);
         for (size_t i = 0; i < kv.second.filters.size(); i++) {
             auto path = prefix + ".filters[" + std::to_string(i) + "]";
             try {
@@ -284,13 +285,13 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
                         }
                         auto &c = e.Cast<ddb::ColumnRefExpression>();
                         return !c.column_names.empty() &&
-                               ddb::StringUtil::Lower(c.column_names.back()) == tenant_col;
+                               duckbox::util::Lower(c.column_names.back()) == tenant_col;
                     };
                     auto is_param = [&](ddb::ParsedExpression &e) -> std::string {
                         if (e.GetExpressionClass() != ddb::ExpressionClass::PARAMETER) {
                             return "";
                         }
-                        return ddb::StringUtil::Lower(
+                        return duckbox::util::Lower(
                             e.Cast<ddb::ParameterExpression>().identifier);
                     };
                     if (cmp.left && cmp.right && (is_tenant(*cmp.left) || is_tenant(*cmp.right))) {
@@ -368,7 +369,7 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         std::unordered_set<std::string> created;
         CollectCreatedMacros(spec.lake.bootstrap_sql, created);
         for (auto &fn : spec.functions) {
-            if (created.count(ddb::StringUtil::Lower(fn))) {
+            if (created.count(duckbox::util::Lower(fn))) {
                 add("functions", MacroNotAllowlistedMessage(fn));
             }
         }
@@ -432,7 +433,7 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
                     break;
                 }
                 for (idx_t i = 0; i < chunk->size(); i++) {
-                    auto name = ddb::StringUtil::Lower(chunk->data[0].GetValue(i).ToString());
+                    auto name = duckbox::util::Lower(chunk->data[0].GetValue(i).ToString());
                     auto typ = chunk->data[1].GetValue(i).ToString();
                     coltypes[name] = typ;
                     kv.second.lake_columns.push_back(ColumnMeta{name, typ});
@@ -452,7 +453,7 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
             continue;
         }
         for (auto &col : kv.second.columns) {
-            if (!coltypes.count(ddb::StringUtil::Lower(col))) {
+            if (!coltypes.count(duckbox::util::Lower(col))) {
                 add(prefix + ".columns",
                     "column '" + col + "' does not exist on lake table '" + kv.second.name + "'");
             }
@@ -460,7 +461,7 @@ std::vector<SpecIssue> SpecValidator::ValidateLake(SandboxSpec &spec, ddb::Conne
         if (kv.second.filters.empty()) {
             add(prefix + ".filters", "required (at least one mandatory filter)");
         }
-        if (!coltypes.count(ddb::StringUtil::Lower(kv.second.tenant_column))) {
+        if (!coltypes.count(duckbox::util::Lower(kv.second.tenant_column))) {
             add(prefix + ".tenant_column",
                 "column '" + kv.second.tenant_column + "' does not exist");
         }
@@ -495,7 +496,7 @@ bool IsAllowlistedMacroException(const std::string &name) {
         "count", "count_star", "sum",    "avg",      "min",   "max",
         "lower", "upper",      "length", "coalesce", "round", "abs",
     };
-    return kOk.count(ddb::StringUtil::Lower(name)) > 0;
+    return kOk.count(duckbox::util::Lower(name)) > 0;
 }
 
 static bool IsTrustedSystemMacroException(const ddb::CatalogEntry &entry) {
@@ -503,7 +504,7 @@ static bool IsTrustedSystemMacroException(const ddb::CatalogEntry &entry) {
         return false;
     }
     try {
-        return ddb::StringUtil::Lower(entry.ParentCatalog().GetName()) == "system";
+        return duckbox::util::Lower(entry.ParentCatalog().GetName()) == "system";
     } catch (...) {
         return false;
     }
@@ -530,7 +531,7 @@ void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string
             }
             auto &mi = cs.info->Cast<ddb::CreateMacroInfo>();
             if (!mi.name.empty()) {
-                out.insert(ddb::StringUtil::Lower(mi.name));
+                out.insert(duckbox::util::Lower(mi.name));
             }
         }
     } catch (...) {
@@ -551,7 +552,7 @@ void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con) {
     }
     try {
         auto reject_if_listed = [&](const ddb::CatalogEntry &entry) {
-            auto n = ddb::StringUtil::Lower(entry.name);
+            auto n = duckbox::util::Lower(entry.name);
             if (spec.functions.count(n) && !IsTrustedSystemMacroException(entry)) {
                 throw PolicyError(MacroNotAllowlistedMessage(n));
             }

@@ -6,6 +6,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(DUCKBOX_DUCKDB_VERSION "v1.5.6")
+# Off by default: default build is unchanged aside from the central C++
+# strings module. The goose compiler is fetched only when this is ON.
+option(DUCKBOX_EXPERIMENTAL_GOOSE
+       "Compile util/strings with an experimental goose backend" OFF)
+if(DUCKBOX_EXPERIMENTAL_GOOSE)
+  enable_language(C)
+  set(CMAKE_C_STANDARD 11)
+  set(CMAKE_C_STANDARD_REQUIRED ON)
+endif()
 
 if(NOT DEFINED ENV{DUCKBOX_DEPS})
   set(DUCKBOX_DEPS "${CMAKE_SOURCE_DIR}/.deps")
@@ -245,6 +254,7 @@ find_package(ArrowFlight CONFIG REQUIRED)
 find_package(ArrowFlightSql CONFIG REQUIRED)
 
 set(DUCKBOX_SOURCES
+  server/src/util/strings.cpp
   server/src/common/yaml.cpp
   server/src/common/error.cpp
   server/src/common/crypto.cpp
@@ -281,6 +291,10 @@ target_include_directories(duckbox_core
 target_compile_definitions(duckbox_core PUBLIC DUCKBOX_DUCKDB_VERSION="${DUCKBOX_DUCKDB_VERSION}")
 if(NOT MSVC)
   target_compile_options(duckbox_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
+endif()
+if(DUCKBOX_EXPERIMENTAL_GOOSE)
+  include("${CMAKE_SOURCE_DIR}/cmake/DuckboxGoose.cmake")
+  duckbox_add_goose_strings(duckbox_core)
 endif()
 
 option(DUCKBOX_COVERAGE "Build duckbox_core with gcov (--coverage -O0)" OFF)
@@ -392,6 +406,7 @@ endfunction()
 duckbox_add_test(duckbox_unit_tests
   test/support/check.cpp
   test/unit/main.cpp
+  test/unit/strings_test.cpp
   test/unit/tenant_key_test.cpp
   test/unit/spec_loader_test.cpp
   test/unit/validator_test.cpp
@@ -443,6 +458,9 @@ duckbox_add_test(duckbox_s3_secret_guardrail_tests
 duckbox_add_test(duckbox_s3_sts_tests
   test/support/check.cpp
   test/integration/s3_sts_test.cpp)
+
+add_executable(duckbox_strings_bench test/bench/strings_bench.cpp)
+target_link_libraries(duckbox_strings_bench PRIVATE duckbox_core)
 
 enable_testing()
 add_test(NAME unit COMMAND duckbox_unit_tests)

@@ -4,11 +4,12 @@
 #include "rewriter/rewriter.hpp"
 #include "sandbox/sandbox.hpp"
 #include "rewriter/tenant_key.hpp"
+#include "util/strings.hpp"
 
 namespace {
 
 bool HasCol(const std::string &text, const char *col) {
-    return duckbox::ddb::StringUtil::Lower(text).find(col) != std::string::npos;
+    return duckbox::util::Lower(text).find(col) != std::string::npos;
 }
 
 void ExpectTenant21Live(const duckbox::sandbox::QueryOutput &out, const std::string &msg) {

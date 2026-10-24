@@ -1,6 +1,7 @@
 #include "lake/lake.hpp"
 #include "common/error.hpp"
 #include "s3/s3_credentials.hpp"
+#include "util/strings.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -125,7 +126,7 @@ std::string ResolveLakeCatalog(const SandboxSpec &spec, const SecretResolver &se
 }
 
 void LoadExtension(ddb::Connection &con, const std::string &name) {
-    auto lower = ddb::StringUtil::Lower(name);
+    auto lower = duckbox::util::Lower(name);
     if (lower.empty() || lower == "[]") {
         return;
     }
@@ -150,7 +151,7 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
     LoadExtension(con, "nanoarrow");
 
     for (auto &ext : spec.lake.extensions) {
-        auto lower = ddb::StringUtil::Lower(ext);
+        auto lower = duckbox::util::Lower(ext);
         if (lower.empty() || lower == "nanoarrow" || lower == "[]") {
             continue;
         }

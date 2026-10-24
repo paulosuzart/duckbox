@@ -1,5 +1,6 @@
 #include "rewriter/validator.hpp"
 #include "common/error.hpp"
+#include "util/strings.hpp"
 
 #include "duckdb/parser/tableref/pivotref.hpp"
 
@@ -10,7 +11,7 @@ using namespace config;
 namespace {
 
 std::string Lower(const std::string &s) {
-    return ddb::StringUtil::Lower(s);
+    return duckbox::util::Lower(s);
 }
 
 bool IsCte(const ValidationContext &ctx, const ddb::BaseTableRef &base) {
@@ -98,10 +99,10 @@ void ValidateTableRef(ddb::TableRef &ref, ValidationContext &ctx) {
         auto looks_like_path = [](const std::string &name) {
             return name.find("://") != std::string::npos || name.find('/') != std::string::npos ||
                    name.find('\\') != std::string::npos ||
-                   ddb::StringUtil::EndsWith(ddb::StringUtil::Lower(name), ".parquet") ||
-                   ddb::StringUtil::EndsWith(ddb::StringUtil::Lower(name), ".csv") ||
-                   ddb::StringUtil::EndsWith(ddb::StringUtil::Lower(name), ".json") ||
-                   ddb::StringUtil::EndsWith(ddb::StringUtil::Lower(name), ".arrows");
+                   duckbox::util::EndsWith(Lower(name), ".parquet") ||
+                   duckbox::util::EndsWith(Lower(name), ".csv") ||
+                   duckbox::util::EndsWith(Lower(name), ".json") ||
+                   duckbox::util::EndsWith(Lower(name), ".arrows");
         };
         if (looks_like_path(base.table_name) || looks_like_path(base.schema_name) ||
             looks_like_path(base.catalog_name)) {

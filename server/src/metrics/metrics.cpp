@@ -4,6 +4,7 @@
 #include "node/daemon_config.hpp"
 #include "common/error.hpp"
 #include "common/json.hpp"
+#include "util/strings.hpp"
 
 #include "httplib.h"
 
@@ -33,13 +34,6 @@ const std::vector<double> kQueryBuckets = {0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 
 const std::vector<double> kLifeBuckets = {0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30};
 const std::vector<double> kFwdBuckets = {0.001, 0.005, 0.01, 0.025, 0.05, 0.1,
                                          0.25,  0.5,   1,    2.5,   5};
-
-std::string Lower(std::string s) {
-    for (char &c : s) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    return s;
-}
 
 bool AllowedName(const std::string &s) {
     if (s.empty() || s.size() > 32) {
@@ -194,7 +188,7 @@ const char *ClassifyRejection(const std::exception &e) {
     if (dynamic_cast<const PlanRejected *>(&e)) {
         return "plan";
     }
-    auto msg = Lower(e.what());
+    auto msg = duckbox::util::Lower(e.what());
     if (msg.find("table function") != std::string::npos) {
         return "table_function";
     }
@@ -221,7 +215,7 @@ const char *ClassifyRejection(const std::exception &e) {
 }
 
 const char *ClassifyLimit(const std::exception &e) {
-    auto msg = Lower(e.what());
+    auto msg = duckbox::util::Lower(e.what());
     if (msg.find("timeout") != std::string::npos) {
         return "timeout";
     }
@@ -550,10 +544,7 @@ void SetMetrics(std::shared_ptr<IMetrics> m) {
 std::string RedactSecretsForAudit(const std::string &sql) {
     std::string s = sql;
     auto redact_quoted_after = [&](const std::string &kw) {
-        std::string lower = s;
-        for (char &c : lower) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
+        std::string lower = duckbox::util::Lower(s);
         std::string k = kw;
         size_t pos = 0;
         while ((pos = lower.find(k, pos)) != std::string::npos) {

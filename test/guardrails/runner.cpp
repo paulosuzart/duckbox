@@ -6,6 +6,7 @@
 #include "config/spec_validator.hpp"
 #include "rewriter/tenant_key.hpp"
 #include "common/yaml.hpp"
+#include "util/strings.hpp"
 
 #include <iostream>
 #include <map>
@@ -22,10 +23,9 @@ using duckbox::test::TestDaemon;
 using duckbox::test::TestPolicy;
 
 std::string Trim(std::string s) {
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) {
-        s.pop_back();
-    }
-    return s;
+    // YAML cases often carry a trailing newline; full Trim also strips
+    // leading whitespace, which SQL ignores.
+    return duckbox::util::Trim(std::move(s));
 }
 
 bool HasNeedle(const std::string &hay, const std::string &needle) {

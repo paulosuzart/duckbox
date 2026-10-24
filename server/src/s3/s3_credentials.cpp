@@ -3,6 +3,7 @@
 #include "common/error.hpp"
 #include "config/policy.hpp"
 #include "lake/lake.hpp"
+#include "util/strings.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -16,19 +17,13 @@ using namespace node;
 using namespace config;
 namespace {
 
-std::string LowerCopy(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
-
 bool ListedExactly(const std::vector<std::string> &allow, const std::string &value) {
     return std::find(allow.begin(), allow.end(), value) != allow.end();
 }
 
 bool HasAwsExtension(const std::vector<std::string> &extensions) {
     for (auto &e : extensions) {
-        if (LowerCopy(e) == "aws") {
+        if (duckbox::util::Lower(e) == "aws") {
             return true;
         }
     }
@@ -53,7 +48,7 @@ void RequireListed(const std::vector<std::string> &allow, const std::string &val
 } // namespace
 
 S3CredentialProvider ParseS3Provider(const std::string &raw, const std::string &field_path) {
-    auto v = LowerCopy(TrimCopy(raw));
+    auto v = duckbox::util::Lower(duckbox::util::Trim(raw));
     if (v.empty() || v == "config") {
         return S3CredentialProvider::Config;
     }
@@ -158,7 +153,7 @@ std::string CanonicalS3Endpoint(const std::string &endpoint) {
 }
 
 bool IsAwsS3Hostname(const std::string &host) {
-    auto h = LowerCopy(TrimCopy(host));
+    auto h = duckbox::util::Lower(duckbox::util::Trim(host));
     if (h.rfind("http://", 0) == 0) {
         h = h.substr(7);
     } else if (h.rfind("https://", 0) == 0) {

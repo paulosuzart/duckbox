@@ -4,6 +4,7 @@
 #include "rewriter/rewriter.hpp"
 #include "rewriter/tenant_key.hpp"
 #include "rewriter/validator.hpp"
+#include "util/strings.hpp"
 
 #include "duckdb/parser/query_node/cte_node.hpp"
 
@@ -42,7 +43,7 @@ std::string RewriteOrEmpty(const char *sql, const duckbox::config::Policy &polic
 }
 
 bool HasI(const std::string &hay, const char *needle) {
-    return duckbox::ddb::StringUtil::Lower(hay).find(needle) != std::string::npos;
+    return duckbox::util::Lower(hay).find(needle) != std::string::npos;
 }
 
 void ExpectRealTableWrap(const std::string &rw, const std::string &msg) {

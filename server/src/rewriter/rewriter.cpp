@@ -1,6 +1,7 @@
 #include "rewriter/rewriter.hpp"
 #include "common/error.hpp"
 #include "rewriter/validator.hpp"
+#include "util/strings.hpp"
 
 #include <cctype>
 
@@ -11,7 +12,7 @@ using namespace config;
 namespace {
 
 std::string Lower(const std::string &s) {
-    return ddb::StringUtil::Lower(s);
+    return duckbox::util::Lower(s);
 }
 
 bool IsCte(const RewriteContext &ctx, const ddb::BaseTableRef &base) {
@@ -457,7 +458,7 @@ ddb::Value ValueFromKeyVar(const std::string &name, const std::string &raw) {
             break;
         }
     }
-    if (numeric && (name == "tenant_id" || ddb::StringUtil::EndsWith(name, "_id"))) {
+    if (numeric && (name == "tenant_id" || duckbox::util::EndsWith(name, "_id"))) {
         try {
             auto n = std::stoll(raw);
             return ddb::Value::BIGINT(n);

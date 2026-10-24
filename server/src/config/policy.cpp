@@ -4,6 +4,7 @@
 #include "common/yaml.hpp"
 #include "lake/lake.hpp"
 #include "s3/secrets.hpp"
+#include "util/strings.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -21,12 +22,6 @@ using namespace common;
 using namespace lake;
 using namespace s3;
 namespace {
-
-std::string Lower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
 
 std::string ChildPath(const std::string &parent, const std::string &key) {
     return parent.empty() ? key : parent + "." + key;
@@ -162,7 +157,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
             }
             a.credential = OptionalRef(&kv.second, "credential", "credential_ref",
                                        ChildPath("attachments." + kv.first, "credential"));
-            p.attachments.emplace(Lower(a.name), std::move(a));
+            p.attachments.emplace(duckbox::util::Lower(a.name), std::move(a));
         }
     }
     if (auto *auth = root.Get("auth")) {
@@ -182,7 +177,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
         YamlRejectUnknownKeys(*lake, {"kind", "alias", "catalog", "catalog_env", "catalog_ref",
                                       "data_path", "read_only", "bootstrap_sql", "init_sql",
                                       "extensions", "s3"});
-        auto kind = Lower(lake->GetString("kind", "memory"));
+        auto kind = duckbox::util::Lower(lake->GetString("kind", "memory"));
         if (kind == "ducklake") {
             p.lake.kind = LakeKind::Ducklake;
         } else if (kind == "memory") {
@@ -201,9 +196,9 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
             p.lake.bootstrap_sql_path = lake->GetString("init_sql");
         }
         if (p.lake.bootstrap_sql_path.find('\n') != std::string::npos ||
-            ddb::StringUtil::StartsWith(ddb::StringUtil::Lower(p.lake.bootstrap_sql_path),
+            duckbox::util::StartsWith(duckbox::util::Lower(p.lake.bootstrap_sql_path),
                                         "create") ||
-            ddb::StringUtil::StartsWith(ddb::StringUtil::Lower(p.lake.bootstrap_sql_path),
+            duckbox::util::StartsWith(duckbox::util::Lower(p.lake.bootstrap_sql_path),
                                         "insert")) {
             p.lake.bootstrap_sql = p.lake.bootstrap_sql_path;
             p.lake.bootstrap_sql_path.clear();
@@ -266,7 +261,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
     }
     p.functions.clear();
     for (auto &fn : StringList(root.Get("functions"), "functions")) {
-        auto lower = Lower(fn);
+        auto lower = duckbox::util::Lower(fn);
         if (IsAlwaysDeniedTableFunction(lower)) {
             throw PolicyError("functions: table function '" + fn + "' is never allowlisted");
         }
@@ -335,7 +330,7 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
 
 std::string DefaultTableCatalog(const LakeSettings &lake) {
     if (!lake.alias.empty()) {
-        return ddb::StringUtil::Lower(lake.alias);
+        return duckbox::util::Lower(lake.alias);
     }
     return lake.kind == LakeKind::Memory ? "memory" : "lake";
 }
@@ -343,9 +338,9 @@ std::string DefaultTableCatalog(const LakeSettings &lake) {
 QualifiedTable QualifyTable(const std::string &catalog, const std::string &schema,
                             const std::string &name, const LakeSettings &lake) {
     QualifiedTable q;
-    q.catalog = catalog.empty() ? DefaultTableCatalog(lake) : ddb::StringUtil::Lower(catalog);
-    q.schema = schema.empty() ? DefaultTableSchema() : ddb::StringUtil::Lower(schema);
-    q.name = ddb::StringUtil::Lower(name);
+    q.catalog = catalog.empty() ? DefaultTableCatalog(lake) : duckbox::util::Lower(catalog);
+    q.schema = schema.empty() ? DefaultTableSchema() : duckbox::util::Lower(schema);
+    q.name = duckbox::util::Lower(name);
     return q;
 }
 
@@ -353,14 +348,14 @@ void ApplyTableDefaults(TablePolicy &table, const LakeSettings &lake) {
     if (table.catalog.empty()) {
         table.catalog = DefaultTableCatalog(lake);
     } else {
-        table.catalog = ddb::StringUtil::Lower(table.catalog);
+        table.catalog = duckbox::util::Lower(table.catalog);
     }
     if (table.schema.empty()) {
         table.schema = DefaultTableSchema();
     } else {
-        table.schema = ddb::StringUtil::Lower(table.schema);
+        table.schema = duckbox::util::Lower(table.schema);
     }
-    table.name = ddb::StringUtil::Lower(table.name);
+    table.name = duckbox::util::Lower(table.name);
 }
 
 std::string QualifiedTable::Display() const {
@@ -430,14 +425,14 @@ void SandboxSpec::PutTable(TablePolicy table) {
 }
 
 bool SandboxSpec::FunctionAllowed(const std::string &name) const {
-    return functions.count(Lower(name)) > 0;
+    return functions.count(duckbox::util::Lower(name)) > 0;
 }
 
 bool LocationContributesAllowedPath(const std::string &location) {
     if (location.empty()) {
         return false;
     }
-    auto lower = Lower(location);
+    auto lower = duckbox::util::Lower(location);
     if (lower.rfind("postgres://", 0) == 0 || lower.rfind("postgresql://", 0) == 0 ||
         lower.rfind("mysql://", 0) == 0 || lower.rfind("sqlite://", 0) == 0) {
         return false;
@@ -507,11 +502,11 @@ std::vector<std::string> DeclaredAllowedPaths(const SandboxSpec &spec) {
 
 bool IsAlwaysDeniedTableFunction(const std::string &name) {
     // Spec validation deny-list (table-function names never allowlisted).
-    auto n = Lower(name);
-    if (ddb::StringUtil::StartsWith(n, "postgres_") || ddb::StringUtil::StartsWith(n, "duckdb_") ||
-        ddb::StringUtil::StartsWith(n, "ducklake_") || ddb::StringUtil::StartsWith(n, "pragma_") ||
-        ddb::StringUtil::StartsWith(n, "sqlite_") || ddb::StringUtil::StartsWith(n, "mysql_") ||
-        ddb::StringUtil::StartsWith(n, "read_") || ddb::StringUtil::EndsWith(n, "_scan")) {
+    auto n = duckbox::util::Lower(name);
+    if (duckbox::util::StartsWith(n, "postgres_") || duckbox::util::StartsWith(n, "duckdb_") ||
+        duckbox::util::StartsWith(n, "ducklake_") || duckbox::util::StartsWith(n, "pragma_") ||
+        duckbox::util::StartsWith(n, "sqlite_") || duckbox::util::StartsWith(n, "mysql_") ||
+        duckbox::util::StartsWith(n, "read_") || duckbox::util::EndsWith(n, "_scan")) {
         return true;
     }
     static const std::unordered_set<std::string> kExact = {
@@ -653,18 +648,10 @@ bool ParseDurationMs(const std::string &raw, int64_t *out_ms) {
     if (!out_ms) {
         return false;
     }
-    size_t a = 0;
-    while (a < raw.size() && std::isspace(static_cast<unsigned char>(raw[a]))) {
-        a++;
-    }
-    size_t b = raw.size();
-    while (b > a && std::isspace(static_cast<unsigned char>(raw[b - 1]))) {
-        b--;
-    }
-    if (a >= b) {
+    std::string s = duckbox::util::Trim(raw);
+    if (s.empty()) {
         return false;
     }
-    std::string s = raw.substr(a, b - a);
     if (s[0] == '-') {
         return false;
     }
@@ -684,10 +671,7 @@ bool ParseDurationMs(const std::string &raw, int64_t *out_ms) {
     } catch (...) {
         return false;
     }
-    auto unit = s.substr(i);
-    for (char &c : unit) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
+    auto unit = duckbox::util::Lower(s.substr(i));
     int64_t mul = 1000; // bare integer = seconds
     if (unit.empty() || unit == "s") {
         mul = 1000;
@@ -711,18 +695,10 @@ bool ParseExpiresAtMs(const std::string &raw, int64_t *out_ms) {
     if (!out_ms) {
         return false;
     }
-    size_t a = 0;
-    while (a < raw.size() && std::isspace(static_cast<unsigned char>(raw[a]))) {
-        a++;
-    }
-    size_t b = raw.size();
-    while (b > a && std::isspace(static_cast<unsigned char>(raw[b - 1]))) {
-        b--;
-    }
-    if (a >= b) {
+    std::string s = duckbox::util::Trim(raw);
+    if (s.empty()) {
         return false;
     }
-    std::string s = raw.substr(a, b - a);
     bool digits = !s.empty();
     for (char c : s) {
         if (!std::isdigit(static_cast<unsigned char>(c))) {

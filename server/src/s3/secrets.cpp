@@ -1,4 +1,5 @@
 #include "s3/secrets.hpp"
+#include "util/strings.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -41,18 +42,6 @@ bool ValidFilePath(const std::string &s) {
 }
 
 } // namespace
-
-std::string TrimCopy(const std::string &s) {
-	size_t a = 0;
-	while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) {
-		a++;
-	}
-	size_t b = s.size();
-	while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) {
-		b--;
-	}
-	return s.substr(a, b - a);
-}
 
 std::string SecretRef::Spec() const {
 	if (Empty()) {
@@ -128,7 +117,7 @@ std::string EnvFileSecretResolver::Resolve(const SecretRef &ref, const std::stri
 		}
 		std::ostringstream os;
 		os << in.rdbuf();
-		auto v = TrimCopy(os.str());
+		auto v = duckbox::util::Trim(os.str());
 		if (v.empty()) {
 			throw PolicyError(field_path + ": secret file is empty");
 		}

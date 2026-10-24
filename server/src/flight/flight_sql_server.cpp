@@ -5,6 +5,7 @@
 #include "common/json.hpp"
 #include "metrics/metrics.hpp"
 #include "s3/secrets.hpp"
+#include "util/strings.hpp"
 #include "config/spec_validator.hpp"
 #include "common/yaml.hpp"
 
@@ -1569,7 +1570,7 @@ int RunNodeDrain(const NodeCliRequest &req) {
     std::string handshake = req.peer_secret;
     if (handshake.rfind("env:", 0) == 0 || handshake.rfind("file:", 0) == 0) {
         try {
-            handshake = TrimCopy(EnvFileSecretResolver{}.Resolve(
+            handshake = duckbox::util::Trim(EnvFileSecretResolver{}.Resolve(
                 ParseSecretRef(handshake, "peer-secret"), "peer-secret"));
         } catch (const std::exception &e) {
             std::cerr << e.what() << "\n";
