@@ -6,6 +6,7 @@
 #include "flight/handle.hpp"
 #include "lake/lake.hpp"
 #include "rewriter/rewriter.hpp"
+#include "sandbox/sandbox.hpp"
 #include "sandbox/sandbox_registry.hpp"
 
 #include <arrow/buffer.h>
@@ -155,6 +156,42 @@ void duckbox::test::RunSecretFlightTests() {
         Expect(err.find("password=") == std::string::npos &&
                    err.find("SECRET ") == std::string::npos,
                "Flight AT error must not include a secret");
+    }
+
+    {
+        const char *pw = "duckbox-query-catalog-secret-c81e";
+        const char *dsn = "dbname=lake host=127.0.0.1 port=5432 user=duckbox "
+                          "password=duckbox-query-catalog-secret-c81e";
+        auto q = opt;
+        q.headers.emplace_back("x-duckbox-sandbox", "at-guard");
+        auto warm = sql_client.Execute(q, "SELECT count(*) FROM deals");
+        Expect(warm.ok(), "warm memory sandbox before catalog-down injection");
+        if (warm.ok() && !(*warm)->endpoints().empty()) {
+            auto stream = raw_client->DoGet(q, (*warm)->endpoints()[0].ticket);
+            Expect(stream.ok(), "warm query DoGet succeeds while catalog is up");
+        }
+        auto injected = std::string("IO Error: Failed to query most recent snapshot for DuckLake: "
+                                    "Unable to connect to Postgres at \"") +
+                        dsn + "\"";
+        QueryErrorInjection down(injected);
+        auto again = sql_client.Execute(q, "SELECT count(*) FROM deals");
+        Expect(!again.ok(), "query after catalog-down fails");
+        auto err = again.status().ToString();
+        Expect(err.find(pw) == std::string::npos,
+               "catalog-down Flight error must not include the catalog password");
+        Expect(err.find(dsn) == std::string::npos,
+               "catalog-down Flight error must not include the catalog DSN");
+        Expect(err.find("password=") == std::string::npos,
+               "catalog-down Flight error must not include password=");
+        Expect(err.find(kCatalogUnavailableClientError) != std::string::npos,
+               "catalog-down Flight error is the generic catalog message");
+        auto at = sql_client.Execute(q, "SELECT count(*) FROM deals AT (VERSION => 2)");
+        Expect(!at.ok(), "AT VERSION query after catalog-down fails");
+        auto at_err = at.status().ToString();
+        Expect(at_err.find(pw) == std::string::npos && at_err.find(dsn) == std::string::npos,
+               "catalog-down AT error must not include password or DSN");
+        Expect(at_err.find(kCatalogUnavailableClientError) != std::string::npos,
+               "catalog-down AT error is the generic catalog message");
     }
 
     {

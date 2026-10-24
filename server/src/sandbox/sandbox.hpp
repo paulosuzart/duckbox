@@ -104,6 +104,7 @@ class TenantSandbox {
     std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
     int64_t last_used_wall_ms_ = 0;
     int warmup_count_ = 0;
+    std::vector<std::string> secret_values_;
 };
 
 // Test seam: while alive, Warmup treats any hardening SET whose SQL contains
@@ -135,6 +136,17 @@ class WarmupHardeningReadError {
     ~WarmupHardeningReadError();
     WarmupHardeningReadError(const WarmupHardeningReadError &) = delete;
     WarmupHardeningReadError &operator=(const WarmupHardeningReadError &) = delete;
+};
+
+// Test seam: while alive, RunTimed pretends DuckDB returned this error
+// (process-wide so a Flight worker thread sees it). Used to simulate a
+// catalog that went down after warmup without a live Postgres.
+class QueryErrorInjection {
+  public:
+    explicit QueryErrorInjection(std::string duckdb_error);
+    ~QueryErrorInjection();
+    QueryErrorInjection(const QueryErrorInjection &) = delete;
+    QueryErrorInjection &operator=(const QueryErrorInjection &) = delete;
 };
 
 // List item for ListSandboxes. state is warm | passive | defined.

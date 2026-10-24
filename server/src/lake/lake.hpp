@@ -9,6 +9,7 @@
 #include "s3/secrets.hpp"
 
 #include <string>
+#include <vector>
 
 namespace duckbox {
 namespace lake {
@@ -18,11 +19,35 @@ inline constexpr const char *kCatalogAttachClientError =
     "ducklake catalog attach failed; see operator logs";
 inline constexpr const char *kS3SecretClientError =
     "lake S3 secret creation failed; see operator logs";
+// Client-facing query-path catalog IO (Postgres / DuckLake snapshot). Operator
+// logs keep the redacted DuckDB detail.
+inline constexpr const char *kCatalogUnavailableClientError =
+    "lake catalog unavailable; see operator logs";
+inline constexpr const char *kRedactedMarker = "<redacted>";
+
+// Known secret strings (resolved DSN, password, S3 keys). Exact substitution
+// runs before pattern redaction. Values shorter than 4 characters are ignored
+// so a one-character password cannot wipe diagnostic text.
+struct SecretRedactionContext {
+    std::vector<std::string> exact_values;
+};
+
+void AddSecretValue(SecretRedactionContext &ctx, const std::string &value);
+SecretRedactionContext CollectSecretRedactionContext(const std::string &catalog_dsn,
+                                                     const std::string &s3_key_id = {},
+                                                     const std::string &s3_secret = {});
+SecretRedactionContext CollectSecretRedactionContextFromSpec(const config::SandboxSpec &spec,
+                                                             const s3::SecretResolver &secrets);
 
 std::string EscapeSqlString(const std::string &s); // single-quote doubling for SQL literals
 std::string ResolvePath(const std::string &base_dir, const std::string &path);
-// Strips password=/secret values (and SECRET '…' SQL literals) for logs and errors.
+// Strips configured secret values, then password=/URI/JSON/SQL secret forms.
 std::string RedactSecretText(const std::string &text);
+std::string RedactSecretText(const std::string &text, const SecretRedactionContext &ctx);
+bool IsLakeCatalogIoError(const std::string &text);
+// Client-facing: catalog IO → generic message; otherwise redacted text.
+std::string SanitizeClientError(const std::string &text);
+std::string SanitizeClientError(const std::string &text, const SecretRedactionContext &ctx);
 void ExecOrThrow(ddb::Connection &con, const std::string &sql);
 
 // Memory-lake seed only: CREATE TABLE / SCHEMA (including CTAS) and INSERT.

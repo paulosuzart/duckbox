@@ -1,12 +1,13 @@
 #include "flight/flight_sql_server.hpp"
-#include "flight/http_server.hpp"
 #include "cluster/lease.hpp"
-#include "flight/auth.hpp"
 #include "common/json.hpp"
+#include "common/yaml.hpp"
+#include "config/spec_validator.hpp"
+#include "flight/auth.hpp"
+#include "flight/http_server.hpp"
+#include "lake/lake.hpp"
 #include "metrics/metrics.hpp"
 #include "s3/secrets.hpp"
-#include "config/spec_validator.hpp"
-#include "common/yaml.hpp"
 
 #include <arrow/array.h>
 #include <arrow/buffer.h>
@@ -47,6 +48,7 @@ using namespace config;
 using namespace node;
 using namespace rewriter;
 using namespace sandbox;
+using namespace lake;
 namespace {
 
 using ::arrow::Status;
@@ -55,8 +57,8 @@ using ::arrow::flight::FlightDataStream;
 using ::arrow::flight::FlightDescriptor;
 using ::arrow::flight::FlightEndpoint;
 using ::arrow::flight::FlightInfo;
-using ::arrow::flight::Location;
 using ::arrow::flight::FlightPayload;
+using ::arrow::flight::Location;
 using ::arrow::flight::RecordBatchStream;
 using ::arrow::flight::ServerCallContext;
 using ::arrow::flight::Ticket;
@@ -102,7 +104,8 @@ ddb::Value CellValue(const std::shared_ptr<::arrow::Array> &arr, int64_t row) {
     case ::arrow::Type::FLOAT:
         return ddb::Value::FLOAT(std::static_pointer_cast<::arrow::FloatArray>(arr)->Value(row));
     case ::arrow::Type::BOOL:
-        return ddb::Value::BOOLEAN(std::static_pointer_cast<::arrow::BooleanArray>(arr)->Value(row));
+        return ddb::Value::BOOLEAN(
+            std::static_pointer_cast<::arrow::BooleanArray>(arr)->Value(row));
     case ::arrow::Type::STRING: {
         auto v = std::static_pointer_cast<::arrow::StringArray>(arr)->GetString(row);
         return ddb::Value(v);
@@ -141,22 +144,26 @@ std::string EncodeDoPutHandle(const std::string &handle) {
 }
 
 Status FromEx(const std::exception &e) {
+    std::string client = SanitizeClientError(e.what());
+    if (IsLakeCatalogIoError(e.what())) {
+        std::clog << "flight: lake catalog unavailable: " << RedactSecretText(e.what()) << "\n";
+    }
     if (dynamic_cast<const ConflictError *>(&e)) {
-        return Status::AlreadyExists(e.what());
+        return Status::AlreadyExists(client);
     }
     if (dynamic_cast<const NotFoundError *>(&e)) {
-        return Status::KeyError(e.what());
+        return Status::KeyError(client);
     }
     if (dynamic_cast<const RedirectError *>(&e)) {
-        return Status::Invalid(e.what());
+        return Status::Invalid(client);
     }
     if (dynamic_cast<const LeaseLostError *>(&e)) {
-        return Status::Invalid(e.what());
+        return Status::Invalid(client);
     }
     if (dynamic_cast<const UnavailableError *>(&e)) {
-        return Status::IOError(e.what());
+        return Status::IOError(client);
     }
-    return Status::Invalid(e.what());
+    return Status::Invalid(client);
 }
 
 std::shared_ptr<::arrow::Buffer> BufOf(const std::string &s) {
@@ -164,7 +171,7 @@ std::shared_ptr<::arrow::Buffer> BufOf(const std::string &s) {
 }
 
 ::arrow::Status ResultJson(const std::string &json,
-                         std::unique_ptr<::arrow::flight::ResultStream> *result) {
+                           std::unique_ptr<::arrow::flight::ResultStream> *result) {
     std::vector<::arrow::flight::Result> rows;
     rows.emplace_back(BufOf(json));
     *result = std::make_unique<::arrow::flight::SimpleResultStream>(std::move(rows));
@@ -176,10 +183,9 @@ std::string CreateUpdateResultJson(const SandboxRecord &rec, const char *action)
     return rec.ToJson();
 }
 
-::arrow::Result<std::unique_ptr<FlightInfo>> MakeInfo(const FlightDescriptor &desc,
-                                                    const std::string &token,
-                                                    const std::shared_ptr<::arrow::Schema> &schema,
-                                                    const std::string &redirect_flight = "") {
+::arrow::Result<std::unique_ptr<FlightInfo>>
+MakeInfo(const FlightDescriptor &desc, const std::string &token,
+         const std::shared_ptr<::arrow::Schema> &schema, const std::string &redirect_flight = "") {
     (void)redirect_flight; // client locations stay empty; peers are never advertised
     ARROW_ASSIGN_OR_RAISE(auto ticket_str, sql::CreateStatementQueryTicket(token));
     std::vector<FlightEndpoint> endpoints;
@@ -194,8 +200,8 @@ HandshakeAuthHandler::HandshakeAuthHandler(DaemonConfig daemon, ListenerPlane pl
     : daemon_(std::move(daemon)), plane_(plane) {}
 
 ::arrow::Status HandshakeAuthHandler::Authenticate(const ServerCallContext &,
-                                                 ::arrow::flight::ServerAuthSender *outgoing,
-                                                 ::arrow::flight::ServerAuthReader *incoming) {
+                                                   ::arrow::flight::ServerAuthSender *outgoing,
+                                                   ::arrow::flight::ServerAuthReader *incoming) {
     std::string token;
     ARROW_RETURN_NOT_OK(incoming->Read(&token));
     try {
@@ -207,7 +213,7 @@ HandshakeAuthHandler::HandshakeAuthHandler(DaemonConfig daemon, ListenerPlane pl
 }
 
 ::arrow::Status HandshakeAuthHandler::IsValid(const ServerCallContext &, const std::string &token,
-                                            std::string *peer_identity) {
+                                              std::string *peer_identity) {
     try {
         *peer_identity = AuthenticateCallerIdentity(daemon_, token, token, "", plane_);
         return Status::OK();
@@ -237,7 +243,7 @@ class PeerClientAuth : public ::arrow::flight::ClientAuthHandler {
   public:
     explicit PeerClientAuth(std::string secret) : secret_(std::move(secret)) {}
     ::arrow::Status Authenticate(::arrow::flight::ClientAuthSender *outgoing,
-                               ::arrow::flight::ClientAuthReader *incoming) override {
+                                 ::arrow::flight::ClientAuthReader *incoming) override {
         ARROW_RETURN_NOT_OK(outgoing->Write(secret_));
         std::string id;
         return incoming->Read(&id);
@@ -278,7 +284,7 @@ PeerFlight::PeerFlight(std::string secret, int64_t timeout_ms)
     : secret_(std::move(secret)), timeout_ms_(timeout_ms > 0 ? timeout_ms : 5000) {}
 
 ::arrow::flight::FlightCallOptions PeerFlight::CallOpt(const std::string &sandbox_id,
-                                                     const std::string &key) const {
+                                                       const std::string &key) const {
     ::arrow::flight::FlightCallOptions opt;
     // Flight gRPC can hand the client StringArray offset buffers at align=1.
     // ARM64 SIGSEGV'd in GetTables include_schema; copy to type-aligned memory.
@@ -739,8 +745,8 @@ Status DuckboxFlightSqlServer::DoPutPreparedStatementQuery(
         RememberBind(command.prepared_statement_handle, h.params_ipc);
         RememberBind(token, h.params_ipc);
         auto packed = EncodeDoPutHandle(token);
-        auto md = std::make_shared<::arrow::Buffer>(reinterpret_cast<const uint8_t *>(packed.data()),
-                                                  static_cast<int64_t>(packed.size()));
+        auto md = std::make_shared<::arrow::Buffer>(
+            reinterpret_cast<const uint8_t *>(packed.data()), static_cast<int64_t>(packed.size()));
         return writer->WriteMetadata(*md);
     } catch (const std::exception &e) {
         return FromEx(e);
@@ -990,9 +996,9 @@ DuckboxFlightSqlServer::SandboxActionTypes(ListenerPlane plane) {
     return plane == ListenerPlane::Internal ? k_internal : k_public;
 }
 
-::arrow::Status
-DuckboxFlightSqlServer::HandleSandboxAction(const ServerCallContext &context, const Action &action,
-                                            std::unique_ptr<::arrow::flight::ResultStream> *result) {
+::arrow::Status DuckboxFlightSqlServer::HandleSandboxAction(
+    const ServerCallContext &context, const Action &action,
+    std::unique_ptr<::arrow::flight::ResultStream> *result) {
     try {
         auto caller = CallerOf(context);
         bool operator_action = action.type == "DrainNode" || action.type == "NodeStatus";
@@ -1202,17 +1208,17 @@ DuckboxFlightServer::DuckboxFlightServer(std::unique_ptr<DuckboxFlightSqlServer>
     : sql_(std::move(sql)) {}
 
 ::arrow::Status DuckboxFlightServer::GetFlightInfo(const ServerCallContext &context,
-                                                 const FlightDescriptor &request,
-                                                 std::unique_ptr<FlightInfo> *info) {
+                                                   const FlightDescriptor &request,
+                                                   std::unique_ptr<FlightInfo> *info) {
     return sql_->GetFlightInfo(context, request, info);
 }
-::arrow::Status DuckboxFlightServer::GetSchema(const ServerCallContext &context,
-                                             const FlightDescriptor &request,
-                                             std::unique_ptr<::arrow::flight::SchemaResult> *schema) {
+::arrow::Status
+DuckboxFlightServer::GetSchema(const ServerCallContext &context, const FlightDescriptor &request,
+                               std::unique_ptr<::arrow::flight::SchemaResult> *schema) {
     return sql_->GetSchema(context, request, schema);
 }
 ::arrow::Status DuckboxFlightServer::DoGet(const ServerCallContext &context, const Ticket &request,
-                                         std::unique_ptr<FlightDataStream> *stream) {
+                                           std::unique_ptr<FlightDataStream> *stream) {
     return sql_->DoGet(context, request, stream);
 }
 ::arrow::Status
@@ -1221,16 +1227,18 @@ DuckboxFlightServer::DoPut(const ServerCallContext &context,
                            std::unique_ptr<::arrow::flight::FlightMetadataWriter> writer) {
     return sql_->DoPut(context, std::move(reader), std::move(writer));
 }
-::arrow::Status DuckboxFlightServer::ListActions(const ServerCallContext &context,
-                                               std::vector<::arrow::flight::ActionType> *actions) {
+::arrow::Status
+DuckboxFlightServer::ListActions(const ServerCallContext &context,
+                                 std::vector<::arrow::flight::ActionType> *actions) {
     ARROW_RETURN_NOT_OK(sql_->ListActions(context, actions));
     for (auto &a : DuckboxFlightSqlServer::SandboxActionTypes(sql_->plane())) {
         actions->push_back(a);
     }
     return Status::OK();
 }
-::arrow::Status DuckboxFlightServer::DoAction(const ServerCallContext &context, const Action &action,
-                                            std::unique_ptr<::arrow::flight::ResultStream> *result) {
+::arrow::Status
+DuckboxFlightServer::DoAction(const ServerCallContext &context, const Action &action,
+                              std::unique_ptr<::arrow::flight::ResultStream> *result) {
     for (auto plane : {ListenerPlane::Public, ListenerPlane::Internal}) {
         for (auto &a : DuckboxFlightSqlServer::SandboxActionTypes(plane)) {
             if (action.type == a.type) {

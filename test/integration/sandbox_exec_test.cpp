@@ -16,6 +16,8 @@
 
 #include <chrono>
 #include <filesystem>
+#include <iostream>
+#include <sstream>
 #include <thread>
 
 void duckbox::test::RunSandboxExecTests() {
@@ -43,6 +45,35 @@ void duckbox::test::RunSandboxExecTests() {
 
     auto yaml_out = box_yaml.Execute("SELECT id, title, amount FROM deals ORDER BY id");
     Expect(yaml_out.row_count == 1, "yaml policy execute tenant 21");
+    {
+        const char *pw = "duckbox-exec-catalog-secret-aa01";
+        const char *dsn = "dbname=lake host=127.0.0.1 port=5432 user=duckbox "
+                          "password=duckbox-exec-catalog-secret-aa01";
+        auto injected = std::string("IO Error: Failed to query most recent snapshot for DuckLake: "
+                                    "Unable to connect to Postgres at \"") +
+                        dsn + "\"";
+        QueryErrorInjection down(injected);
+        std::ostringstream log;
+        auto *old = std::clog.rdbuf(log.rdbuf());
+        std::string err;
+        try {
+            box_yaml.Execute("SELECT count(*) FROM deals");
+            std::clog.rdbuf(old);
+            Expect(false, "catalog-down Execute must fail");
+        } catch (const std::exception &e) {
+            std::clog.rdbuf(old);
+            err = e.what();
+        }
+        Expect(err.find(kCatalogUnavailableClientError) != std::string::npos,
+               "catalog-down Execute uses the generic catalog message");
+        Expect(err.find(pw) == std::string::npos && err.find(dsn) == std::string::npos,
+               "catalog-down Execute must not include password or DSN");
+        auto logged = log.str();
+        Expect(logged.find(pw) == std::string::npos, "operator log redacts catalog password");
+        Expect(logged.find(kCatalogUnavailableClientError) != std::string::npos ||
+                   logged.find("lake catalog unavailable") != std::string::npos,
+               "operator log records the catalog-down event");
+    }
 
     auto out_a = box_a.Execute("SELECT id, title, amount FROM deals ORDER BY id");
     auto out_b = box_b.Execute("SELECT id, title, amount FROM deals ORDER BY id");
@@ -537,5 +568,23 @@ void duckbox::test::RunSandboxExecTests() {
         auto quoted =
             cli.Post("/v1/query", hdr, "{\"sql\":\"SELECT 1 AS \\\"x\\\"\"}", "application/json");
         Expect(static_cast<bool>(quoted), "debug HTTP parses JSON string escapes in sql");
+        {
+            const char *pw = "duckbox-http-catalog-secret-bb02";
+            const char *dsn = "dbname=lake host=127.0.0.1 port=5432 user=duckbox "
+                              "password=duckbox-http-catalog-secret-bb02";
+            auto injected =
+                std::string("IO Error: Failed to query most recent snapshot for DuckLake: "
+                            "Unable to connect to Postgres at \"") +
+                dsn + "\"";
+            QueryErrorInjection down(injected);
+            auto cat = cli.Post("/v1/query", hdr, "{\"sql\":\"SELECT count(*) FROM deals\"}",
+                                "application/json");
+            Expect(cat && cat->status == 400, "debug HTTP catalog-down is 400");
+            Expect(cat->body.find(pw) == std::string::npos &&
+                       cat->body.find(dsn) == std::string::npos,
+                   "debug HTTP catalog-down must not include password or DSN");
+            Expect(cat->body.find(kCatalogUnavailableClientError) != std::string::npos,
+                   "debug HTTP catalog-down uses the generic catalog message");
+        }
     }
 }

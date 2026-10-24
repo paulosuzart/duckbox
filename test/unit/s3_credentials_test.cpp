@@ -563,8 +563,7 @@ int main() {
                        attach_err.find("SECRET '") == std::string::npos,
                    std::string(msg) + " attach error must not include credentials");
             Expect(attach_err.find(kCatalogAttachClientError) != std::string::npos ||
-                       attach_err.find(kS3SecretClientError) != std::string::npos ||
-                       attach_err.find("password=") == std::string::npos,
+                       attach_err.find(kS3SecretClientError) != std::string::npos,
                    std::string(msg) + " attach uses a generic client error");
         }
         auto listed = con.Query("SELECT name, type, provider FROM duckdb_secrets()");

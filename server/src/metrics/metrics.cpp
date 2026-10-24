@@ -1,9 +1,10 @@
 #include "metrics/metrics.hpp"
-#include "config/policy.hpp"
-#include "rewriter/tenant_key.hpp"
-#include "node/daemon_config.hpp"
 #include "common/error.hpp"
 #include "common/json.hpp"
+#include "config/policy.hpp"
+#include "lake/lake.hpp"
+#include "node/daemon_config.hpp"
+#include "rewriter/tenant_key.hpp"
 
 #include "httplib.h"
 
@@ -649,7 +650,17 @@ void ObserveFailure(IMetrics &m, const Policy *policy, const TenantKey *key,
     }
     m.ObserveQuery(cls, outcome, cold, seconds, 0, 0);
     if (key && policy) {
-        WriteAuditLog(*key, *policy, seconds, 0, 0, outcome, rej ? rej : (lim ? lim : e.what()));
+        std::string sanitized;
+        const char *reason = nullptr;
+        if (rej) {
+            reason = rej;
+        } else if (lim) {
+            reason = lim;
+        } else {
+            sanitized = lake::SanitizeClientError(e.what());
+            reason = sanitized.c_str();
+        }
+        WriteAuditLog(*key, *policy, seconds, 0, 0, outcome, reason);
     }
 }
 

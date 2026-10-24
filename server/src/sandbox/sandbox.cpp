@@ -15,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -35,6 +36,8 @@ namespace {
 thread_local std::string g_hardening_fail_needle;
 thread_local std::string g_hardening_mismatch_setting;
 thread_local std::string g_hardening_read_error_setting;
+std::mutex g_query_error_mu;
+std::string g_query_error_inject;
 
 std::string LowerAscii(std::string s) {
     for (char &c : s) {
@@ -138,6 +141,41 @@ WarmupHardeningReadError::~WarmupHardeningReadError() {
     g_hardening_read_error_setting.clear();
 }
 
+QueryErrorInjection::QueryErrorInjection(std::string duckdb_error) {
+    std::lock_guard<std::mutex> lk(g_query_error_mu);
+    g_query_error_inject = std::move(duckdb_error);
+}
+
+QueryErrorInjection::~QueryErrorInjection() {
+    std::lock_guard<std::mutex> lk(g_query_error_mu);
+    g_query_error_inject.clear();
+}
+
+namespace {
+
+std::string InjectedQueryError() {
+    std::lock_guard<std::mutex> lk(g_query_error_mu);
+    return g_query_error_inject;
+}
+
+SecretRedactionContext RedactCtxOf(const std::vector<std::string> &values) {
+    SecretRedactionContext ctx;
+    ctx.exact_values = values;
+    return ctx;
+}
+
+std::string ClientFacingQueryError(const std::string &raw,
+                                   const std::vector<std::string> &secrets) {
+    auto ctx = RedactCtxOf(secrets);
+    if (IsLakeCatalogIoError(raw)) {
+        std::clog << "sandbox: lake catalog unavailable: " << RedactSecretText(raw, ctx) << "\n";
+        return kCatalogUnavailableClientError;
+    }
+    return RedactSecretText(raw, ctx);
+}
+
+} // namespace
+
 TenantSandbox::TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key,
                              std::string spec_dir, std::string sandbox_id, int version,
                              std::shared_ptr<SecretResolver> secrets)
@@ -187,6 +225,7 @@ void TenantSandbox::Warmup(bool validate_lake) {
             // AttachLakeFromSpec reports a missing catalog; unbound DSNs fail attach.
         }
     }
+    secret_values_ = CollectSecretRedactionContextFromSpec(policy_, *secrets_).exact_values;
     try {
         db_ = std::make_unique<ddb::DuckDB>(nullptr);
         con_ = std::make_unique<ddb::Connection>(*db_);
@@ -372,6 +411,11 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
     };
     try {
         QueryOutput out;
+        auto injected = InjectedQueryError();
+        if (!injected.empty()) {
+            finish_watchdog();
+            throw Error(ClientFacingQueryError(injected, secret_values_));
+        }
         std::unique_ptr<ddb::QueryResult> result;
         if (params.empty()) {
             result = con_->Query(sql);
@@ -379,7 +423,7 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
             auto ps = con_->Prepare(sql);
             if (ps->HasError()) {
                 finish_watchdog();
-                throw Error(ps->GetError());
+                throw Error(ClientFacingQueryError(ps->GetError(), secret_values_));
             }
             auto dparams = ToDuckValues(params);
             result = ps->Execute(dparams, ddb::QueryParameters{});
@@ -389,7 +433,7 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
             if (timed_out) {
                 throw Error("query timeout");
             }
-            throw Error(result->GetError());
+            throw Error(ClientFacingQueryError(result->GetError(), secret_values_));
         }
         result->Complete();
         out.text_table = result->ToString();
@@ -447,6 +491,14 @@ QueryOutput TenantSandbox::Execute(const std::string &sql) {
         return out;
     } catch (const std::exception &e) {
         RecoverAfterFailure();
+        auto client = ClientFacingQueryError(e.what(), secret_values_);
+        if (client != e.what()) {
+            Error sanitized(client);
+            ObserveFailure(
+                Metrics(), &policy_, &key_, sanitized, cold,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            throw sanitized;
+        }
         ObserveFailure(
             Metrics(), &policy_, &key_, e, cold,
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
@@ -471,6 +523,14 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql,
         return out;
     } catch (const std::exception &e) {
         RecoverAfterFailure();
+        auto client = ClientFacingQueryError(e.what(), secret_values_);
+        if (client != e.what()) {
+            Error sanitized(client);
+            ObserveFailure(
+                Metrics(), &policy_, &key_, sanitized, cold,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            throw sanitized;
+        }
         ObserveFailure(
             Metrics(), &policy_, &key_, e, cold,
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
@@ -544,6 +604,13 @@ ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::stri
             RecoverAfterFailure();
             return con_->ExtractPlan(stripped);
         }
+    } catch (const std::exception &e) {
+        RecoverAfterFailure();
+        auto client = ClientFacingQueryError(e.what(), secret_values_);
+        if (client != e.what()) {
+            throw Error(client);
+        }
+        throw;
     } catch (...) {
         RecoverAfterFailure();
         throw;
@@ -558,10 +625,14 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
         RecoverAfterFailure();
     }
     try {
+        auto injected = InjectedQueryError();
+        if (!injected.empty()) {
+            throw Error(ClientFacingQueryError(injected, secret_values_));
+        }
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto ps = con_->Prepare(rewritten);
         if (ps->HasError()) {
-            throw Error(ps->GetError());
+            throw Error(ClientFacingQueryError(ps->GetError(), secret_values_));
         }
         std::vector<ColumnSchema> out;
         auto &names = ps->GetNames();
@@ -570,6 +641,13 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
             out.push_back(ColumnSchema{IdentName(names[i]), types[i].ToString()});
         }
         return out;
+    } catch (const std::exception &e) {
+        RecoverAfterFailure();
+        auto client = ClientFacingQueryError(e.what(), secret_values_);
+        if (client != e.what()) {
+            throw Error(client);
+        }
+        throw;
     } catch (...) {
         RecoverAfterFailure();
         throw;
@@ -584,10 +662,14 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std
         RecoverAfterFailure();
     }
     try {
+        auto injected = InjectedQueryError();
+        if (!injected.empty()) {
+            throw Error(ClientFacingQueryError(injected, secret_values_));
+        }
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto ps = con_->Prepare(rewritten);
         if (ps->HasError()) {
-            throw Error(ps->GetError());
+            throw Error(ClientFacingQueryError(ps->GetError(), secret_values_));
         }
         auto &names = ps->GetNames();
         auto &types = ps->GetTypes();
@@ -601,6 +683,13 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std
         }
         auto opts = con_->context->GetClientProperties();
         return SchemaFromLogicalTypes(out_names, out_types, opts);
+    } catch (const std::exception &e) {
+        RecoverAfterFailure();
+        auto client = ClientFacingQueryError(e.what(), secret_values_);
+        if (client != e.what()) {
+            throw Error(client);
+        }
+        throw;
     } catch (...) {
         RecoverAfterFailure();
         throw;

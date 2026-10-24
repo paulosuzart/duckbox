@@ -4,6 +4,8 @@ N duckbox daemons share one named-sandbox registry and coordinate **per-sandbox 
 
 DuckLake multi-node is **read-only or a Postgres catalog**. duckbox does not replicate or sync lake data between nodes. If you put PgBouncer in front of a Postgres DuckLake catalog, use session pooling (transaction pooling breaks `SET search_path` / prepared catalog statements). That is a catalog-ops warning, not a duckbox feature.
 
+If the catalog is unreachable after warmup (Postgres stopped, network partition, bad DSN), agent SQL — including `AT (VERSION => n)` — returns the generic client error `lake catalog unavailable; see operator logs`. The resolved DSN and configured secret values are stripped from that path and from operator logs. Warmup attach failures stay `ducklake catalog attach failed; see operator logs`.
+
 ## Architecture
 
 ```

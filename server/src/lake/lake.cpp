@@ -2,10 +2,12 @@
 #include "common/error.hpp"
 #include "s3/s3_credentials.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <vector>
 
 namespace duckbox {
 namespace lake {
@@ -62,30 +64,115 @@ bool IsIdentChar(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
-void RedactKeyEquals(std::string &s, const std::string &key) {
+bool IsWs(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+bool IsUnquotedValueEnd(char c) {
+    // '"' and ':' stop the value so diagnostic text after a DSN or JSON
+    // fragment is not swallowed (S2).
+    return IsWs(c) || c == ';' || c == ',' || c == ')' || c == '&' || c == '"' || c == ':';
+}
+
+std::string LowerAsciiCopy(std::string s) {
+    for (char &c : s) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return s;
+}
+
+bool ContainsCi(const std::string &hay, const std::string &needle) {
+    auto h = LowerAsciiCopy(hay);
+    auto n = LowerAsciiCopy(needle);
+    return h.find(n) != std::string::npos;
+}
+
+void ReplaceAllExact(std::string &s, const std::string &needle, const char *repl) {
+    if (needle.empty()) {
+        return;
+    }
+    size_t pos = 0;
+    const size_t n = needle.size();
+    const size_t rlen = std::char_traits<char>::length(repl);
+    while ((pos = s.find(needle, pos)) != std::string::npos) {
+        s.replace(pos, n, repl);
+        pos += rlen;
+    }
+}
+
+void RedactExactValues(std::string &s, const SecretRedactionContext &ctx) {
+    std::vector<std::string> vals = ctx.exact_values;
+    std::sort(vals.begin(), vals.end(),
+              [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
+    for (const auto &val : vals) {
+        if (val.size() < 4) {
+            continue;
+        }
+        ReplaceAllExact(s, val, kRedactedMarker);
+    }
+}
+
+// Quoted value starting at vs (the opening quote). Handles '' / "" doubling
+// and libpq/C escapes (\' , \  ). Returns one-past the closing quote, or npos
+// past the end if unclosed.
+size_t QuotedValueEnd(const std::string &s, size_t vs) {
+    if (vs >= s.size()) {
+        return vs;
+    }
+    char q = s[vs];
+    size_t ve = vs + 1;
+    while (ve < s.size()) {
+        if (s[ve] == '\\' && ve + 1 < s.size()) {
+            ve += 2;
+            continue;
+        }
+        if (s[ve] == q && ve + 1 < s.size() && s[ve + 1] == q) {
+            ve += 2;
+            continue;
+        }
+        if (s[ve] == q) {
+            return ve + 1;
+        }
+        ve++;
+    }
+    return ve;
+}
+
+size_t UnquotedValueEnd(const std::string &s, size_t vs) {
+    size_t ve = vs;
+    while (ve < s.size() && !IsUnquotedValueEnd(s[ve])) {
+        ve++;
+    }
+    return ve;
+}
+
+void RedactKeyedValue(std::string &s, const std::string &key) {
     size_t i = 0;
     while (i < s.size()) {
         if (CiEq(s, i, key) && (i == 0 || !IsIdentChar(s[i - 1]))) {
             size_t after = i + key.size();
-            if (after < s.size() && s[after] == '=') {
-                size_t vs = after + 1;
+            if (after < s.size() && after > 0 && (s[after] == '"' || s[after] == '\'') && i > 0 &&
+                s[i - 1] == s[after]) {
+                after++;
+            }
+            size_t sep = after;
+            while (sep < s.size() && IsWs(s[sep])) {
+                sep++;
+            }
+            if (sep < s.size() && (s[sep] == '=' || s[sep] == ':')) {
+                size_t vs = sep + 1;
+                while (vs < s.size() && IsWs(s[vs])) {
+                    vs++;
+                }
                 size_t ve = vs;
                 if (ve < s.size() && (s[ve] == '\'' || s[ve] == '"')) {
-                    char q = s[ve++];
-                    while (ve < s.size() && s[ve] != q) {
-                        ve++;
-                    }
-                    if (ve < s.size()) {
-                        ve++;
-                    }
+                    ve = QuotedValueEnd(s, ve);
                 } else {
-                    while (ve < s.size() && s[ve] != ' ' && s[ve] != '\t' && s[ve] != '\n' &&
-                           s[ve] != '\r' && s[ve] != ';' && s[ve] != ',' && s[ve] != ')' &&
-                           s[ve] != '&') {
-                        ve++;
-                    }
+                    ve = UnquotedValueEnd(s, ve);
                 }
-                s.replace(vs, ve - vs, "<redacted>");
+                s.replace(vs, ve - vs, kRedactedMarker);
                 i = vs + 10;
                 continue;
             }
@@ -99,13 +186,17 @@ void RedactSqlQuoted(std::string &s, const std::string &keyword) {
     while (i < s.size()) {
         if (CiEq(s, i, keyword) && (i == 0 || !IsIdentChar(s[i - 1]))) {
             size_t j = i + keyword.size();
-            while (j < s.size() && (s[j] == ' ' || s[j] == '\t' || s[j] == '=')) {
+            while (j < s.size() && (IsWs(s[j]) || s[j] == '=')) {
                 j++;
             }
             if (j < s.size() && s[j] == '\'') {
                 size_t vs = j + 1;
                 size_t ve = vs;
                 while (ve < s.size()) {
+                    if (s[ve] == '\\' && ve + 1 < s.size()) {
+                        ve += 2;
+                        continue;
+                    }
                     if (s[ve] == '\'' && ve + 1 < s.size() && s[ve + 1] == '\'') {
                         ve += 2;
                         continue;
@@ -115,7 +206,7 @@ void RedactSqlQuoted(std::string &s, const std::string &keyword) {
                     }
                     ve++;
                 }
-                s.replace(vs, ve - vs, "<redacted>");
+                s.replace(vs, ve - vs, kRedactedMarker);
                 i = vs + 10;
                 continue;
             }
@@ -124,35 +215,205 @@ void RedactSqlQuoted(std::string &s, const std::string &keyword) {
     }
 }
 
+void RedactPostgresUriUserinfo(std::string &s) {
+    const char *schemes[] = {"postgresql://", "postgres://"};
+    for (const char *scheme : schemes) {
+        size_t i = 0;
+        while (i < s.size()) {
+            if (CiEq(s, i, scheme)) {
+                size_t user = i + std::char_traits<char>::length(scheme);
+                size_t at = s.find('@', user);
+                if (at == std::string::npos) {
+                    i++;
+                    continue;
+                }
+                size_t colon = s.find(':', user);
+                if (colon != std::string::npos && colon < at) {
+                    s.replace(colon + 1, at - (colon + 1), kRedactedMarker);
+                    i = colon + 1 + 10;
+                    continue;
+                }
+            }
+            i++;
+        }
+    }
+}
+
+void RedactPatterns(std::string &s) {
+    const char *keys[] = {"aws_secret_access_key",
+                          "aws_access_key_id",
+                          "aws_session_token",
+                          "secret_access_key",
+                          "session_token",
+                          "sslpassword",
+                          "pgpassword",
+                          "passfile",
+                          "access_key",
+                          "key_id",
+                          "password",
+                          "secret",
+                          "token",
+                          "pwd"};
+    for (const char *key : keys) {
+        RedactKeyedValue(s, key);
+    }
+    const char *sql_keys[] = {"SESSION_TOKEN", "KEY_ID",   "SECRET",
+                              "sslpassword",   "password", "secret"};
+    for (const char *key : sql_keys) {
+        RedactSqlQuoted(s, key);
+    }
+    RedactPostgresUriUserinfo(s);
+}
+
+void ExtractKeyedExact(SecretRedactionContext &ctx, const std::string &text, const char *key) {
+    size_t i = 0;
+    const std::string k(key);
+    while (i < text.size()) {
+        if (CiEq(text, i, k) && (i == 0 || !IsIdentChar(text[i - 1]))) {
+            size_t after = i + k.size();
+            while (after < text.size() && IsWs(text[after])) {
+                after++;
+            }
+            if (after < text.size() && (text[after] == '=' || text[after] == ':')) {
+                size_t vs = after + 1;
+                while (vs < text.size() && IsWs(text[vs])) {
+                    vs++;
+                }
+                size_t ve = vs;
+                bool quoted = ve < text.size() && (text[ve] == '\'' || text[ve] == '"');
+                if (quoted) {
+                    ve = QuotedValueEnd(text, ve);
+                    if (ve > vs + 1) {
+                        AddSecretValue(ctx, text.substr(vs + 1, ve - vs - 2));
+                    }
+                } else {
+                    ve = UnquotedValueEnd(text, vs);
+                    if (ve > vs) {
+                        AddSecretValue(ctx, text.substr(vs, ve - vs));
+                    }
+                }
+                i = (ve > i) ? ve : i + 1;
+                continue;
+            }
+        }
+        i++;
+    }
+}
+
+void ExtractUriPassword(SecretRedactionContext &ctx, const std::string &text) {
+    const char *schemes[] = {"postgresql://", "postgres://"};
+    for (const char *scheme : schemes) {
+        size_t i = 0;
+        while (i < text.size()) {
+            if (CiEq(text, i, scheme)) {
+                size_t user = i + std::char_traits<char>::length(scheme);
+                size_t at = text.find('@', user);
+                if (at == std::string::npos) {
+                    i++;
+                    continue;
+                }
+                size_t colon = text.find(':', user);
+                if (colon != std::string::npos && colon < at && at > colon + 1) {
+                    AddSecretValue(ctx, text.substr(colon + 1, at - (colon + 1)));
+                }
+            }
+            i++;
+        }
+    }
+}
+
 void ExecSensitiveOrThrow(ddb::Connection &con, const std::string &sql, const char *log_prefix,
-                          const char *client_error) {
+                          const char *client_error, const SecretRedactionContext &ctx) {
     EnsureLinkedDuckDb();
     auto r = con.Query(sql);
     if (r->HasError()) {
-        std::clog << log_prefix << RedactSecretText(r->GetError()) << "\n";
+        std::clog << log_prefix << RedactSecretText(r->GetError(), ctx) << "\n";
         throw Error(client_error);
     }
 }
 
 } // namespace
 
+void AddSecretValue(SecretRedactionContext &ctx, const std::string &value) {
+    if (value.size() < 4) {
+        return;
+    }
+    for (const auto &existing : ctx.exact_values) {
+        if (existing == value) {
+            return;
+        }
+    }
+    ctx.exact_values.push_back(value);
+}
+
+SecretRedactionContext CollectSecretRedactionContext(const std::string &catalog_dsn,
+                                                     const std::string &s3_key_id,
+                                                     const std::string &s3_secret) {
+    SecretRedactionContext ctx;
+    if (!catalog_dsn.empty()) {
+        AddSecretValue(ctx, catalog_dsn);
+        ExtractKeyedExact(ctx, catalog_dsn, "password");
+        ExtractKeyedExact(ctx, catalog_dsn, "sslpassword");
+        ExtractKeyedExact(ctx, catalog_dsn, "pwd");
+        ExtractUriPassword(ctx, catalog_dsn);
+    }
+    AddSecretValue(ctx, s3_key_id);
+    AddSecretValue(ctx, s3_secret);
+    return ctx;
+}
+
+SecretRedactionContext CollectSecretRedactionContextFromSpec(const SandboxSpec &spec,
+                                                             const SecretResolver &secrets) {
+    std::string catalog;
+    std::string key_id;
+    std::string secret;
+    try {
+        catalog = ResolveLakeCatalog(spec, secrets);
+    } catch (...) {
+    }
+    try {
+        auto creds = ResolveLakeS3Credentials(spec.lake.s3, secrets);
+        key_id = creds.key_id;
+        secret = creds.secret;
+    } catch (...) {
+    }
+    return CollectSecretRedactionContext(catalog, key_id, secret);
+}
+
 std::string RedactSecretText(const std::string &text) {
+    return RedactSecretText(text, SecretRedactionContext{});
+}
+
+std::string RedactSecretText(const std::string &text, const SecretRedactionContext &ctx) {
     std::string out = text;
-    RedactKeyEquals(out, "aws_secret_access_key");
-    RedactKeyEquals(out, "secret_access_key");
-    RedactKeyEquals(out, "password");
-    RedactKeyEquals(out, "secret");
-    RedactSqlQuoted(out, "SECRET");
-    RedactSqlQuoted(out, "password");
-    RedactSqlQuoted(out, "secret");
+    RedactExactValues(out, ctx);
+    RedactPatterns(out);
     return out;
+}
+
+bool IsLakeCatalogIoError(const std::string &text) {
+    return ContainsCi(text, "failed to query most recent snapshot") ||
+           ContainsCi(text, "unable to connect to postgres") ||
+           ContainsCi(text, "failed to attach ducklake") ||
+           (ContainsCi(text, "ducklake") && ContainsCi(text, "unable to connect"));
+}
+
+std::string SanitizeClientError(const std::string &text) {
+    return SanitizeClientError(text, SecretRedactionContext{});
+}
+
+std::string SanitizeClientError(const std::string &text, const SecretRedactionContext &ctx) {
+    if (IsLakeCatalogIoError(text)) {
+        return kCatalogUnavailableClientError;
+    }
+    return RedactSecretText(text, ctx);
 }
 
 void ExecOrThrow(ddb::Connection &con, const std::string &sql) {
     EnsureLinkedDuckDb();
     auto r = con.Query(sql);
     if (r->HasError()) {
-        throw Error(RedactSecretText(r->GetError()));
+        throw Error(SanitizeClientError(r->GetError()));
     }
 }
 
@@ -302,6 +563,8 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
 
     auto &s3 = spec.lake.s3;
     ResolvedS3Credentials creds = ResolveLakeS3Credentials(s3, secrets);
+    SecretRedactionContext redact_ctx =
+        CollectSecretRedactionContext("", creds.key_id, creds.secret);
     if (creds.provider == S3CredentialProvider::CredentialChain) {
         std::clog << "sandbox: attaching ducklake catalog (s3 credential_chain";
         if (!creds.profile.empty()) {
@@ -317,12 +580,14 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
                   << ", values not logged)\n";
     }
     ExecSensitiveOrThrow(con, BuildDuckDbS3SecretSql(creds),
-                         "sandbox: lake S3 secret creation failed: ", kS3SecretClientError);
+                         "sandbox: lake S3 secret creation failed: ", kS3SecretClientError,
+                         redact_ctx);
 
     std::string catalog = ResolveLakeCatalog(spec, secrets);
     if (catalog.empty()) {
         throw PolicyError("lake.catalog or lake.catalog_env is required for ducklake");
     }
+    redact_ctx = CollectSecretRedactionContext(catalog, creds.key_id, creds.secret);
 
     auto alias = spec.lake.alias.empty() ? "lake" : spec.lake.alias;
     std::ostringstream attach;
@@ -343,7 +608,8 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
     }
     attach << ")";
     ExecSensitiveOrThrow(con, attach.str(),
-                         "sandbox: ducklake catalog attach failed: ", kCatalogAttachClientError);
+                         "sandbox: ducklake catalog attach failed: ", kCatalogAttachClientError,
+                         redact_ctx);
     ExecOrThrow(con, "USE " + alias);
 }
 
