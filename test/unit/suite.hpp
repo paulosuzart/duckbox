@@ -3,6 +3,7 @@
 namespace duckbox {
 namespace test {
 
+void RunAuthTests();
 void RunTenantKeyTests();
 void RunSpecLoaderTests();
 void RunValidatorTests();

@@ -590,14 +590,16 @@ std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::strin
     if (!from_secret.empty()) {
         return reject_reserved(from_secret);
     }
-    if (cfg.auth_mode == AuthMode::Token) {
+    const bool jwt_configured = !cfg.jwt_secret.empty();
+    if (cfg.auth_mode == AuthMode::Token || jwt_configured) {
         if (cfg.jwt_secret.empty()) {
             throw AuthError("token mode requires auth.jwt_secret");
         }
-        if (bearer.empty()) {
+        std::string jwt_tok = !bearer.empty() ? bearer : peer_identity;
+        if (jwt_tok.empty()) {
             throw AuthError("token mode requires Authorization: Bearer");
         }
-        return reject_reserved(VerifyJwtHs256(bearer, cfg.jwt_secret));
+        return reject_reserved(VerifyJwtHs256(jwt_tok, cfg.jwt_secret));
     }
     if (!cfg.bearer_secrets.empty()) {
         throw AuthError("invalid caller credential");

@@ -164,6 +164,10 @@ Status FromEx(const std::exception &e) {
     if (dynamic_cast<const UnavailableError *>(&e)) {
         return Status::IOError(client);
     }
+    if (dynamic_cast<const AuthError *>(&e)) {
+        return ::arrow::flight::MakeFlightError(::arrow::flight::FlightStatusCode::Unauthenticated,
+                                                client);
+    }
     return Status::Invalid(client);
 }
 
@@ -208,18 +212,31 @@ HandshakeAuthHandler::HandshakeAuthHandler(DaemonConfig daemon, ListenerPlane pl
     try {
         auto id = AuthenticateCallerIdentity(daemon_, token, token, "", plane_);
         return outgoing->Write(id);
-    } catch (const std::exception &e) {
-        return Status::Invalid(e.what());
+    } catch (const AuthError &e) {
+        return ::arrow::flight::MakeFlightError(::arrow::flight::FlightStatusCode::Unauthenticated,
+                                                ClientFacingError(e.what()));
+    } catch (const std::exception &) {
+        return ::arrow::flight::MakeFlightError(::arrow::flight::FlightStatusCode::Unauthenticated,
+                                                "unauthenticated");
     }
 }
 
-::arrow::Status HandshakeAuthHandler::IsValid(const ServerCallContext &, const std::string &token,
+::arrow::Status HandshakeAuthHandler::IsValid(const ServerCallContext &context,
+                                              const std::string &token,
                                               std::string *peer_identity) {
     try {
-        *peer_identity = AuthenticateCallerIdentity(daemon_, token, token, "", plane_);
+        auto header_bearer =
+            BearerTokenFromAuthorization(Hdr(context, {"authorization", "Authorization"}));
+        const std::string &cred = !header_bearer.empty() ? header_bearer : token;
+        auto caller = Hdr(context, {"x-duckbox-caller", "X-Duckbox-Caller"});
+        *peer_identity = AuthenticateCallerIdentity(daemon_, token, cred, caller, plane_);
         return Status::OK();
-    } catch (const std::exception &e) {
-        return Status::Invalid(e.what());
+    } catch (const AuthError &e) {
+        return ::arrow::flight::MakeFlightError(::arrow::flight::FlightStatusCode::Unauthenticated,
+                                                ClientFacingError(e.what()));
+    } catch (const std::exception &) {
+        return ::arrow::flight::MakeFlightError(::arrow::flight::FlightStatusCode::Unauthenticated,
+                                                "unauthenticated");
     }
 }
 
@@ -379,19 +396,24 @@ void DuckboxFlightSqlServer::RememberBind(const std::string &key, const std::str
 }
 
 std::string DuckboxFlightSqlServer::CallerOf(const ServerCallContext &context) const {
-    auto bearer = Hdr(context, {"authorization", "Authorization"});
-    const std::string prefix = "Bearer ";
-    std::string token;
-    if (bearer.size() > prefix.size() && bearer.compare(0, prefix.size(), prefix) == 0) {
-        token = bearer.substr(prefix.size());
-    }
-    if (plane_ == ListenerPlane::Internal && context.peer_identity() == kPeerIdentity &&
-        token.empty()) {
+    auto token = BearerTokenFromAuthorization(Hdr(context, {"authorization", "Authorization"}));
+    const auto &peer = context.peer_identity();
+    if (plane_ == ListenerPlane::Internal && peer == kPeerIdentity && token.empty()) {
         return kPeerIdentity;
     }
-    return AuthenticateCallerIdentity(daemon_, context.peer_identity(), token,
-                                      Hdr(context, {"x-duckbox-caller", "X-Duckbox-Caller"}),
-                                      plane_);
+    auto caller_header = Hdr(context, {"x-duckbox-caller", "X-Duckbox-Caller"});
+    if (!token.empty()) {
+        return AuthenticateCallerIdentity(daemon_, peer, token, caller_header, plane_);
+    }
+    if (!peer.empty()) {
+        if (peer == kPeerIdentity && plane_ != ListenerPlane::Internal) {
+            throw AuthError("peer credential is not valid on the public listener");
+        }
+        // HandshakeAuthHandler::IsValid already resolved this identity. Do not
+        // treat the name as a client-chosen credential.
+        return peer;
+    }
+    return AuthenticateCallerIdentity(daemon_, "", "", caller_header, plane_);
 }
 
 void DuckboxFlightSqlServer::RequirePeerQuery(const std::string &caller) const {
@@ -415,16 +437,8 @@ DuckboxFlightSqlServer::Auth(const ServerCallContext &context) const {
     RequirePeerQuery(c.caller);
     auto sandbox_id = Hdr(context, {"x-duckbox-sandbox", "X-Duckbox-Sandbox"});
     auto key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
-    auto bearer = Hdr(context, {"authorization", "Authorization"});
-    const std::string prefix = "Bearer ";
-    std::string token;
-    if (bearer.size() > prefix.size() && bearer.compare(0, prefix.size(), prefix) == 0) {
-        token = bearer.substr(prefix.size());
-    }
+    auto token = BearerTokenFromAuthorization(Hdr(context, {"authorization", "Authorization"}));
     try {
-        if (daemon_.auth_mode == AuthMode::Token && token.empty()) {
-            throw AuthError("token mode requires Authorization: Bearer (JWT stub)");
-        }
         if (sandbox_id.empty()) {
             throw AuthError("missing x-duckbox-sandbox (named sandbox id)");
         }

@@ -4,10 +4,10 @@ v1 is **Arrow Flight SQL** (gRPC). JDBC and ADBC clients work.
 
 Per-RPC headers:
 
-- `x-duckbox-sandbox` — named sandbox id (required for queries)
-- `x-duckbox-key` — optional per-query key for `auth.key` variable extraction; otherwise the definition’s bound key is used
+- `x-duckbox-sandbox` — named sandbox id (required for queries). Tenant binding is the definition’s key after caller auth, not a client-chosen header alone
+- `x-duckbox-key` — optional per-query key for `auth.key` variable extraction; must match the definition key when sent
 - `x-duckbox-caller` — trusted caller identity (default `local` / handshake peer). Ignored when `auth.bearer_secrets` or JWT is configured
-- `Authorization: Bearer …` — static bearer secret or HS256 JWT (`auth.jwt_secret`). Unsigned tokens are rejected
+- `Authorization: Bearer …` — static bearer secret (constant-time) or HS256 JWT (`auth.jwt_secret`). Validated on every call; the Flight handshake is optional. `sub` and `exp` are required (`nbf` optional). Unsigned tokens are rejected. Failures are `Unauthenticated` and do not echo the token.
 
 Public `DoAction` types: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes`, `ExpireSandbox`. Create/Update body is the spec YAML. `ListSandboxes` body is optional YAML filters (`id_prefix`, `key_prefix`, `policy_class`, `state`, `limit`, `offset`); items are summaries, not full specs (`owner` is the lease holder). `ExpireSandbox` body is the id.
 

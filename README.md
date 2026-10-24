@@ -259,12 +259,12 @@ Spec table and column names are ASCII-only unquoted identifiers. A DuckLake tabl
 
 ## Arrow Flight SQL
 
-v1 wire protocol. With production auth, JDBC/ADBC cannot authenticate until https://github.com/paulosuzart/duckbox/issues/16 is fixed (they do not send `auth-token-bin`); they work with `auth.allow_insecure_dev`. Headers:
+v1 wire protocol. Clients authenticate with `Authorization: Bearer` on every call (JDBC/ADBC send this and do not need a handshake), or with the Flight handshake token (`auth-token-bin`). Either credential is validated the same way. Auth failures return Flight `Unauthenticated` and never echo the secret or token. Headers:
 
-- `x-duckbox-sandbox` — named sandbox id (required for queries)
-- `x-duckbox-key` — optional; definition key is used otherwise
-- `x-duckbox-caller` — trusted caller identity; used only when `auth.allow_insecure_dev` is set and no bearer/JWT is configured
-- `Authorization: Bearer` — static `auth.bearer_secrets` or HS256 JWT (`auth.jwt_secret`). `alg` must be `"HS256"` exactly (not a substring); `exp` is required (`nbf` optional, 60s leeway). Unsigned tokens are rejected. JDBC/ADBC send this header but not `auth-token-bin`, so production auth still rejects them (same issue).
+- `x-duckbox-sandbox` — named sandbox id (required for queries). The bound tenant key comes from that definition after the caller is authenticated; a client-chosen `x-duckbox-key` cannot select another tenant.
+- `x-duckbox-key` — optional; must match the definition key when sent. The definition key is used otherwise.
+- `x-duckbox-caller` — trusted caller identity; used only when `auth.allow_insecure_dev` is set and no bearer/JWT is configured. Ignored when `auth.bearer_secrets` or `auth.jwt_secret` is set.
+- `Authorization: Bearer` — static `auth.bearer_secrets` (constant-time compare) or HS256 JWT (`auth.jwt_secret`, also when `auth.mode` is `token`). `alg` must be `"HS256"` exactly (not a substring); `sub` and `exp` are required (`nbf` optional, 60s leeway). Unsigned tokens are rejected. JDBC/ADBC need only this header.
 
 Public CRUD actions: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes`, `ExpireSandbox`. Create/Update body is spec YAML; ListSandboxes YAML body filters `id_prefix`, `key_prefix`, `policy_class`, `state` (`warm`|`passive`|`defined`) plus `limit`/`offset`. Each list item is a summary (`id`, `key`, `version`, `policy_class`, `state`, `owner`, `created_at`, `updated_at`, `last_used_at`, `expires_at`) — not the full spec. `owner` is the live lease holder. `ExpireSandbox` passivates the instance and invalidates prepared handles; the definition stays. Operator actions `DrainNode` / `NodeStatus` (`duckbox node drain`) are served only on the **internal** listener, restricted to `auth.operators` (deny by default; sandbox CRUD callers are not operators). Peer proxy calls use `auth.peer_secret_ref` (`env:` / `file:`). Never expose `internal_listen` publicly.
 
