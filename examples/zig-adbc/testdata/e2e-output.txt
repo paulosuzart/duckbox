@@ -1,0 +1,14 @@
+$ ./query
+id	title	amount
+1	alpha deal	100
+
+$ # sandbox constant set to acme-kim
+$ ./query
+id	title	amount
+3	bravo deal	500
+4	bravo two	50
+
+$ # sql constant set to SELECT * FROM secrets
+$ ./query
+ExecuteQuery: [FlightSQL] table not allowlisted: memory.main.secrets (InvalidArgument; ExecuteQuery)
+# exit 1
