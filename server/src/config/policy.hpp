@@ -196,9 +196,11 @@ std::string CanonicalAllowedPrefix(const std::string &raw);
 std::vector<std::string> DeclaredAllowedPaths(const SandboxSpec &spec);
 
 // Shared denylist for spec `functions` (load + ValidateStatic).
-// postgres_*/duckdb_*/ducklake_*/read_*/ *_scan, query, query_table, glob,
-// and other table-function names. The rewriter does not expand macros;
-// allowlisted macros are rejected separately at spec validation and warmup.
+// postgres_*/duckdb_*/ducklake_*/read_*/quack_*/iceberg_*/parquet_*/ *_scan,
+// query, query_table, glob, and other table-function names that reach the
+// network, filesystem, another instance, or config. The rewriter does not
+// expand macros; allowlisted macros are rejected separately at spec
+// validation and warmup.
 bool IsAlwaysDeniedTableFunction(const std::string &name);
 
 using Policy = SandboxSpec;

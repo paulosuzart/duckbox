@@ -20,6 +20,13 @@ void RunMetricsTests();
 void RunS3ClientTests();
 void RunLeaseTests();
 void RunMembershipTests();
+void RunConnectDenyTests();
+void RunTriggerDenyTests();
+void RunQuackDenyTests();
+void RunExtensionCapiDenyTests();
+void RunAgentModeDenyTests();
+void RunTableFunction20Tests();
+void RunMacroCatalog20Tests();
 
 } // namespace test
 } // namespace duckbox

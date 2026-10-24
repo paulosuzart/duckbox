@@ -2,6 +2,8 @@
 #include "common/error.hpp"
 
 #include <arrow/c/bridge.h>
+#include <arrow/extension/parquet_variant.h>
+#include <arrow/extension_type.h>
 
 #include <algorithm>
 #include <memory>
@@ -217,9 +219,47 @@ std::shared_ptr<::arrow::Schema> SchemaFromLogicalTypes(const std::vector<std::s
     }
     auto schema_res = ::arrow::ImportSchema(&c_schema);
     if (!schema_res.ok()) {
+        bool has_variant = false;
+        for (size_t i = 0; i < n; i++) {
+            if (types[i].id() == ddb::LogicalTypeId::VARIANT) {
+                has_variant = true;
+                break;
+            }
+        }
+        if (has_variant) {
+            throw Error("VARIANT columns cannot be mapped to Arrow: " +
+                        schema_res.status().ToString());
+        }
         throw Error("arrow schema import failed: " + schema_res.status().ToString());
     }
-    return *schema_res;
+    auto schema = *schema_res;
+    for (size_t i = 0; i < n; i++) {
+        if (types[i].id() != ddb::LogicalTypeId::VARIANT) {
+            continue;
+        }
+        if (!schema || i >= static_cast<size_t>(schema->num_fields()) ||
+            !schema->field(static_cast<int>(i)) || !schema->field(static_cast<int>(i))->type()) {
+            throw Error("VARIANT columns cannot be mapped to Arrow");
+        }
+        auto field_type = schema->field(static_cast<int>(i))->type();
+        bool ok = false;
+        if (field_type->id() == ::arrow::Type::EXTENSION) {
+            auto *ext = static_cast<const ::arrow::ExtensionType *>(field_type.get());
+            ok = ext && ext->extension_name() == "arrow.parquet.variant";
+        } else if (field_type->id() == ::arrow::Type::STRUCT) {
+            // DuckDB 2.0 unshredded layout: struct(metadata, value). Arrow 26
+            // also registers this as arrow.parquet.variant; accept the storage
+            // form so a column still round-trips when the extension metadata
+            // is stripped by the C Data import.
+            auto *st = static_cast<const ::arrow::StructType *>(field_type.get());
+            ok = st && st->num_fields() >= 2 && st->GetFieldByName("metadata") &&
+                 st->GetFieldByName("value");
+        }
+        if (!ok) {
+            throw Error("VARIANT columns cannot be mapped to Arrow");
+        }
+    }
+    return schema;
 }
 
 std::shared_ptr<::arrow::DataType> MapLogicalType(const ddb::LogicalType &type,

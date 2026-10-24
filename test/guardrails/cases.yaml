@@ -307,7 +307,7 @@ cases:
   - id: install_httpfs
     sql: "INSTALL httpfs"
     expect: deny
-    reason: only SELECT
+    reason: extension loading is denied
 
   - id: union_secrets
     sql: "SELECT id FROM deals UNION SELECT 1 FROM secrets"
@@ -545,3 +545,85 @@ cases:
       - tenant_id
     not_contains:
       - bravo
+
+  - id: connect_quack_uri
+    sql: "CONNECT 'quack:localhost'"
+    expect: deny
+    reason: CONNECT is denied
+    stage: both
+
+  - id: disconnect_denied
+    sql: "DISCONNECT"
+    expect: deny
+    reason: CONNECT is denied
+    stage: both
+
+  - id: create_trigger_denied
+    sql: "CREATE TRIGGER trg_log AFTER INSERT ON deals FOR EACH ROW INSERT INTO secrets VALUES (NEW.tenant_id, 'x')"
+    expect: deny
+    reason: triggers are denied
+    stage: both
+
+  - id: drop_trigger_denied
+    sql: "DROP TRIGGER trg_log ON deals"
+    expect: deny
+    reason: triggers are denied
+    stage: both
+
+  - id: quack_serve_call
+    sql: "CALL quack_serve(token = 'x')"
+    expect: deny
+    reason: Quack is denied
+    stage: both
+
+  - id: quack_query_table
+    sql: "SELECT * FROM quack_query('quack:localhost', 'SELECT 1')"
+    expect: deny
+    reason: table functions
+    stage: both
+
+  - id: install_extension_denied
+    sql: "INSTALL quack"
+    expect: deny
+    reason: extension loading is denied
+    stage: both
+
+  - id: load_extension_denied
+    sql: "LOAD quack"
+    expect: deny
+    reason: extension loading is denied
+    stage: both
+
+  - id: create_extension_repository
+    sql: "CREATE EXTENSION REPOSITORY my_repo WITH PREFIX 'https://extensions.example.org'"
+    expect: deny
+    reason: extension loading is denied
+    stage: both
+
+  - id: create_external_resource
+    sql: "CREATE EXTERNAL RESOURCE 'fs' AS extr"
+    expect: deny
+    reason: external resources are denied
+    stage: both
+
+  - id: set_agent_mode
+    sql: "SET agent_mode=true"
+    expect: deny
+    reason: agent mode is denied
+    stage: both
+
+  - id: spec_quack_query_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: never allowlisted
+    stage: spec
+    extra_functions:
+      - quack_query
+
+  - id: spec_parquet_metadata_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: never allowlisted
+    stage: spec
+    extra_functions:
+      - parquet_metadata

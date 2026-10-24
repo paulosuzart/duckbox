@@ -20,5 +20,12 @@ int main() {
     RunS3ClientTests();
     RunLeaseTests();
     RunMembershipTests();
+    RunConnectDenyTests();
+    RunTriggerDenyTests();
+    RunQuackDenyTests();
+    RunExtensionCapiDenyTests();
+    RunAgentModeDenyTests();
+    RunTableFunction20Tests();
+    RunMacroCatalog20Tests();
     return ReportAndExit("unit");
 }
