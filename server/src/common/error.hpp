@@ -60,6 +60,15 @@ class NotFoundError : public Error {
     explicit NotFoundError(const std::string &msg) : Error(msg) {}
 };
 
+// Lake catalog attach / catalog IO failed. Tenant-visible message is fixed.
+inline constexpr const char *kLakeCatalogUnavailable =
+    "lake catalog unavailable; see operator logs";
+
+class CatalogUnavailableError : public Error {
+  public:
+    CatalogUnavailableError() : Error(kLakeCatalogUnavailable) {}
+};
+
 // Sandbox ownership lease lost (If-Match 412, stolen, or expired under us).
 class LeaseLostError : public Error {
   public:

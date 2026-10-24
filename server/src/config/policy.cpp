@@ -267,8 +267,8 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
     p.functions.clear();
     for (auto &fn : StringList(root.Get("functions"), "functions")) {
         auto lower = Lower(fn);
-        if (IsAlwaysDeniedTableFunction(lower)) {
-            throw PolicyError("functions: table function '" + fn + "' is never allowlisted");
+        if (IsAlwaysDeniedFunction(lower)) {
+            throw PolicyError("functions: '" + fn + "' is never allowlisted");
         }
         p.functions.insert(lower);
     }
@@ -430,7 +430,11 @@ void SandboxSpec::PutTable(TablePolicy table) {
 }
 
 bool SandboxSpec::FunctionAllowed(const std::string &name) const {
-    return functions.count(Lower(name)) > 0;
+    auto lower = Lower(name);
+    if (IsAlwaysDeniedFunction(lower)) {
+        return false;
+    }
+    return functions.count(lower) > 0;
 }
 
 bool LocationContributesAllowedPath(const std::string &location) {
@@ -525,7 +529,8 @@ bool IsAlwaysDeniedTableFunction(const std::string &name) {
         ddb::StringUtil::StartsWith(n, "set_iceberg_") ||
         ddb::StringUtil::StartsWith(n, "remove_iceberg_") ||
         ddb::StringUtil::StartsWith(n, "fuzz") ||
-        n.find("external_resource") != std::string::npos || ddb::StringUtil::EndsWith(n, "_scan")) {
+        n.find("external_resource") != std::string::npos || n.find("secret") != std::string::npos ||
+        ddb::StringUtil::EndsWith(n, "_scan")) {
         return true;
     }
     static const std::unordered_set<std::string> kExact = {"glob",
@@ -567,6 +572,19 @@ bool IsAlwaysDeniedTableFunction(const std::string &name) {
                                                            "fuzzyduck",
                                                            "reduce_sql_statement"};
     return kExact.count(n) > 0;
+}
+
+bool IsSecretRelatedName(const std::string &name) {
+    auto n = Lower(name);
+    return n.find("secret") != std::string::npos || n.find("password") != std::string::npos ||
+           n.find("access_key") != std::string::npos ||
+           n.find("session_token") != std::string::npos ||
+           n.find("pgpassword") != std::string::npos || n.find("passfile") != std::string::npos ||
+           n == "current_setting" || n == "load_aws_credentials" || n == "which_secret";
+}
+
+bool IsAlwaysDeniedFunction(const std::string &name) {
+    return IsAlwaysDeniedTableFunction(name) || IsSecretRelatedName(name);
 }
 
 bool ValidSqlIdent(const std::string &s) {

@@ -358,8 +358,8 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         add("deny_table_functions", "false is refused (table functions are always denied)");
     }
     for (auto &fn : spec.functions) {
-        if (IsAlwaysDeniedTableFunction(fn)) {
-            add("functions", "table function '" + fn + "' is never allowlisted");
+        if (IsAlwaysDeniedFunction(fn)) {
+            add("functions", "'" + fn + "' is never allowlisted");
         } else if (!ValidSqlIdent(fn) && fn != "count_star") {
             add("functions", "not a valid function identifier: " + fn);
         }

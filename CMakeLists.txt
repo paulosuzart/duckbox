@@ -244,6 +244,10 @@ find_package(Arrow CONFIG REQUIRED)
 find_package(ArrowFlight CONFIG REQUIRED)
 find_package(ArrowFlightSql CONFIG REQUIRED)
 
+# QueryErrorInjection is compiled only into test targets. The release duckbox
+# binary links duckbox_core, which is built without this option.
+option(DUCKBOX_TESTING "Compile QueryErrorInjection test seams (OFF in the release binary)" OFF)
+
 set(DUCKBOX_SOURCES
   server/src/common/yaml.cpp
   server/src/common/error.cpp
@@ -261,7 +265,6 @@ set(DUCKBOX_SOURCES
   server/src/lake/lake.cpp
   server/src/metrics/metrics.cpp
   server/src/cluster/lease.cpp
-  server/src/sandbox/sandbox.cpp
   server/src/sandbox/sandbox_registry.cpp
   server/src/arrow/arrow_ipc.cpp
   server/src/arrow/arrow_types.cpp
@@ -269,65 +272,102 @@ set(DUCKBOX_SOURCES
   server/src/flight/handle.cpp
   server/src/flight/flight_sql_server.cpp
   server/src/flight/http_server.cpp)
+set(DUCKBOX_SANDBOX_SRC server/src/sandbox/sandbox.cpp)
 
-add_library(duckbox_core STATIC ${DUCKBOX_SOURCES})
-target_include_directories(duckbox_core
-  PUBLIC
-    ${CMAKE_SOURCE_DIR}/server/src
-    ${DUCKBOX_DEPS}/duckdb/include
-    ${DUCKBOX_DEPS}/httplib
-    ${DUCKBOX_DEPS}/nlohmann
-    ${DUCKBOX_DEPS}/jwt-cpp/include
-    ${DUCKBOX_DEPS}/cppcodec)
-target_compile_definitions(duckbox_core PUBLIC DUCKBOX_DUCKDB_VERSION="${DUCKBOX_DUCKDB_VERSION}")
-if(NOT MSVC)
-  target_compile_options(duckbox_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
-endif()
+function(duckbox_apply_core_compile target)
+  target_include_directories(${target}
+    PUBLIC
+      ${CMAKE_SOURCE_DIR}/server/src
+      ${DUCKBOX_DEPS}/duckdb/include
+      ${DUCKBOX_DEPS}/httplib
+      ${DUCKBOX_DEPS}/nlohmann
+      ${DUCKBOX_DEPS}/jwt-cpp/include
+      ${DUCKBOX_DEPS}/cppcodec)
+  target_compile_definitions(${target} PUBLIC DUCKBOX_DUCKDB_VERSION="${DUCKBOX_DUCKDB_VERSION}")
+  if(NOT MSVC)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wno-unused-parameter)
+  endif()
+endfunction()
+
+add_library(duckbox_objs OBJECT ${DUCKBOX_SOURCES})
+add_library(duckbox_sandbox OBJECT ${DUCKBOX_SANDBOX_SRC})
+add_library(duckbox_sandbox_testing OBJECT ${DUCKBOX_SANDBOX_SRC})
+duckbox_apply_core_compile(duckbox_objs)
+duckbox_apply_core_compile(duckbox_sandbox)
+duckbox_apply_core_compile(duckbox_sandbox_testing)
+target_compile_definitions(duckbox_sandbox_testing PRIVATE DUCKBOX_TESTING)
+
+add_library(duckbox_core STATIC $<TARGET_OBJECTS:duckbox_objs> $<TARGET_OBJECTS:duckbox_sandbox>)
+add_library(duckbox_core_testing STATIC $<TARGET_OBJECTS:duckbox_objs> $<TARGET_OBJECTS:duckbox_sandbox_testing>)
+duckbox_apply_core_compile(duckbox_core)
+duckbox_apply_core_compile(duckbox_core_testing)
 
 option(DUCKBOX_COVERAGE "Build duckbox_core with gcov (--coverage -O0)" OFF)
 if(DUCKBOX_COVERAGE AND NOT MSVC)
-  target_compile_options(duckbox_core PUBLIC --coverage -O0 -g)
+  foreach(_cov_tgt duckbox_objs duckbox_sandbox_testing duckbox_core duckbox_core_testing)
+    target_compile_options(${_cov_tgt} PUBLIC --coverage -O0 -g)
+  endforeach()
   target_link_options(duckbox_core PUBLIC --coverage)
+  target_link_options(duckbox_core_testing PUBLIC --coverage)
   target_link_libraries(duckbox_core PUBLIC gcov)
+  target_link_libraries(duckbox_core_testing PUBLIC gcov)
 endif()
-target_link_libraries(duckbox_core PUBLIC
-  Arrow::arrow_shared
-  ArrowFlight::arrow_flight_shared
-  ArrowFlightSql::arrow_flight_sql_shared
-  OpenSSL::SSL
-  OpenSSL::Crypto
-  yaml-cpp)
-if(TARGET aws-cpp-sdk-s3)
-  # Homebrew's exported s3 target lists core as a dependent lib, not INTERFACE.
-  find_package(aws-cpp-sdk-core CONFIG QUIET)
-  if(TARGET aws-cpp-sdk-core)
-    target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-core)
+
+function(duckbox_link_core_deps target)
+  target_link_libraries(${target} PUBLIC
+    Arrow::arrow_shared
+    ArrowFlight::arrow_flight_shared
+    ArrowFlightSql::arrow_flight_sql_shared
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    yaml-cpp)
+  if(TARGET aws-cpp-sdk-s3)
+    find_package(aws-cpp-sdk-core CONFIG QUIET)
+    if(TARGET aws-cpp-sdk-core)
+      target_link_libraries(${target} PUBLIC aws-cpp-sdk-core)
+    endif()
+    target_link_libraries(${target} PUBLIC aws-cpp-sdk-s3)
+    if(TARGET aws-cpp-sdk-identity-management)
+      target_link_libraries(${target} PUBLIC aws-cpp-sdk-identity-management)
+    endif()
+    if(TARGET aws-cpp-sdk-cognito-identity)
+      target_link_libraries(${target} PUBLIC aws-cpp-sdk-cognito-identity)
+    endif()
+    if(TARGET aws-cpp-sdk-sts)
+      target_link_libraries(${target} PUBLIC aws-cpp-sdk-sts)
+    endif()
+    if(TARGET aws-cpp-sdk-sts AND TARGET aws-cpp-sdk-identity-management)
+      target_compile_definitions(${target} PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
+    endif()
+  else()
+    target_include_directories(${target} PUBLIC ${AWSSDK_INCLUDE_DIRS})
+    target_link_libraries(${target} PUBLIC ${AWSSDK_LIBRARIES})
+    if(_duckbox_aws_sts_ok)
+      target_compile_definitions(${target} PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
+    endif()
   endif()
-  target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-s3)
-  if(TARGET aws-cpp-sdk-identity-management)
-    target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-identity-management)
+  if(APPLE)
+    target_link_libraries(${target} PUBLIC
+      "-framework CoreFoundation"
+      "-framework Security"
+      "-framework SystemConfiguration")
   endif()
-  if(TARGET aws-cpp-sdk-cognito-identity)
-    target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-cognito-identity)
-  endif()
-  if(TARGET aws-cpp-sdk-sts)
-    target_link_libraries(duckbox_core PUBLIC aws-cpp-sdk-sts)
-  endif()
-  if(TARGET aws-cpp-sdk-sts AND TARGET aws-cpp-sdk-identity-management)
-    target_compile_definitions(duckbox_core PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
-  endif()
-else()
-  target_include_directories(duckbox_core PUBLIC ${AWSSDK_INCLUDE_DIRS})
-  target_link_libraries(duckbox_core PUBLIC ${AWSSDK_LIBRARIES})
-  if(_duckbox_aws_sts_ok)
-    target_compile_definitions(duckbox_core PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
-  endif()
-endif()
-if(APPLE)
-  target_link_libraries(duckbox_core PUBLIC
-    "-framework CoreFoundation"
-    "-framework Security"
-    "-framework SystemConfiguration")
+endfunction()
+
+duckbox_link_core_deps(duckbox_objs)
+duckbox_link_core_deps(duckbox_sandbox)
+duckbox_link_core_deps(duckbox_sandbox_testing)
+duckbox_link_core_deps(duckbox_core)
+duckbox_link_core_deps(duckbox_core_testing)
+# Objects that #ifdef DUCKBOX_HAS_STS_ASSUME_ROLE need the same define.
+if(TARGET aws-cpp-sdk-sts AND TARGET aws-cpp-sdk-identity-management)
+  target_compile_definitions(duckbox_objs PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
+  target_compile_definitions(duckbox_sandbox PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
+  target_compile_definitions(duckbox_sandbox_testing PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
+elseif(_duckbox_aws_sts_ok)
+  target_compile_definitions(duckbox_objs PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
+  target_compile_definitions(duckbox_sandbox PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
+  target_compile_definitions(duckbox_sandbox_testing PUBLIC DUCKBOX_HAS_STS_ASSUME_ROLE=1)
 endif()
 
 set(_duckdb_libdir "${DUCKBOX_DEPS}/duckdb/lib")
@@ -379,6 +419,7 @@ function(duckbox_link_duckdb target)
 endfunction()
 
 duckbox_link_duckdb(duckbox_core)
+duckbox_link_duckdb(duckbox_core_testing)
 
 add_executable(duckbox server/src/main.cpp)
 target_include_directories(duckbox PRIVATE ${DUCKBOX_DEPS}/cli11)
@@ -387,14 +428,15 @@ duckbox_link_duckdb(duckbox)
 
 function(duckbox_add_test name)
   add_executable(${name} ${ARGN})
-  target_link_libraries(${name} PRIVATE duckbox_core)
+  target_link_libraries(${name} PRIVATE duckbox_core_testing)
   duckbox_link_duckdb(${name})
   target_include_directories(${name} PRIVATE
     ${CMAKE_SOURCE_DIR}/test/support
     ${CMAKE_SOURCE_DIR}/test/unit
     ${CMAKE_SOURCE_DIR}/test/integration)
   target_compile_definitions(${name} PRIVATE
-    DUCKBOX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    DUCKBOX_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    DUCKBOX_TESTING)
 endfunction()
 
 duckbox_add_test(duckbox_unit_tests
@@ -419,7 +461,8 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/extension_capi_deny_test.cpp
   test/unit/agent_mode_deny_test.cpp
   test/unit/table_function_20_test.cpp
-  test/unit/macro_catalog_20_test.cpp)
+  test/unit/macro_catalog_20_test.cpp
+  test/unit/lake_attach_test.cpp)
 
 duckbox_add_test(duckbox_guardrail_tests
   test/support/check.cpp
@@ -440,7 +483,8 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/trigger_runtime_test.cpp
   test/integration/quack_runtime_test.cpp
   test/integration/extension_capi_runtime_test.cpp
-  test/integration/agent_mode_runtime_test.cpp)
+  test/integration/agent_mode_runtime_test.cpp
+  test/integration/secret_flight_test.cpp)
 add_dependencies(duckbox_integration_tests duckbox)
 target_compile_definitions(duckbox_integration_tests PRIVATE
   DUCKBOX_BIN_PATH="$<TARGET_FILE:duckbox>")

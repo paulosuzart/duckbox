@@ -222,7 +222,8 @@ jobs:
           DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
           DUCKBOX_LAKE_CATALOG: ducklake:postgres:dbname=ducklake host=127.0.0.1 port=5432 user=duckbox password=duckbox
         run: |
-          ./build/duckbox serve --daemon ./daemons/ducklake.yaml --listen 127.0.0.1:4747 &
+          ./build/duckbox serve --daemon ./daemons/ducklake.yaml --listen 127.0.0.1:4747 \
+            > /tmp/duckbox-serve.log 2>&1 &
           echo $! > /tmp/duckbox.pid
           for i in $(seq 1 30); do
             if .venv/bin/python -c "import socket; s=socket.create_connection(('127.0.0.1',4747),1)"; then
@@ -246,6 +247,9 @@ jobs:
             echo "metrics must not label tenant/user/key/sandbox id" >&2
             exit 1
           fi
+          DUCKBOX_BIN=./build/duckbox DUCKBOX_PYTHON=.venv/bin/python \
+            DUCKBOX_SERVE_LOG=/tmp/duckbox-serve.log \
+            bash scripts/e2e_catalog_down.sh
           kill "$(cat /tmp/duckbox.pid)" || true
       - name: Compose logs on failure
         if: failure()
