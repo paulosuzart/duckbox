@@ -105,6 +105,13 @@ jobs:
           DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
           DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: ctest --test-dir build -L 'unit|guardrails|integration' --exclude-regex '^schema$' --output-on-failure
+      # Direct ctest: lldb changes the process memory layout, so a pass
+      # under the debugger is not enough on its own.
+      - name: Schema tests (ctest)
+        env:
+          DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+          DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: ctest --test-dir build -R '^schema$' --output-on-failure
       - name: Schema tests (lldb backtrace on crash)
         env:
           DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
