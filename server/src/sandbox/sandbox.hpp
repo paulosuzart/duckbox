@@ -138,9 +138,10 @@ class WarmupHardeningReadError {
     WarmupHardeningReadError &operator=(const WarmupHardeningReadError &) = delete;
 };
 
-// Test seam: while alive, RunTimed pretends DuckDB returned this error
-// (process-wide so a Flight worker thread sees it). Used to simulate a
-// catalog that went down after warmup without a live Postgres.
+#ifdef DUCKBOX_TESTING
+// Test seam (compiled only with DUCKBOX_TESTING). While alive, RunTimed /
+// Describe pretends DuckDB returned this error (process-wide so a Flight
+// worker thread sees it).
 class QueryErrorInjection {
   public:
     explicit QueryErrorInjection(std::string duckdb_error);
@@ -148,6 +149,7 @@ class QueryErrorInjection {
     QueryErrorInjection(const QueryErrorInjection &) = delete;
     QueryErrorInjection &operator=(const QueryErrorInjection &) = delete;
 };
+#endif
 
 // List item for ListSandboxes. state is warm | passive | defined.
 struct SandboxSummary {

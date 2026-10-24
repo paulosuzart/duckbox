@@ -39,13 +39,20 @@ SecretRedactionContext CollectSecretRedactionContext(const std::string &catalog_
 SecretRedactionContext CollectSecretRedactionContextFromSpec(const config::SandboxSpec &spec,
                                                              const s3::SecretResolver &secrets);
 
+// Thread-local ctx so Flight FromEx can redact operator logs on the same request.
+void BindRedactionContext(SecretRedactionContext ctx);
+SecretRedactionContext BoundRedactionContext();
+
 std::string EscapeSqlString(const std::string &s); // single-quote doubling for SQL literals
 std::string ResolvePath(const std::string &base_dir, const std::string &path);
 // Strips configured secret values, then password=/URI/JSON/SQL secret forms.
 std::string RedactSecretText(const std::string &text);
 std::string RedactSecretText(const std::string &text, const SecretRedactionContext &ctx);
 bool IsLakeCatalogIoError(const std::string &text);
-// Client-facing: catalog IO → generic message; otherwise redacted text.
+// IO / HTTP / Connection / attach / secret — these can carry a resolved DSN.
+bool IsConfigCarryingError(const std::string &text);
+// Catalog IO → generic. Config-carrying → exact + pattern redaction.
+// Conversion / Binder / Parser echo the tenant's SQL: leave unchanged.
 std::string SanitizeClientError(const std::string &text);
 std::string SanitizeClientError(const std::string &text, const SecretRedactionContext &ctx);
 void ExecOrThrow(ddb::Connection &con, const std::string &sql);

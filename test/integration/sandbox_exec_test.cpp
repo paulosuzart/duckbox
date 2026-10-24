@@ -74,6 +74,30 @@ void duckbox::test::RunSandboxExecTests() {
                    logged.find("lake catalog unavailable") != std::string::npos,
                "operator log records the catalog-down event");
     }
+    {
+        auto leaky = policy;
+        leaky.lake.catalog = "ducklake:postgres:dbname=lake password=dummysecretvalue";
+        TenantSandbox box_oracle(daemon, leaky, key_a, spec_dir);
+        (void)box_oracle.Execute("SELECT id FROM deals");
+        std::string right;
+        std::string wrong;
+        try {
+            box_oracle.Execute("SELECT CAST('g1 dummysecretvalue g2 nomatch' AS INTEGER)");
+        } catch (const std::exception &e) {
+            right = e.what();
+        }
+        try {
+            box_oracle.Execute("SELECT CAST('g1 notthesecret g2 nomatch' AS INTEGER)");
+        } catch (const std::exception &e) {
+            wrong = e.what();
+        }
+        Expect(!right.empty() && !wrong.empty(), "CAST of a guess string fails on both secrets");
+        Expect(right.find("<redacted>") == std::string::npos &&
+                   wrong.find("<redacted>") == std::string::npos,
+               "guessing the configured secret is indistinguishable from a wrong guess");
+        Expect(right.find("dummysecretvalue") != std::string::npos,
+               "Conversion error echoes the tenant SQL, including a correct guess");
+    }
 
     auto out_a = box_a.Execute("SELECT id, title, amount FROM deals ORDER BY id");
     auto out_b = box_b.Execute("SELECT id, title, amount FROM deals ORDER BY id");

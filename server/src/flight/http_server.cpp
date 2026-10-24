@@ -88,7 +88,7 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
             }
             res.status = status;
             Json err;
-            err["error"] = lake::SanitizeClientError(e.what());
+            err["error"] = lake::SanitizeClientError(e.what(), lake::BoundRedactionContext());
             res.set_content(err.dump(), "application/json");
         }
     });

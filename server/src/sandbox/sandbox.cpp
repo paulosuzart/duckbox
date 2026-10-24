@@ -36,8 +36,10 @@ namespace {
 thread_local std::string g_hardening_fail_needle;
 thread_local std::string g_hardening_mismatch_setting;
 thread_local std::string g_hardening_read_error_setting;
+#ifdef DUCKBOX_TESTING
 std::mutex g_query_error_mu;
 std::string g_query_error_inject;
+#endif
 
 std::string LowerAscii(std::string s) {
     for (char &c : s) {
@@ -141,6 +143,7 @@ WarmupHardeningReadError::~WarmupHardeningReadError() {
     g_hardening_read_error_setting.clear();
 }
 
+#ifdef DUCKBOX_TESTING
 QueryErrorInjection::QueryErrorInjection(std::string duckdb_error) {
     std::lock_guard<std::mutex> lk(g_query_error_mu);
     g_query_error_inject = std::move(duckdb_error);
@@ -150,13 +153,16 @@ QueryErrorInjection::~QueryErrorInjection() {
     std::lock_guard<std::mutex> lk(g_query_error_mu);
     g_query_error_inject.clear();
 }
+#endif
 
 namespace {
 
+#ifdef DUCKBOX_TESTING
 std::string InjectedQueryError() {
     std::lock_guard<std::mutex> lk(g_query_error_mu);
     return g_query_error_inject;
 }
+#endif
 
 SecretRedactionContext RedactCtxOf(const std::vector<std::string> &values) {
     SecretRedactionContext ctx;
@@ -167,11 +173,12 @@ SecretRedactionContext RedactCtxOf(const std::vector<std::string> &values) {
 std::string ClientFacingQueryError(const std::string &raw,
                                    const std::vector<std::string> &secrets) {
     auto ctx = RedactCtxOf(secrets);
+    BindRedactionContext(ctx);
     if (IsLakeCatalogIoError(raw)) {
         std::clog << "sandbox: lake catalog unavailable: " << RedactSecretText(raw, ctx) << "\n";
         return kCatalogUnavailableClientError;
     }
-    return RedactSecretText(raw, ctx);
+    return SanitizeClientError(raw, ctx);
 }
 
 } // namespace
@@ -226,6 +233,7 @@ void TenantSandbox::Warmup(bool validate_lake) {
         }
     }
     secret_values_ = CollectSecretRedactionContextFromSpec(policy_, *secrets_).exact_values;
+    BindRedactionContext(RedactCtxOf(secret_values_));
     try {
         db_ = std::make_unique<ddb::DuckDB>(nullptr);
         con_ = std::make_unique<ddb::Connection>(*db_);
@@ -411,11 +419,13 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
     };
     try {
         QueryOutput out;
+#ifdef DUCKBOX_TESTING
         auto injected = InjectedQueryError();
         if (!injected.empty()) {
             finish_watchdog();
             throw Error(ClientFacingQueryError(injected, secret_values_));
         }
+#endif
         std::unique_ptr<ddb::QueryResult> result;
         if (params.empty()) {
             result = con_->Query(sql);
@@ -625,14 +635,21 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
         RecoverAfterFailure();
     }
     try {
+#ifdef DUCKBOX_TESTING
         auto injected = InjectedQueryError();
         if (!injected.empty()) {
             throw Error(ClientFacingQueryError(injected, secret_values_));
         }
+#endif
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto ps = con_->Prepare(rewritten);
         if (ps->HasError()) {
-            throw Error(ClientFacingQueryError(ps->GetError(), secret_values_));
+            BindRedactionContext(RedactCtxOf(secret_values_));
+            auto raw = ps->GetError();
+            if (IsLakeCatalogIoError(raw)) {
+                throw Error(raw);
+            }
+            throw Error(ClientFacingQueryError(raw, secret_values_));
         }
         std::vector<ColumnSchema> out;
         auto &names = ps->GetNames();
@@ -643,6 +660,10 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
         return out;
     } catch (const std::exception &e) {
         RecoverAfterFailure();
+        BindRedactionContext(RedactCtxOf(secret_values_));
+        if (IsLakeCatalogIoError(e.what())) {
+            throw Error(e.what());
+        }
         auto client = ClientFacingQueryError(e.what(), secret_values_);
         if (client != e.what()) {
             throw Error(client);
@@ -662,14 +683,21 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std
         RecoverAfterFailure();
     }
     try {
+#ifdef DUCKBOX_TESTING
         auto injected = InjectedQueryError();
         if (!injected.empty()) {
             throw Error(ClientFacingQueryError(injected, secret_values_));
         }
+#endif
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto ps = con_->Prepare(rewritten);
         if (ps->HasError()) {
-            throw Error(ClientFacingQueryError(ps->GetError(), secret_values_));
+            BindRedactionContext(RedactCtxOf(secret_values_));
+            auto raw = ps->GetError();
+            if (IsLakeCatalogIoError(raw)) {
+                throw Error(raw);
+            }
+            throw Error(ClientFacingQueryError(raw, secret_values_));
         }
         auto &names = ps->GetNames();
         auto &types = ps->GetTypes();
@@ -685,6 +713,10 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std
         return SchemaFromLogicalTypes(out_names, out_types, opts);
     } catch (const std::exception &e) {
         RecoverAfterFailure();
+        BindRedactionContext(RedactCtxOf(secret_values_));
+        if (IsLakeCatalogIoError(e.what())) {
+            throw Error(e.what());
+        }
         auto client = ClientFacingQueryError(e.what(), secret_values_);
         if (client != e.what()) {
             throw Error(client);

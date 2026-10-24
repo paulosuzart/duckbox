@@ -235,13 +235,15 @@ mock (`scripts/oidc_mock.py`). RustFS egress policy requires
 the mock.
 
 Warmup logs `profile=` / `role_arn=` and secret **refs** (`env:NAME`). Secret
-values are never logged. Client-facing errors (Flight, debug HTTP, `Execute`)
-replace the exact resolved catalog DSN and configured secret strings with
-`<redacted>`, then apply the same pattern redaction used for operator logs
-(`password=`, `postgresql://` userinfo, `CREATE SECRET` `KEY_ID` / `SECRET` /
-`SESSION_TOKEN`, and related keys). Postgres / DuckLake catalog IO after
-warmup returns `lake catalog unavailable; see operator logs`; attach and
-`CREATE SECRET` warmup failures stay on their generic messages.
+values are never logged. Client-facing **IO / HTTP / connection / attach /
+secret** errors replace the exact resolved catalog DSN (including the form
+DuckDB echoes without `ducklake:postgres:`) and configured secret strings with
+`<redacted>`, then apply pattern redaction (`password=`, `postgresql://`
+userinfo, `CREATE SECRET` `KEY_ID` / `SECRET` / `SESSION_TOKEN`). Conversion,
+binder, and parser errors are left unchanged — they only echo the tenant's
+SQL, so exact-value substitution is not applied. Postgres / DuckLake catalog
+IO after warmup returns `lake catalog unavailable; see operator logs`; attach
+and `CREATE SECRET` warmup failures stay on their generic messages.
 
 **Time travel `AT`.** Only constant literals are accepted. `now()`,
 `current_timestamp`, `now() - INTERVAL …`, `VERSION => '2'`, and

@@ -657,7 +657,7 @@ void ObserveFailure(IMetrics &m, const Policy *policy, const TenantKey *key,
         } else if (lim) {
             reason = lim;
         } else {
-            sanitized = lake::SanitizeClientError(e.what());
+            sanitized = lake::SanitizeClientError(e.what(), lake::BoundRedactionContext());
             reason = sanitized.c_str();
         }
         WriteAuditLog(*key, *policy, seconds, 0, 0, outcome, reason);

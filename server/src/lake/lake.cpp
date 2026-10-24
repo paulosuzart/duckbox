@@ -68,9 +68,9 @@ bool IsWs(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-bool IsUnquotedValueEnd(char c) {
-    // '"' and ':' stop the value so diagnostic text after a DSN or JSON
-    // fragment is not swallowed (S2).
+bool IsPatternUnquotedValueEnd(char c) {
+    // Pattern pass only: '"' and ':' stop the value so diagnostic text
+    // after a DSN or JSON fragment is not swallowed.
     return IsWs(c) || c == ';' || c == ',' || c == ')' || c == '&' || c == '"' || c == ':';
 }
 
@@ -140,15 +140,45 @@ size_t QuotedValueEnd(const std::string &s, size_t vs) {
     return ve;
 }
 
-size_t UnquotedValueEnd(const std::string &s, size_t vs) {
+// Pattern pass: stop at '"' / ':' so leftover diagnostics stay visible.
+size_t PatternUnquotedValueEnd(const std::string &s, size_t vs) {
     size_t ve = vs;
-    while (ve < s.size() && !IsUnquotedValueEnd(s[ve])) {
+    while (ve < s.size() && !IsPatternUnquotedValueEnd(s[ve])) {
         ve++;
     }
     return ve;
 }
 
-void RedactKeyedValue(std::string &s, const std::string &key) {
+// libpq: an unquoted value ends only at unescaped whitespace; '\' escapes.
+size_t LibpqUnquotedValueEnd(const std::string &s, size_t vs) {
+    size_t ve = vs;
+    while (ve < s.size()) {
+        if (s[ve] == '\\' && ve + 1 < s.size()) {
+            ve += 2;
+            continue;
+        }
+        if (IsWs(s[ve])) {
+            break;
+        }
+        ve++;
+    }
+    return ve;
+}
+
+std::string LibpqUnescape(const std::string &raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (size_t i = 0; i < raw.size(); i++) {
+        if (raw[i] == '\\' && i + 1 < raw.size()) {
+            out += raw[++i];
+        } else {
+            out += raw[i];
+        }
+    }
+    return out;
+}
+
+void RedactKeyedValue(std::string &s, const std::string &key, bool allow_colon) {
     size_t i = 0;
     while (i < s.size()) {
         if (CiEq(s, i, key) && (i == 0 || !IsIdentChar(s[i - 1]))) {
@@ -161,7 +191,13 @@ void RedactKeyedValue(std::string &s, const std::string &key) {
             while (sep < s.size() && IsWs(s[sep])) {
                 sep++;
             }
-            if (sep < s.size() && (s[sep] == '=' || s[sep] == ':')) {
+            bool ok_sep = false;
+            if (sep < s.size() && s[sep] == '=') {
+                ok_sep = true;
+            } else if (allow_colon && sep < s.size() && s[sep] == ':') {
+                ok_sep = true;
+            }
+            if (ok_sep) {
                 size_t vs = sep + 1;
                 while (vs < s.size() && IsWs(s[vs])) {
                     vs++;
@@ -170,7 +206,7 @@ void RedactKeyedValue(std::string &s, const std::string &key) {
                 if (ve < s.size() && (s[ve] == '\'' || s[ve] == '"')) {
                     ve = QuotedValueEnd(s, ve);
                 } else {
-                    ve = UnquotedValueEnd(s, ve);
+                    ve = PatternUnquotedValueEnd(s, ve);
                 }
                 s.replace(vs, ve - vs, kRedactedMarker);
                 i = vs + 10;
@@ -240,22 +276,24 @@ void RedactPostgresUriUserinfo(std::string &s) {
 }
 
 void RedactPatterns(std::string &s) {
-    const char *keys[] = {"aws_secret_access_key",
-                          "aws_access_key_id",
-                          "aws_session_token",
-                          "secret_access_key",
-                          "session_token",
-                          "sslpassword",
-                          "pgpassword",
-                          "passfile",
-                          "access_key",
-                          "key_id",
-                          "password",
-                          "secret",
-                          "token",
-                          "pwd"};
-    for (const char *key : keys) {
-        RedactKeyedValue(s, key);
+    // Colon form is only for keys that appear as password:x / JSON "password":
+    // — not token / key_id, which show up in binder diagnostics.
+    const char *colon_keys[] = {"aws_secret_access_key",
+                                "aws_access_key_id",
+                                "aws_session_token",
+                                "secret_access_key",
+                                "session_token",
+                                "sslpassword",
+                                "pgpassword",
+                                "passfile",
+                                "password",
+                                "secret"};
+    const char *eq_only_keys[] = {"access_key", "key_id", "token", "pwd"};
+    for (const char *key : colon_keys) {
+        RedactKeyedValue(s, key, true);
+    }
+    for (const char *key : eq_only_keys) {
+        RedactKeyedValue(s, key, false);
     }
     const char *sql_keys[] = {"SESSION_TOKEN", "KEY_ID",   "SECRET",
                               "sslpassword",   "password", "secret"};
@@ -274,7 +312,7 @@ void ExtractKeyedExact(SecretRedactionContext &ctx, const std::string &text, con
             while (after < text.size() && IsWs(text[after])) {
                 after++;
             }
-            if (after < text.size() && (text[after] == '=' || text[after] == ':')) {
+            if (after < text.size() && text[after] == '=') {
                 size_t vs = after + 1;
                 while (vs < text.size() && IsWs(text[vs])) {
                     vs++;
@@ -287,9 +325,11 @@ void ExtractKeyedExact(SecretRedactionContext &ctx, const std::string &text, con
                         AddSecretValue(ctx, text.substr(vs + 1, ve - vs - 2));
                     }
                 } else {
-                    ve = UnquotedValueEnd(text, vs);
+                    ve = LibpqUnquotedValueEnd(text, vs);
                     if (ve > vs) {
-                        AddSecretValue(ctx, text.substr(vs, ve - vs));
+                        auto raw = text.substr(vs, ve - vs);
+                        AddSecretValue(ctx, raw);
+                        AddSecretValue(ctx, LibpqUnescape(raw));
                     }
                 }
                 i = (ve > i) ? ve : i + 1;
@@ -298,6 +338,17 @@ void ExtractKeyedExact(SecretRedactionContext &ctx, const std::string &text, con
         }
         i++;
     }
+}
+
+std::string UnprefixedCatalogDsn(const std::string &dsn) {
+    const char *prefixes[] = {"ducklake:postgres:", "ducklake:postgresql://",
+                              "ducklake:postgres://", "ducklake:"};
+    for (const char *p : prefixes) {
+        if (CiEq(dsn, 0, p)) {
+            return dsn.substr(std::char_traits<char>::length(p));
+        }
+    }
+    return {};
 }
 
 void ExtractUriPassword(SecretRedactionContext &ctx, const std::string &text) {
@@ -352,6 +403,14 @@ SecretRedactionContext CollectSecretRedactionContext(const std::string &catalog_
     SecretRedactionContext ctx;
     if (!catalog_dsn.empty()) {
         AddSecretValue(ctx, catalog_dsn);
+        auto bare = UnprefixedCatalogDsn(catalog_dsn);
+        if (!bare.empty()) {
+            AddSecretValue(ctx, bare);
+            ExtractKeyedExact(ctx, bare, "password");
+            ExtractKeyedExact(ctx, bare, "sslpassword");
+            ExtractKeyedExact(ctx, bare, "pwd");
+            ExtractUriPassword(ctx, bare);
+        }
         ExtractKeyedExact(ctx, catalog_dsn, "password");
         ExtractKeyedExact(ctx, catalog_dsn, "sslpassword");
         ExtractKeyedExact(ctx, catalog_dsn, "pwd");
@@ -391,11 +450,34 @@ std::string RedactSecretText(const std::string &text, const SecretRedactionConte
     return out;
 }
 
+namespace {
+thread_local SecretRedactionContext t_bound_redact_ctx;
+} // namespace
+
+void BindRedactionContext(SecretRedactionContext ctx) {
+    t_bound_redact_ctx = std::move(ctx);
+}
+
+SecretRedactionContext BoundRedactionContext() {
+    return t_bound_redact_ctx;
+}
+
 bool IsLakeCatalogIoError(const std::string &text) {
     return ContainsCi(text, "failed to query most recent snapshot") ||
            ContainsCi(text, "unable to connect to postgres") ||
            ContainsCi(text, "failed to attach ducklake") ||
            (ContainsCi(text, "ducklake") && ContainsCi(text, "unable to connect"));
+}
+
+bool IsConfigCarryingError(const std::string &text) {
+    if (IsLakeCatalogIoError(text)) {
+        return true;
+    }
+    auto lower = LowerAsciiCopy(text);
+    return lower.rfind("io error", 0) == 0 || lower.rfind("http error", 0) == 0 ||
+           lower.rfind("connection error", 0) == 0 || ContainsCi(text, "failed to attach") ||
+           ContainsCi(text, "unable to connect") || ContainsCi(text, "create secret") ||
+           ContainsCi(text, "failed to query most recent snapshot");
 }
 
 std::string SanitizeClientError(const std::string &text) {
@@ -406,7 +488,10 @@ std::string SanitizeClientError(const std::string &text, const SecretRedactionCo
     if (IsLakeCatalogIoError(text)) {
         return kCatalogUnavailableClientError;
     }
-    return RedactSecretText(text, ctx);
+    if (IsConfigCarryingError(text)) {
+        return RedactSecretText(text, ctx);
+    }
+    return text;
 }
 
 void ExecOrThrow(ddb::Connection &con, const std::string &sql) {

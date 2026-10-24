@@ -280,6 +280,9 @@ target_include_directories(duckbox_core
     ${DUCKBOX_DEPS}/jwt-cpp/include
     ${DUCKBOX_DEPS}/cppcodec)
 target_compile_definitions(duckbox_core PUBLIC DUCKBOX_DUCKDB_VERSION="${DUCKBOX_DUCKDB_VERSION}")
+# QueryErrorInjection and other test seams in sandbox.cpp. The production
+# duckbox target links this same library in the default (tests-on) build.
+target_compile_definitions(duckbox_core PRIVATE DUCKBOX_TESTING)
 if(NOT MSVC)
   target_compile_options(duckbox_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
@@ -394,7 +397,8 @@ function(duckbox_add_test name)
     ${CMAKE_SOURCE_DIR}/test/unit
     ${CMAKE_SOURCE_DIR}/test/integration)
   target_compile_definitions(${name} PRIVATE
-    DUCKBOX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    DUCKBOX_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    DUCKBOX_TESTING)
 endfunction()
 
 duckbox_add_test(duckbox_unit_tests

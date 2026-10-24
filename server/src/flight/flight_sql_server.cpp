@@ -144,9 +144,11 @@ std::string EncodeDoPutHandle(const std::string &handle) {
 }
 
 Status FromEx(const std::exception &e) {
-    std::string client = SanitizeClientError(e.what());
+    auto ctx = BoundRedactionContext();
+    std::string client = SanitizeClientError(e.what(), ctx);
     if (IsLakeCatalogIoError(e.what())) {
-        std::clog << "flight: lake catalog unavailable: " << RedactSecretText(e.what()) << "\n";
+        std::clog << "flight: lake catalog unavailable: " << RedactSecretText(e.what(), ctx)
+                  << "\n";
     }
     if (dynamic_cast<const ConflictError *>(&e)) {
         return Status::AlreadyExists(client);

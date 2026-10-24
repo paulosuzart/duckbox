@@ -140,6 +140,88 @@ void duckbox::test::RunLakeAttachSecretTests() {
                    .find("note") != std::string::npos,
            "SanitizeClientError keeps binder diagnostics");
 
+    SecretRedactionContext oracle_ctx;
+    AddSecretValue(oracle_ctx, "dummysecretvalue");
+    AddSecretValue(oracle_ctx, "FAKEPW_kw");
+    const char *conv_right =
+        "Conversion Error: Could not convert string 'g1 dummysecretvalue g2 FAKEPW_kw g5 nomatch' "
+        "to INT32";
+    const char *conv_wrong =
+        "Conversion Error: Could not convert string 'g1 notthesecret g2 wrongguess g5 nomatch' "
+        "to INT32";
+    auto s_right = SanitizeClientError(conv_right, oracle_ctx);
+    auto s_wrong = SanitizeClientError(conv_wrong, oracle_ctx);
+    Expect(s_right.find("<redacted>") == std::string::npos &&
+               s_wrong.find("<redacted>") == std::string::npos,
+           "Conversion errors are not exact-redacted (no secret oracle)");
+    Expect(s_right.find("dummysecretvalue") != std::string::npos,
+           "Conversion error still echoes the tenant's own SQL");
+    Expect(s_right.find("Conversion Error") != std::string::npos &&
+               s_wrong.find("Conversion Error") != std::string::npos,
+           "right and wrong secret guesses stay Conversion errors");
+
+    Expect(RedactSecretText("Binder Error: column token: not found").find("token: not found") !=
+               std::string::npos,
+           "pattern redaction does not rewrite 'token: not found'");
+    Expect(RedactSecretText("Binder Error: key_id: 1234").find("key_id: 1234") != std::string::npos,
+           "pattern redaction does not rewrite 'key_id: 1234'");
+
+    auto colon_pw_dsn =
+        std::string("ducklake:postgres:dbname=lake host=pg password=pw:colon-secret");
+    auto colon_ctx = CollectSecretRedactionContext(colon_pw_dsn, "", "");
+    bool has_bare = false;
+    bool has_colon_pw = false;
+    for (const auto &v : colon_ctx.exact_values) {
+        if (v == "dbname=lake host=pg password=pw:colon-secret") {
+            has_bare = true;
+        }
+        if (v == "pw:colon-secret") {
+            has_colon_pw = true;
+        }
+    }
+    Expect(has_bare, "CollectSecretRedactionContext stores the unprefixed DSN");
+    Expect(has_colon_pw, "libpq extract keeps ':' inside the password");
+    auto echoed = std::string(
+        "IO Error: Failed to query most recent snapshot for DuckLake: Unable to connect to "
+        "Postgres at \"dbname=lake host=pg password=pw:colon-secret\"");
+    auto red_echo = RedactSecretText(echoed, colon_ctx);
+    Expect(red_echo.find("pw:colon-secret") == std::string::npos,
+           "exact unprefixed DSN / libpq password redacts a ':' password");
+    Expect(SanitizeClientError(echoed, colon_ctx) == kCatalogUnavailableClientError,
+           "catalog IO with colon password is still generic on the client");
+
+    auto quote_dsn = std::string("ducklake:postgres:dbname=lake password=pw\"quote-secret");
+    auto quote_ctx = CollectSecretRedactionContext(quote_dsn, "", "");
+    bool has_quote_pw = false;
+    for (const auto &v : quote_ctx.exact_values) {
+        if (v == "pw\"quote-secret") {
+            has_quote_pw = true;
+        }
+    }
+    Expect(has_quote_pw, "libpq extract keeps '\"' inside an unquoted password");
+    Expect(RedactSecretText("IO Error: password=pw\"quote-secret host=pg", quote_ctx)
+                   .find("quote-secret") == std::string::npos,
+           "exact substitution redacts a password that contains '\"'");
+
+    auto slash_dsn = std::string("ducklake:postgres:dbname=lake password=foo\\ bar-secret");
+    auto slash_ctx = CollectSecretRedactionContext(slash_dsn, "", "");
+    bool has_slash_raw = false;
+    bool has_slash_unesc = false;
+    for (const auto &v : slash_ctx.exact_values) {
+        if (v == "foo\\ bar-secret") {
+            has_slash_raw = true;
+        }
+        if (v == "foo bar-secret") {
+            has_slash_unesc = true;
+        }
+    }
+    Expect(has_slash_raw && has_slash_unesc,
+           "libpq extract keeps '\\ ' raw and unescaped password forms");
+    auto slash_echo =
+        "IO Error: Unable to connect to Postgres at \"dbname=lake password=foo\\ bar-secret\"";
+    Expect(RedactSecretText(slash_echo, slash_ctx).find("bar-secret") == std::string::npos,
+           "exact substitution redacts a password that contains '\\ '");
+
     auto doubled_eq = RedactSecretText("password=\"fa\"\"ke-quoted\"");
     Expect(doubled_eq.find("ke-quoted") == std::string::npos,
            "RedactSecretText strips doubled double-quotes in password=");
