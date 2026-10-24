@@ -2,8 +2,8 @@
 
 // Shared assertions and fixtures for unit / guardrail / integration suites.
 
-#include "node/daemon_config.hpp"
 #include "config/policy.hpp"
+#include "node/daemon_config.hpp"
 
 #include <functional>
 #include <string>
@@ -18,6 +18,8 @@ extern int g_passed;
 void Expect(bool cond, const std::string &msg);
 void ExpectThrowContains(const std::function<void()> &fn, const std::string &needle,
                          const std::string &msg);
+void ExpectThrowExact(const std::function<void()> &fn, const std::string &exact,
+                      const std::string &msg);
 int ReportAndExit(const char *suite);
 
 node::DaemonConfig TestDaemon();

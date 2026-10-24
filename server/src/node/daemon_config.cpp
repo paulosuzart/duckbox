@@ -1,11 +1,11 @@
 #include "node/daemon_config.hpp"
 #include "common/crypto.hpp"
 #include "common/error.hpp"
+#include "common/yaml.hpp"
 #include "config/policy.hpp"
 #include "s3/s3.hpp"
 #include "s3/s3_credentials.hpp"
 #include "s3/secrets.hpp"
-#include "common/yaml.hpp"
 
 #include "arrow/result.h"
 #include "arrow/util/uri.h"
@@ -510,6 +510,14 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
         }
     }
     ValidateLeaseCredentialFields(cfg.lease, cfg.allow_insecure_dev, issues);
+    {
+        const std::string &nid = cfg.lease.node_id.empty() ? cfg.name : cfg.lease.node_id;
+        if (nid.size() > kMaxNodeIdBytes) {
+            add(cfg.lease.node_id.empty() ? "name" : "lease.node_id",
+                "must be at most 128 bytes so the lease probe key stays under the S3 1024-byte "
+                "limit");
+        }
+    }
     if (!endpoint.empty() && !cfg.lease.skip_probe) {
         if (cfg.lease.bucket.empty()) {
             add("lease.bucket", "required when lease endpoint is set");
@@ -524,7 +532,11 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
                 add("lease.access_key_env",
                     "required (with lease.secret_key_env) for the S3 probe");
             } else if (issues.empty()) {
-                auto err = ProbeControlPlaneS3(cfg.lease);
+                auto lease = cfg.lease;
+                if (lease.node_id.empty()) {
+                    lease.node_id = cfg.name;
+                }
+                auto err = ProbeControlPlaneS3(lease);
                 if (!err.empty()) {
                     add("lease", err);
                 }
@@ -536,7 +548,6 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
         throw SpecError(std::move(issues));
     }
 }
-
 
 std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::string &peer_identity,
                                        const std::string &bearer, const std::string &caller_header,

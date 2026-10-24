@@ -50,7 +50,7 @@ struct LeaseSettings {
     std::string profile;
     std::string role_arn;
     bool skip_probe = false;
-    std::string node_id;   // default: daemon name
+    std::string node_id;   // default: daemon name; max kMaxNodeIdBytes
     std::string advertise; // grpc://host:port; default grpc://listen
     int64_t ttl_ms = 15000;
     int64_t heartbeat_ms = 5000;
@@ -98,6 +98,8 @@ struct DaemonConfig {
 
 constexpr int kMinHandleSecretLen = 16;
 constexpr int kMinPeerSecretLen = 16;
+// Probe key is {prefix}.duckbox-cw-probe-<node_id>-<nonce>; S3 keys cap at 1024.
+constexpr size_t kMaxNodeIdBytes = 128;
 
 // Bearer secret, then JWT HS256, else x-duckbox-caller only when allow_insecure_dev.
 // Throws AuthError; never treats an unsigned token as a spec payload.

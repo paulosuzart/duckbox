@@ -30,6 +30,86 @@ using namespace config;
 using namespace node;
 using namespace s3;
 
+namespace {
+
+thread_local std::string g_hardening_fail_needle;
+thread_local std::string g_hardening_mismatch_setting;
+thread_local std::string g_hardening_read_error_setting;
+
+std::string LowerAscii(std::string s) {
+    for (char &c : s) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return s;
+}
+
+void ExecHardeningOrThrow(ddb::Connection &con, const std::string &sql) {
+    if (!g_hardening_fail_needle.empty() &&
+        sql.find(g_hardening_fail_needle) != std::string::npos) {
+        throw Error("sandbox hardening failed: " + sql + ": injected failure");
+    }
+    try {
+        ExecOrThrow(con, sql);
+    } catch (const std::exception &e) {
+        throw Error(std::string("sandbox hardening failed: ") + sql + ": " + e.what());
+    }
+}
+
+void RequireHardeningSetting(ddb::Connection &con, const char *name, const char *expected) {
+    std::string sql = std::string("SELECT current_setting('") + name + "')";
+    if (!g_hardening_read_error_setting.empty() && g_hardening_read_error_setting == name) {
+        sql = "SELECT current_setting('__duckbox_no_such_setting__')";
+    }
+    auto got = con.Query(sql);
+    if (!got || got->HasError()) {
+        std::string why = (got && got->HasError()) ? got->GetError() : "no result";
+        throw Error(std::string("sandbox hardening failed: current_setting('") + name +
+                    "'): " + why);
+    }
+    std::string text;
+    if (got->type == ddb::QueryResultType::MATERIALIZED_RESULT) {
+        auto &mat = got->Cast<ddb::MaterializedQueryResult>();
+        if (mat.RowCount() > 0) {
+            text = mat.GetValue(0, 0).ToString();
+        }
+    }
+    if (!g_hardening_mismatch_setting.empty() && g_hardening_mismatch_setting == name) {
+        text = (LowerAscii(expected) == "true") ? "false" : "true";
+    }
+    if (LowerAscii(text) != LowerAscii(expected)) {
+        throw Error(std::string("sandbox hardening failed: current_setting('") + name + "') is '" +
+                    text + "', expected '" + expected + "'");
+    }
+}
+
+} // namespace
+
+WarmupHardeningFailure::WarmupHardeningFailure(std::string sql_needle) {
+    g_hardening_fail_needle = std::move(sql_needle);
+}
+
+WarmupHardeningFailure::~WarmupHardeningFailure() {
+    g_hardening_fail_needle.clear();
+}
+
+WarmupHardeningMismatch::WarmupHardeningMismatch(std::string setting_name) {
+    g_hardening_mismatch_setting = std::move(setting_name);
+}
+
+WarmupHardeningMismatch::~WarmupHardeningMismatch() {
+    g_hardening_mismatch_setting.clear();
+}
+
+WarmupHardeningReadError::WarmupHardeningReadError(std::string setting_name) {
+    g_hardening_read_error_setting = std::move(setting_name);
+}
+
+WarmupHardeningReadError::~WarmupHardeningReadError() {
+    g_hardening_read_error_setting.clear();
+}
+
 TenantSandbox::TenantSandbox(DaemonConfig daemon, Policy policy, TenantKey key,
                              std::string spec_dir, std::string sandbox_id, int version,
                              std::shared_ptr<SecretResolver> secrets)
@@ -82,8 +162,8 @@ void TenantSandbox::Warmup(bool validate_lake) {
     try {
         db_ = std::make_unique<ddb::DuckDB>(nullptr);
         con_ = std::make_unique<ddb::Connection>(*db_);
-        ExecOrThrow(*con_, "SET autoinstall_known_extensions=false");
-        ExecOrThrow(*con_, "SET autoload_known_extensions=false");
+        ExecHardeningOrThrow(*con_, "SET autoinstall_known_extensions=false");
+        ExecHardeningOrThrow(*con_, "SET autoload_known_extensions=false");
         AttachLakeFromSpec(*con_, policy_, spec_dir_, *secrets_, daemon_);
         for (auto &kv : policy_.attachments) {
             if (!kv.second.credential.Empty()) {
@@ -178,16 +258,19 @@ void TenantSandbox::Warmup(bool validate_lake) {
                 throw;
             }
         }
-        try {
-            // Agent SQL runs after this. Memory bootstrap already ran with external access on.
-            ExecOrThrow(*con_, "SET enable_external_access=false");
-        } catch (const std::exception &) {
-            // lock_configuration / older builds; still refuse COPY via validator
-        }
+        // Agent SQL runs after this. Memory bootstrap already ran with external access on.
+        // Fail closed: a failed hardening SET must not hand out the connection.
+        // DuckDB can no-op a SET; read back before lock_configuration so a
+        // silent miss cannot be locked in.
+        ExecHardeningOrThrow(*con_, "SET enable_external_access=false");
         auto &r = policy_.resources;
-        ExecOrThrow(*con_, "SET memory_limit='" + EscapeSqlString(r.memory_limit) + "'");
-        ExecOrThrow(*con_, "SET threads=" + std::to_string(r.threads));
-        ExecOrThrow(*con_, "SET lock_configuration=true");
+        ExecHardeningOrThrow(*con_, "SET memory_limit='" + EscapeSqlString(r.memory_limit) + "'");
+        ExecHardeningOrThrow(*con_, "SET threads=" + std::to_string(r.threads));
+        RequireHardeningSetting(*con_, "autoinstall_known_extensions", "false");
+        RequireHardeningSetting(*con_, "autoload_known_extensions", "false");
+        RequireHardeningSetting(*con_, "enable_external_access", "false");
+        ExecHardeningOrThrow(*con_, "SET lock_configuration=true");
+        RequireHardeningSetting(*con_, "lock_configuration", "true");
         warmup_count_++;
         Touch();
         Metrics().IncColdStart();

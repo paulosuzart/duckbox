@@ -237,7 +237,7 @@ Daemon startup validates **only** daemon config (listen, limits, optional lease 
 
 ### Sandbox lifecycle
 
-Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, then `lock_configuration`. Global `max_sandboxes` still applies; there is no per-key cap. Spec `lifecycle.idle_timeout` overrides the daemon default (capped by `limits.max_idle_timeout`). Spec `lifecycle.ttl` / `expires_at` tombstone the named definition when due.
+Runtime instances are keyed by **id@version**. Idle instances **passivate** (DuckDB freed); **warmup** recreates the instance, resolves secret refs, attaches the spec’s lake, then `lock_configuration`. Warmup aborts if any hardening step fails. Global `max_sandboxes` still applies; there is no per-key cap. Spec `lifecycle.idle_timeout` overrides the daemon default (capped by `limits.max_idle_timeout`). Spec `lifecycle.ttl` / `expires_at` tombstone the named definition when due.
 
 DuckDB `allowed_directories`/`allowed_paths` are derived from `lake.data_path`, path-like `attachments`, and optional `extra_paths` before external access is disabled (prefixes are canonicalized: no `..`, no extra `//`, no query string, trailing slash). Agent SQL cannot `COPY`/`read_*` except for prefixes the spec already declared. `lake.bootstrap_sql` (memory lakes) is trusted SaaS seed SQL — `CREATE TABLE` / `CREATE SCHEMA` / `INSERT` only — and cannot create views, macros, or other objects tenants can query. Because it runs before `enable_external_access=false`, `CREATE TABLE AS SELECT` / `INSERT … SELECT` may read files (`read_csv`, `query()`). Agent queries remain rewriter-wrapped. On DuckLake the field is rejected.
 

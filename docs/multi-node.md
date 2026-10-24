@@ -118,8 +118,10 @@ Under `lease:` in the daemon YAML (all optional except the S3 endpoint block you
 | `access_key_env` / `secret_key_env` | required for static keys | Refs only. Not used with `provider: credential_chain`. |
 | `provider` | `config` | `config` (static keys) or `credential_chain` (SDK profile / assume-role / default chain, including IRSA web identity). |
 | `profile` / `role_arn` | optional | Only with `credential_chain`. `role_arn` always uses `STSAssumeRoleCredentialsProvider` (fail closed if the STS SDK is not linked). A named profile is not a substitute. |
-| `skip_probe` | `false` | Skip If-None-Match startup probe. |
-| `node_id` | daemon `name` | Must be unique in the cluster. |
+| `skip_probe` | `false` | Skip If-None-Match startup probe (`{prefix}.duckbox-cw-probe-<node_id>-<nonce>`). |
+| `node_id` | daemon `name` | Must be unique in the cluster. At most 128 bytes so the probe key stays under S3’s 1024-byte limit. |
+
+Startup lists `{prefix}.duckbox-cw-probe-<node_id>-` and deletes leftover objects from a crash between PUT and DELETE (SIGKILL during probe). Each DELETE is logged (`lease_probe_delete`). Other nodes’ prefixes are left alone.
 | `advertise` | `grpc://` + `internal_listen` | **Internal** URL peers dial. Use a reachable private host, not `0.0.0.0`. |
 | `ttl` / `ttl_ms` | `15s` | Lease and heartbeat TTL. Must exceed the longest S3 blip you want to survive without a restart. |
 | `heartbeat` / `heartbeat_ms` | `ttl/3` (min 1s) | Node-lease renew interval. |

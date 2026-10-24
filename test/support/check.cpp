@@ -50,6 +50,22 @@ void ExpectThrowContains(const std::function<void()> &fn, const std::string &nee
     }
 }
 
+void ExpectThrowExact(const std::function<void()> &fn, const std::string &exact,
+                      const std::string &msg) {
+    try {
+        fn();
+        g_failed++;
+        std::cerr << "FAIL: " << msg << " (no throw)\n";
+    } catch (const std::exception &e) {
+        if (e.what() != exact) {
+            g_failed++;
+            std::cerr << "FAIL: " << msg << " threw '" << e.what() << "' want '" << exact << "'\n";
+        } else {
+            g_passed++;
+        }
+    }
+}
+
 int ReportAndExit(const char *suite) {
     std::cout << suite << " passed=" << g_passed << " failed=" << g_failed << "\n";
     return g_failed == 0 ? 0 : 1;
