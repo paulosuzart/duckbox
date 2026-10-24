@@ -1,0 +1,8 @@
+.deps/
+.zig-cache/
+zig-out/
+zig-pkg/
+build/
+query
+*.o
+*.a
