@@ -223,6 +223,9 @@ inline Policy LoadPolicyFile(const std::string &path) {
 std::string FingerprintSpec(const SandboxSpec &spec);
 std::string ContentHash(const SandboxSpec &spec); // alias of FingerprintSpec
 bool ValidSandboxId(const std::string &id);       // [a-z0-9][a-z0-9_-]{0,63}
+// ASCII-lowercase SQL identifiers (catalog / schema / table / function / column).
+// DuckDB unquoted names compare case-insensitively; this is that fold.
+std::string NormalizeSqlIdent(const std::string &s);
 // Unquoted SQL identifier charset: [A-Za-z_][A-Za-z0-9_]*. Does not reject keywords.
 bool ValidSqlIdent(const std::string &s);
 // ValidSqlIdent and DuckDB will re-emit it unquoted (not a keyword, no special chars).

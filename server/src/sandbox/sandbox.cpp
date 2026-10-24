@@ -10,6 +10,8 @@
 #include "rewriter/rewriter.hpp"
 #include "rewriter/validator.hpp"
 
+#include "absl/strings/ascii.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -41,31 +43,10 @@ std::mutex g_query_error_mu;
 std::string g_query_error_inject;
 #endif
 
-std::string LowerAscii(std::string s) {
-    for (char &c : s) {
-        if (c >= 'A' && c <= 'Z') {
-            c = static_cast<char>(c - 'A' + 'a');
-        }
-    }
-    return s;
-}
-
-std::string TrimAscii(std::string s) {
-    while (!s.empty() &&
-           (s.front() == ' ' || s.front() == '\t' || s.front() == '\n' || s.front() == '\r')) {
-        s.erase(s.begin());
-    }
-    while (!s.empty() &&
-           (s.back() == ' ' || s.back() == '\t' || s.back() == '\n' || s.back() == '\r')) {
-        s.pop_back();
-    }
-    return s;
-}
-
 // Booleans compare case-insensitively after trim. allowed_configs must
 // read back as exactly [] — empty / null / none is not accepted.
 std::string NormalizeSettingText(std::string s) {
-    return LowerAscii(TrimAscii(std::move(s)));
+    return absl::AsciiStrToLower(absl::StripAsciiWhitespace(s));
 }
 
 void ExecHardeningOrThrow(ddb::Connection &con, const std::string &sql) {
@@ -102,7 +83,7 @@ void RequireHardeningSetting(ddb::Connection &con, const char *name, const char 
         }
     }
     if (!g_hardening_mismatch_setting.empty() && g_hardening_mismatch_setting == name) {
-        auto want = LowerAscii(expected);
+        auto want = absl::AsciiStrToLower(expected);
         if (want == "true") {
             text = "false";
         } else if (want == "false") {
@@ -732,11 +713,11 @@ void SandboxRuntime::PassivateId(const std::string &id, const char *reason, int 
     std::lock_guard<std::mutex> hold(mu_);
     auto prefix = id + "@";
     for (auto it = boxes_.begin(); it != boxes_.end();) {
-        if (it->first != id && it->first.rfind(prefix, 0) != 0) {
+        if (it->first != id && !it->first.starts_with(prefix)) {
             ++it;
             continue;
         }
-        if (keep_from_version >= 0 && it->first.rfind(prefix, 0) == 0) {
+        if (keep_from_version >= 0 && it->first.starts_with(prefix)) {
             try {
                 int v = std::stoi(it->first.substr(prefix.size()));
                 if (v >= keep_from_version) {
@@ -767,7 +748,7 @@ void SandboxRuntime::InterruptId(const std::string &id) {
     std::lock_guard<std::mutex> hold(mu_);
     auto prefix = id + "@";
     for (auto &kv : boxes_) {
-        if (kv.first == id || kv.first.rfind(prefix, 0) == 0) {
+        if (kv.first == id || kv.first.starts_with(prefix)) {
             kv.second->Interrupt();
         }
     }
@@ -1073,7 +1054,7 @@ const TenantSandbox *SandboxRuntime::FindIdLocked(const std::string &id) const {
     auto prefix = id + "@";
     const TenantSandbox *found = nullptr;
     for (auto &kv : boxes_) {
-        if (kv.first == id || kv.first.rfind(prefix, 0) == 0) {
+        if (kv.first == id || kv.first.starts_with(prefix)) {
             if (kv.second->Warm()) {
                 return kv.second.get();
             }
@@ -1118,10 +1099,10 @@ std::vector<SandboxSummary> SandboxRuntime::Summarize(const std::vector<SandboxR
     std::vector<SandboxSummary> items;
     items.reserve(recs.size());
     for (auto &r : recs) {
-        if (!filter.id_prefix.empty() && r.id.rfind(filter.id_prefix, 0) != 0) {
+        if (!filter.id_prefix.empty() && !r.id.starts_with(filter.id_prefix)) {
             continue;
         }
-        if (!filter.key_prefix.empty() && r.key.rfind(filter.key_prefix, 0) != 0) {
+        if (!filter.key_prefix.empty() && !r.key.starts_with(filter.key_prefix)) {
             continue;
         }
         if (!filter.policy_class.empty() && r.policy_class != filter.policy_class) {

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(duckbox LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -118,12 +118,16 @@ if(APPLE)
   set(DUCKBOX_USE_HOMEBREW_AWS ON)
   execute_process(COMMAND brew --prefix aws-sdk-cpp OUTPUT_VARIABLE _brew_aws OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
   execute_process(COMMAND brew --prefix openssl@4 OUTPUT_VARIABLE _brew_ssl OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  execute_process(COMMAND brew --prefix abseil OUTPUT_VARIABLE _brew_absl OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
   if(_brew_aws)
     list(PREPEND CMAKE_PREFIX_PATH "${_brew_aws}")
   endif()
   if(_brew_ssl)
     set(OPENSSL_ROOT_DIR "${_brew_ssl}" CACHE PATH "" FORCE)
     list(PREPEND CMAKE_PREFIX_PATH "${_brew_ssl}")
+  endif()
+  if(_brew_absl)
+    list(PREPEND CMAKE_PREFIX_PATH "${_brew_absl}")
   endif()
 endif()
 
@@ -244,6 +248,17 @@ find_package(Arrow CONFIG REQUIRED)
 find_package(ArrowFlight CONFIG REQUIRED)
 find_package(ArrowFlightSql CONFIG REQUIRED)
 
+# Abseil strings is already on the Arrow Flight / gRPC graph (libabsl-dev on
+# Linux APT, Homebrew abseil via grpc on macOS). Link it explicitly so call
+# sites do not depend on transitive include paths.
+if(NOT TARGET absl::strings)
+  find_package(absl CONFIG REQUIRED)
+endif()
+if(NOT TARGET absl::strings)
+  message(FATAL_ERROR "absl::strings is required (Arrow Flight / gRPC / Homebrew abseil)")
+endif()
+message(STATUS "Using Abseil strings (absl::strings)")
+
 # QueryErrorInjection is compiled only into test targets. The release duckbox
 # binary links duckbox_core, which is built without this option.
 option(DUCKBOX_TESTING "Compile QueryErrorInjection test seams (OFF in the release binary)" OFF)
@@ -318,6 +333,7 @@ function(duckbox_link_core_deps target)
     Arrow::arrow_shared
     ArrowFlight::arrow_flight_shared
     ArrowFlightSql::arrow_flight_sql_shared
+    absl::strings
     OpenSSL::SSL
     OpenSSL::Crypto
     yaml-cpp)

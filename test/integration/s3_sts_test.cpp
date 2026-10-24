@@ -87,7 +87,7 @@ std::string RootSecret() {
 std::string RustFsEndpoint() {
     if (const char *env = std::getenv("DUCKBOX_S3_ENDPOINT")) {
         std::string e = env;
-        if (e.rfind("http://", 0) == 0) {
+        if (e.starts_with("http://")) {
             e = e.substr(7);
         }
         return e;

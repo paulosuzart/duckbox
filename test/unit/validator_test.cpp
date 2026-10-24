@@ -423,7 +423,7 @@ void duckbox::test::RunValidatorTests() {
         }
         auto entries = ddb::Catalog::GetAllEntries(*con.context, ddb::CatalogType::MACRO_ENTRY);
         for (auto &eref : entries) {
-            auto n = ddb::StringUtil::Lower(IdentName(eref.get().name));
+            auto n = NormalizeSqlIdent(IdentName(eref.get().name));
             if (n == "rank" || n == "row_number" || n == "dense_rank" || n == "ntile" ||
                 n == "percent_rank" || n == "cume_dist") {
                 Expect(eref.get().type == ddb::CatalogType::WINDOW_FUNCTION_ENTRY,
