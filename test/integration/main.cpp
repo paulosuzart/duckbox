@@ -11,6 +11,7 @@ int main() {
     RunRuntimeTests();
     RunS3RegistryTests();
     RunAuthFlightTests();
+    RunBearerFlightTests();
     RunClusterTests();
     RunSignalShutdownTests();
     RunConnectRuntimeTests();

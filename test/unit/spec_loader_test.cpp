@@ -2,13 +2,13 @@
 #include "suite.hpp"
 
 #include "common/crypto.hpp"
-#include "node/daemon_config.hpp"
+#include "common/yaml.hpp"
+#include "config/policy.hpp"
+#include "config/spec_validator.hpp"
 #include "flight/flight_sql_server.hpp"
 #include "lake/lake.hpp"
-#include "config/policy.hpp"
+#include "node/daemon_config.hpp"
 #include "s3/secrets.hpp"
-#include "config/spec_validator.hpp"
-#include "common/yaml.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -520,6 +520,19 @@ void duckbox::test::RunSpecLoaderTests() {
                "daemon yaml lease advertise is the internal listener");
         Expect(d.idle_evict_ms == 30000, "daemon yaml idle_timeout 30s");
         ValidateDaemonOrThrow(d);
+        {
+            DaemonConfig locked;
+            locked.listen = "127.0.0.1:4747";
+            locked.handle_secret = "a-long-enough-secret";
+            locked.allow_insecure_dev = false;
+            locked.jwt_secret = "jwt-secret-value-here";
+            locked.callers.push_back(CallerRule{"analyst-svc", {"tenant_21:*"}});
+            locked.debug_http = "127.0.0.1:18480";
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(locked); }, "debug_http",
+                                "debug_http is refused without allow_insecure_dev");
+            locked.allow_insecure_dev = true;
+            ValidateDaemonOrThrow(locked);
+        }
         {
             DaemonConfig pub = TestDaemon();
             pub.listen = "0.0.0.0:4747";

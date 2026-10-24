@@ -11,6 +11,7 @@ void RunHiddenFilterFlightTests();
 void RunRuntimeTests();
 void RunS3RegistryTests();
 void RunAuthFlightTests();
+void RunBearerFlightTests();
 void RunClusterTests();
 void RunSignalShutdownTests();
 void RunConnectRuntimeTests();

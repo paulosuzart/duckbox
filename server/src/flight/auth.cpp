@@ -1,11 +1,27 @@
 #include "flight/auth.hpp"
 #include "common/error.hpp"
 
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+
 namespace duckbox {
 namespace flight {
 using namespace common;
 using namespace config;
 using namespace rewriter;
+
+std::string BearerTokenFromAuthorization(const std::string &header) {
+    auto view = absl::StripAsciiWhitespace(header);
+    constexpr absl::string_view kScheme = "Bearer";
+    if (view.size() < kScheme.size() || !absl::StartsWithIgnoreCase(view, kScheme)) {
+        return "";
+    }
+    view.remove_prefix(kScheme.size());
+    if (view.empty() || !absl::ascii_isspace(static_cast<unsigned char>(view.front()))) {
+        return "";
+    }
+    return std::string(absl::StripAsciiWhitespace(view));
+}
 
 TenantKey Authenticate(const Policy &policy, const AuthRequest &req) {
     if (req.key_header.empty()) {

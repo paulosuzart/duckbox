@@ -39,7 +39,8 @@ def default_spec_path() -> Path:
 def format_error(exc: BaseException) -> str:
     """Strip ADBC/Flight wrapping so the sandbox reason is readable."""
     msg = str(exc)
-    for marker in ("Invalid Error: ", "[FlightSQL] ", "INVALID_ARGUMENT: ", "Already Exists: ", "Key error: "):
+    for marker in ("Invalid Error: ", "[FlightSQL] ", "INVALID_ARGUMENT: ", "Already Exists: ",
+                   "Key error: ", "Unauthenticated: ", "UNAUTHENTICATED: "):
         if marker in msg:
             msg = msg.split(marker)[-1]
     msg = msg.split("(InvalidArgument")[0].split("(IO:")[0].strip()

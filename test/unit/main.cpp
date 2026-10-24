@@ -3,6 +3,7 @@
 
 int main() {
     using namespace duckbox::test;
+    RunAuthTests();
     RunTenantKeyTests();
     RunSpecLoaderTests();
     RunValidatorTests();
