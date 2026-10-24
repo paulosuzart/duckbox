@@ -62,11 +62,7 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
             AuthorizeCaller(opt.daemon, caller, rec.key);
             AuthRequest auth;
             auth.key_header = req.get_header_value("X-Duckbox-Key");
-            auto authz = req.get_header_value("Authorization");
-            const std::string bearer = "Bearer ";
-            if (authz.size() > bearer.size() && authz.compare(0, bearer.size(), bearer) == 0) {
-                auth.bearer_token = authz.substr(bearer.size());
-            }
+            auth.bearer_token = BearerTokenFromAuthorization(req.get_header_value("Authorization"));
             auto key = AuthenticateSandbox(rec.spec, rec.key, auth);
             (void)key;
             auto sql = JsonGetString(req.body, "sql");

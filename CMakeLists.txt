@@ -458,6 +458,7 @@ endfunction()
 duckbox_add_test(duckbox_unit_tests
   test/support/check.cpp
   test/unit/main.cpp
+  test/unit/auth_test.cpp
   test/unit/tenant_key_test.cpp
   test/unit/spec_loader_test.cpp
   test/unit/validator_test.cpp
@@ -497,6 +498,7 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/runtime_test.cpp
   test/integration/s3_registry_test.cpp
   test/integration/auth_flight_test.cpp
+  test/integration/bearer_flight_test.cpp
   test/integration/cluster_test.cpp
   test/integration/signal_shutdown_test.cpp
   test/integration/connect_runtime_test.cpp

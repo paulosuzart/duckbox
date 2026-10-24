@@ -236,7 +236,7 @@ public:
 	// Reads the handshake token and writes the resolved caller identity.
 	::arrow::Status Authenticate(const ::arrow::flight::ServerCallContext &context, ::arrow::flight::ServerAuthSender *outgoing,
 	                           ::arrow::flight::ServerAuthReader *incoming) override;
-	// Does not fall back to the raw token when secrets are configured.
+	// Handshake token (auth-token-bin) or Authorization: Bearer on the call.
 	::arrow::Status IsValid(const ::arrow::flight::ServerCallContext &context, const std::string &token,
 	                      std::string *peer_identity) override;
 

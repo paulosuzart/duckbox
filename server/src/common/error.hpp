@@ -1,8 +1,9 @@
 #pragma once
 
 // Error types used across spec load, auth, SQL enforcement, and Flight SQL.
-// Flight maps these to Status (Invalid / AlreadyExists / KeyError). Messages
-// must never contain secret values or raw user SQL beyond a short reason.
+// Flight maps these to Status (Invalid / AlreadyExists / KeyError /
+// Unauthenticated). Messages must never contain secret values or raw user SQL
+// beyond a short reason.
 
 #include <stdexcept>
 #include <string>
