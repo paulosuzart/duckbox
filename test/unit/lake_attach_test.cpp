@@ -11,10 +11,14 @@
 
 void duckbox::test::RunLakeAttachSecretTests() {
     using namespace duckbox;
+    using namespace duckbox::common;
     using namespace duckbox::lake;
     using namespace duckbox::s3;
     using namespace duckbox::config;
     using namespace duckbox::node;
+
+    Expect(std::string(CatalogUnavailableError().what()) == kCatalogUnavailableClientError,
+           "CatalogUnavailableError is the fixed generic catalog message");
 
     Expect(RedactSecretText("IO Error: Failed to attach DuckLake password=super-secret")
                    .find("super-secret") == std::string::npos,
@@ -127,39 +131,6 @@ void duckbox::test::RunLakeAttachSecretTests() {
     Expect(exact.find("dbname=lake") == std::string::npos, "exact-value substitution removes DSN");
     Expect(exact.find("<redacted>") != std::string::npos, "exact-value uses the marker");
 
-    auto catalog_err =
-        "IO Error: Failed to query most recent snapshot for DuckLake: Unable to connect to "
-        "Postgres at \"dbname=lake host=pg password=exact-dsn-secret\"";
-    Expect(IsLakeCatalogIoError(catalog_err), "DuckLake snapshot IO is a catalog error");
-    auto sanitized = SanitizeClientError(catalog_err, ctx);
-    Expect(sanitized == kCatalogUnavailableClientError,
-           "catalog IO client error is the generic message");
-    Expect(sanitized.find(exact_pw) == std::string::npos, "generic catalog error has no password");
-    Expect(sanitized.find(exact_dsn) == std::string::npos, "generic catalog error has no DSN");
-    Expect(SanitizeClientError("Binder Error: referenced column \"note\" must be in GROUP BY")
-                   .find("note") != std::string::npos,
-           "SanitizeClientError keeps binder diagnostics");
-
-    SecretRedactionContext oracle_ctx;
-    AddSecretValue(oracle_ctx, "dummysecretvalue");
-    AddSecretValue(oracle_ctx, "FAKEPW_kw");
-    const char *conv_right =
-        "Conversion Error: Could not convert string 'g1 dummysecretvalue g2 FAKEPW_kw g5 nomatch' "
-        "to INT32";
-    const char *conv_wrong =
-        "Conversion Error: Could not convert string 'g1 notthesecret g2 wrongguess g5 nomatch' "
-        "to INT32";
-    auto s_right = SanitizeClientError(conv_right, oracle_ctx);
-    auto s_wrong = SanitizeClientError(conv_wrong, oracle_ctx);
-    Expect(s_right.find("<redacted>") == std::string::npos &&
-               s_wrong.find("<redacted>") == std::string::npos,
-           "Conversion errors are not exact-redacted (no secret oracle)");
-    Expect(s_right.find("dummysecretvalue") != std::string::npos,
-           "Conversion error still echoes the tenant's own SQL");
-    Expect(s_right.find("Conversion Error") != std::string::npos &&
-               s_wrong.find("Conversion Error") != std::string::npos,
-           "right and wrong secret guesses stay Conversion errors");
-
     Expect(RedactSecretText("Binder Error: column token: not found").find("token: not found") !=
                std::string::npos,
            "pattern redaction does not rewrite 'token: not found'");
@@ -187,8 +158,6 @@ void duckbox::test::RunLakeAttachSecretTests() {
     auto red_echo = RedactSecretText(echoed, colon_ctx);
     Expect(red_echo.find("pw:colon-secret") == std::string::npos,
            "exact unprefixed DSN / libpq password redacts a ':' password");
-    Expect(SanitizeClientError(echoed, colon_ctx) == kCatalogUnavailableClientError,
-           "catalog IO with colon password is still generic on the client");
 
     auto quote_dsn = std::string("ducklake:postgres:dbname=lake password=pw\"quote-secret");
     auto quote_ctx = CollectSecretRedactionContext(quote_dsn, "", "");

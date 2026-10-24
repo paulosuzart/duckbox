@@ -350,6 +350,9 @@ void RejectDeniedStatement(const ddb::SQLStatement &st) {
     if (named.find("quack") != std::string::npos || named == "whoami") {
         throw SqlRejected("Quack is denied");
     }
+    if (!named.empty() && IsSecretRelatedName(named)) {
+        throw SqlRejected("secret-related setting is denied");
+    }
     switch (st.type) {
     case ddb::StatementType::CONNECT_STATEMENT:
     case ddb::StatementType::DISCONNECT_STATEMENT:
@@ -363,6 +366,11 @@ void RejectDeniedStatement(const ddb::SQLStatement &st) {
         throw SqlRejected("extension loading is denied");
     case ddb::StatementType::CREATE_STATEMENT: {
         auto &create = st.Cast<ddb::CreateStatement>();
+        if (create.info && (create.info->type == ddb::CatalogType::SECRET_ENTRY ||
+                            create.info->type == ddb::CatalogType::SECRET_TYPE_ENTRY ||
+                            create.info->type == ddb::CatalogType::SECRET_FUNCTION_ENTRY)) {
+            throw SqlRejected("CREATE SECRET is denied");
+        }
         if (create.info && create.info->type == ddb::CatalogType::TRIGGER_ENTRY) {
             throw SqlRejected("triggers are denied");
         }
@@ -370,6 +378,11 @@ void RejectDeniedStatement(const ddb::SQLStatement &st) {
     }
     case ddb::StatementType::DROP_STATEMENT: {
         auto &drop = st.Cast<ddb::DropStatement>();
+        if (drop.info && (drop.info->type == ddb::CatalogType::SECRET_ENTRY ||
+                          drop.info->type == ddb::CatalogType::SECRET_TYPE_ENTRY ||
+                          drop.info->type == ddb::CatalogType::SECRET_FUNCTION_ENTRY)) {
+            throw SqlRejected("DROP SECRET is denied");
+        }
         if (drop.info && drop.info->type == ddb::CatalogType::TRIGGER_ENTRY) {
             throw SqlRejected("triggers are denied");
         }

@@ -237,17 +237,17 @@ cases:
   - id: set_s3_access_key
     sql: "SET s3_access_key_id='stolen'"
     expect: deny
-    reason: only SELECT
+    reason: secret-related setting is denied
 
   - id: set_s3_secret_key
     sql: "SET s3_secret_access_key='stolen'"
     expect: deny
-    reason: only SELECT
+    reason: secret-related setting is denied
 
   - id: set_s3_session_token
     sql: "SET s3_session_token='stolen'"
     expect: deny
-    reason: only SELECT
+    reason: secret-related setting is denied
 
   - id: copy_out
     sql: "COPY deals TO 'out.csv'"

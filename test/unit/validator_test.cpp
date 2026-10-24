@@ -111,6 +111,11 @@ void duckbox::test::RunValidatorTests() {
         Expect(has_path(iss, "functions", "duckdb_secrets") ||
                    has_path(iss, "functions", "never allowlisted"),
                "ValidateStatic rejects duckdb_secrets in functions");
+        bypass = loaded;
+        bypass.functions.insert("current_setting");
+        Expect(has_path(validator.ValidateStatic(bypass), "functions", "never allowlisted") ||
+                   has_path(validator.ValidateStatic(bypass), "functions", "current_setting"),
+               "ValidateStatic rejects current_setting in functions");
         Expect(IsAlwaysDeniedTableFunction("postgres_query") &&
                    IsAlwaysDeniedTableFunction("duckdb_tables") &&
                    IsAlwaysDeniedTableFunction("ducklake_scan") &&

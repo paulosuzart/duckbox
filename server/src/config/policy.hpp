@@ -203,6 +203,10 @@ std::vector<std::string> DeclaredAllowedPaths(const SandboxSpec &spec);
 // expand macros; allowlisted macros are rejected separately at spec
 // validation and warmup.
 bool IsAlwaysDeniedTableFunction(const std::string &name);
+// CREATE/DROP SECRET, duckdb_secrets, which_secret, current_setting, and any
+// function / setting / pragma whose name can read or reference secrets.
+bool IsSecretRelatedName(const std::string &name);
+bool IsAlwaysDeniedFunction(const std::string &name);
 
 using Policy = SandboxSpec;
 

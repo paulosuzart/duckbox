@@ -74,21 +74,6 @@ bool IsPatternUnquotedValueEnd(char c) {
     return IsWs(c) || c == ';' || c == ',' || c == ')' || c == '&' || c == '"' || c == ':';
 }
 
-std::string LowerAsciiCopy(std::string s) {
-    for (char &c : s) {
-        if (c >= 'A' && c <= 'Z') {
-            c = static_cast<char>(c - 'A' + 'a');
-        }
-    }
-    return s;
-}
-
-bool ContainsCi(const std::string &hay, const std::string &needle) {
-    auto h = LowerAsciiCopy(hay);
-    auto n = LowerAsciiCopy(needle);
-    return h.find(n) != std::string::npos;
-}
-
 void ReplaceAllExact(std::string &s, const std::string &needle, const char *repl) {
     if (needle.empty()) {
         return;
@@ -450,55 +435,11 @@ std::string RedactSecretText(const std::string &text, const SecretRedactionConte
     return out;
 }
 
-namespace {
-thread_local SecretRedactionContext t_bound_redact_ctx;
-} // namespace
-
-void BindRedactionContext(SecretRedactionContext ctx) {
-    t_bound_redact_ctx = std::move(ctx);
-}
-
-SecretRedactionContext BoundRedactionContext() {
-    return t_bound_redact_ctx;
-}
-
-bool IsLakeCatalogIoError(const std::string &text) {
-    return ContainsCi(text, "failed to query most recent snapshot") ||
-           ContainsCi(text, "unable to connect to postgres") ||
-           ContainsCi(text, "failed to attach ducklake") ||
-           (ContainsCi(text, "ducklake") && ContainsCi(text, "unable to connect"));
-}
-
-bool IsConfigCarryingError(const std::string &text) {
-    if (IsLakeCatalogIoError(text)) {
-        return true;
-    }
-    auto lower = LowerAsciiCopy(text);
-    return lower.rfind("io error", 0) == 0 || lower.rfind("http error", 0) == 0 ||
-           lower.rfind("connection error", 0) == 0 || ContainsCi(text, "failed to attach") ||
-           ContainsCi(text, "unable to connect") || ContainsCi(text, "create secret") ||
-           ContainsCi(text, "failed to query most recent snapshot");
-}
-
-std::string SanitizeClientError(const std::string &text) {
-    return SanitizeClientError(text, SecretRedactionContext{});
-}
-
-std::string SanitizeClientError(const std::string &text, const SecretRedactionContext &ctx) {
-    if (IsLakeCatalogIoError(text)) {
-        return kCatalogUnavailableClientError;
-    }
-    if (IsConfigCarryingError(text)) {
-        return RedactSecretText(text, ctx);
-    }
-    return text;
-}
-
 void ExecOrThrow(ddb::Connection &con, const std::string &sql) {
     EnsureLinkedDuckDb();
     auto r = con.Query(sql);
     if (r->HasError()) {
-        throw Error(SanitizeClientError(r->GetError()));
+        throw Error(r->GetError());
     }
 }
 

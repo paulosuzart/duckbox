@@ -144,12 +144,9 @@ std::string EncodeDoPutHandle(const std::string &handle) {
 }
 
 Status FromEx(const std::exception &e) {
-    auto ctx = BoundRedactionContext();
-    std::string client = SanitizeClientError(e.what(), ctx);
-    if (IsLakeCatalogIoError(e.what())) {
-        std::clog << "flight: lake catalog unavailable: " << RedactSecretText(e.what(), ctx)
-                  << "\n";
-    }
+    // CatalogUnavailableError is already the fixed generic message (thrown at
+    // the attach / catalog-IO site). Every other tenant error is returned as-is.
+    const char *client = e.what();
     if (dynamic_cast<const ConflictError *>(&e)) {
         return Status::AlreadyExists(client);
     }

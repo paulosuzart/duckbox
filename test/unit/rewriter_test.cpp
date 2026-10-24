@@ -1,12 +1,14 @@
 #include "check.hpp"
 #include "suite.hpp"
 
+#include "config/policy.hpp"
 #include "rewriter/rewriter.hpp"
 #include "rewriter/tenant_key.hpp"
 
 void duckbox::test::RunRewriterTests() {
     using namespace duckbox;
     using namespace duckbox::rewriter;
+    using namespace duckbox::config;
     auto policy = TestPolicy();
     auto key_a = ParseTenantKey("tenant_21:user_sergio", policy.key);
 
@@ -54,4 +56,42 @@ void duckbox::test::RunRewriterTests() {
                                 "(WITH e AS (SELECT id FROM deals) SELECT id FROM e)",
                                 policy, key_a);
     Expect(paren.find("21") != std::string::npos, "parenthesized set-op WITH is tenant-wrapped");
+
+    ExpectThrowContains(
+        [&] {
+            RewriteUserSql("CREATE SECRET sneak (TYPE s3, KEY_ID 'x', SECRET 'y')", policy, key_a);
+        },
+        "CREATE SECRET is denied", "rewriter rejects CREATE SECRET");
+    ExpectThrowContains(
+        [&] {
+            RewriteUserSql("CREATE OR REPLACE SECRET sneak (TYPE s3, KEY_ID 'x', SECRET 'y')",
+                           policy, key_a);
+        },
+        "CREATE SECRET is denied", "rewriter rejects CREATE OR REPLACE SECRET");
+    ExpectThrowContains([&] { RewriteUserSql("DROP SECRET sneak", policy, key_a); },
+                        "DROP SECRET is denied", "rewriter rejects DROP SECRET");
+    ExpectThrowContains([&] { RewriteUserSql("SELECT * FROM duckdb_secrets()", policy, key_a); },
+                        "denied", "rewriter rejects duckdb_secrets()");
+    ExpectThrowContains(
+        [&] { RewriteUserSql("SELECT * FROM which_secret('s3://x/', 's3')", policy, key_a); },
+        "denied", "rewriter rejects which_secret()");
+    ExpectThrowContains([&] { RewriteUserSql("SET allow_persistent_secrets=true", policy, key_a); },
+                        "secret-related setting is denied", "rewriter rejects secret-related SET");
+    ExpectThrowContains([&] { RewriteUserSql("SET s3_secret_access_key='x'", policy, key_a); },
+                        "secret-related setting is denied",
+                        "rewriter rejects SET s3_secret_access_key");
+    ExpectThrowContains([&] { RewriteUserSql("SET s3_access_key_id='x'", policy, key_a); },
+                        "secret-related setting is denied",
+                        "rewriter rejects SET s3_access_key_id");
+    ExpectThrowContains([&] { RewriteUserSql("PRAGMA enable_verification", policy, key_a); },
+                        "only SELECT", "rewriter rejects PRAGMA");
+    ExpectThrowContains(
+        [&] { RewriteUserSql("SELECT current_setting('s3_secret_access_key')", policy, key_a); },
+        "function not allowlisted", "rewriter rejects current_setting");
+    Expect(IsSecretRelatedName("duckdb_secrets") && IsSecretRelatedName("which_secret") &&
+               IsSecretRelatedName("current_setting") &&
+               IsAlwaysDeniedFunction("current_setting") &&
+               IsAlwaysDeniedTableFunction("duckdb_secrets") &&
+               IsAlwaysDeniedTableFunction("which_secret"),
+           "secret-related names are always denied");
 }

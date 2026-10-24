@@ -3,7 +3,6 @@
 #include "common/error.hpp"
 #include "common/json.hpp"
 #include "flight/auth.hpp"
-#include "lake/lake.hpp"
 #include "node/daemon_config.hpp"
 
 #include "httplib.h"
@@ -88,7 +87,7 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
             }
             res.status = status;
             Json err;
-            err["error"] = lake::SanitizeClientError(e.what(), lake::BoundRedactionContext());
+            err["error"] = e.what();
             res.set_content(err.dump(), "application/json");
         }
     });

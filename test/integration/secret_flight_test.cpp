@@ -159,6 +159,75 @@ void duckbox::test::RunSecretFlightTests() {
     }
 
     {
+        auto o = opt;
+        o.headers.emplace_back("x-duckbox-sandbox", "oracle-a");
+        o.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+        auto with_catalog = [](std::string body, const char *pw) {
+            const std::string needle = "kind: memory";
+            auto pos = body.find(needle);
+            if (pos != std::string::npos) {
+                body.insert(pos + needle.size(),
+                            std::string("\n  catalog: \"ducklake:postgres:dbname=lake password=") +
+                                pw + "\"");
+            }
+            return body;
+        };
+        auto spec_a = with_catalog(SpecBodyMemory(), "flight-a-secret-11");
+        Expect(ActionBody(*raw_client, o, "CreateSandbox", spec_a).find("oracle-a") !=
+                   std::string::npos,
+               "create sandbox A for two-sandbox oracle");
+        auto o2 = opt;
+        o2.headers.emplace_back("x-duckbox-sandbox", "oracle-b");
+        o2.headers.emplace_back("x-duckbox-key", "tenant_21:user_sergio");
+        auto spec_b = with_catalog(SpecBodyMemory(), "flight-b-secret-22");
+        Expect(ActionBody(*raw_client, o2, "CreateSandbox", spec_b).find("oracle-b") !=
+                   std::string::npos,
+               "create sandbox B for two-sandbox oracle");
+        const char *guess_a = "flight-a-secret-11";
+        const char *guess_b = "flight-b-secret-22";
+        auto qa = opt;
+        qa.headers.emplace_back("x-duckbox-sandbox", "oracle-a");
+        auto qb = opt;
+        qb.headers.emplace_back("x-duckbox-sandbox", "oracle-b");
+        auto flight_err = [&](const ::arrow::flight::FlightCallOptions &call,
+                              const std::string &sql) -> std::string {
+            auto info = sql_client.Execute(call, sql);
+            if (!info.ok()) {
+                return info.status().ToString();
+            }
+            if ((*info)->endpoints().empty()) {
+                return "no endpoints";
+            }
+            auto stream = raw_client->DoGet(call, (*info)->endpoints()[0].ticket);
+            if (!stream.ok()) {
+                return stream.status().ToString();
+            }
+            auto tbl = (*stream)->ToTable();
+            if (!tbl.ok()) {
+                return tbl.status().ToString();
+            }
+            return {};
+        };
+        auto ea = flight_err(qa, std::string("SELECT CAST('") + guess_a + "' AS INTEGER)");
+        auto eb = flight_err(qa, std::string("SELECT CAST('") + guess_b + "' AS INTEGER)");
+        auto ea2 = flight_err(qb, std::string("SELECT CAST('") + guess_a + "' AS INTEGER)");
+        auto eb2 = flight_err(qb, std::string("SELECT CAST('") + guess_b + "' AS INTEGER)");
+        Expect(!ea.empty() && !eb.empty() && !ea2.empty() && !eb2.empty(),
+               "Flight CAST guesses fail on both sandboxes");
+        Expect(ea.find("<redacted>") == std::string::npos &&
+                   eb.find("<redacted>") == std::string::npos &&
+                   ea2.find("<redacted>") == std::string::npos &&
+                   eb2.find("<redacted>") == std::string::npos,
+               "Flight CAST errors are never exact-redacted");
+        Expect(NormalizeGuess(ea, guess_a) == NormalizeGuess(eb, guess_b),
+               "Flight sandbox A: right vs wrong guess is byte-identical");
+        Expect(NormalizeGuess(ea2, guess_a) == NormalizeGuess(eb2, guess_b),
+               "Flight sandbox B: right vs wrong guess is byte-identical");
+        Expect(NormalizeGuess(ea, guess_a) == NormalizeGuess(ea2, guess_a),
+               "Flight same guess on two sandboxes is byte-identical");
+    }
+
+    {
         const char *pw = "duckbox-query-catalog-secret-c81e";
         const char *dsn = "dbname=lake host=127.0.0.1 port=5432 user=duckbox "
                           "password=duckbox-query-catalog-secret-c81e";
