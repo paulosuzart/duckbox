@@ -245,10 +245,10 @@ private:
 	node::ListenerPlane plane_ = node::ListenerPlane::Public;
 };
 
-// FlightDataStream whose IPC payload body buffers are 8-byte aligned.
-// GetCatalogs / GetDbSchemas / GetTables / GetTableTypes use this so
-// third-party readers (pyarrow, ADBC, Go) can load StringArray offsets
-// without IpcReadOptions::ensure_alignment.
+// Best-effort 8-byte alignment of Flight payload body buffers *before*
+// gRPC. Zero-copy receive can still hand clients String/Binary offsets
+// at align=1. Third-party readers (pyarrow, ADBC, JDBC) must set
+// IpcReadOptions::ensure_alignment (DataTypeSpecific) on their reader.
 ::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>>
 MakeAlignedBatchStream(const std::shared_ptr<::arrow::RecordBatch> &batch);
 ::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>>

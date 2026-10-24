@@ -393,6 +393,50 @@ void duckbox::test::RunValidatorTests() {
         }
     }
     {
+        constexpr const char *kWindows[] = {"row_number", "rank",         "dense_rank",
+                                            "ntile",      "percent_rank", "cume_dist"};
+        auto win = loaded;
+        for (auto *fn : kWindows) {
+            win.functions.insert(fn);
+        }
+        Expect(validator.ValidateStatic(win).empty(),
+               "ValidateStatic accepts window functions on the functions list");
+        ddb::DuckDB db(nullptr);
+        ddb::Connection con(db);
+        try {
+            RejectAllowlistedMacros(win, con);
+        } catch (const std::exception &e) {
+            Expect(false, std::string("window functions are not macros: ") + e.what());
+        }
+        bool started = false;
+        if (!con.HasActiveTransaction()) {
+            con.BeginTransaction();
+            started = true;
+        }
+        auto entries = ddb::Catalog::GetAllEntries(*con.context, ddb::CatalogType::MACRO_ENTRY);
+        for (auto &eref : entries) {
+            auto n = ddb::StringUtil::Lower(IdentName(eref.get().name));
+            if (n == "rank" || n == "row_number" || n == "dense_rank" || n == "ntile" ||
+                n == "percent_rank" || n == "cume_dist") {
+                Expect(eref.get().type == ddb::CatalogType::WINDOW_FUNCTION_ENTRY,
+                       n + " from the MACRO_ENTRY scan is WINDOW_FUNCTION_ENTRY");
+            }
+        }
+        if (started) {
+            con.Commit();
+        }
+        ExecOrThrow(con, "CREATE MACRO user_win() AS (1)");
+        auto user = loaded;
+        user.functions.insert("user_win");
+        try {
+            RejectAllowlistedMacros(user, con);
+            Expect(false, "user-defined MACRO_ENTRY is still rejected");
+        } catch (const PolicyError &e) {
+            Expect(std::string(e.what()) == MacroNotAllowlistedMessage("user_win"),
+                   "unallowlisted user macro is still rejected");
+        }
+    }
+    {
         auto two = loaded;
         TablePolicy staging;
         staging.name = "deals";

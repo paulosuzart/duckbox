@@ -553,7 +553,14 @@ void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con) {
         started = true;
     }
     try {
+        // DuckDB 2.0 GetAllEntries(MACRO_ENTRY) / GetEntry can also yield
+        // WINDOW_FUNCTION_ENTRY (rank, row_number, …) and aggregates. Those
+        // are not macros; only scalar/table macros are rejected.
         auto reject_if_listed = [&](const ddb::CatalogEntry &entry) {
+            if (entry.type != ddb::CatalogType::MACRO_ENTRY &&
+                entry.type != ddb::CatalogType::TABLE_MACRO_ENTRY) {
+                return;
+            }
             auto n = ddb::StringUtil::Lower(IdentName(entry.name));
             if (spec.functions.count(n) && !IsTrustedSystemMacroException(entry)) {
                 throw PolicyError(MacroNotAllowlistedMessage(n));

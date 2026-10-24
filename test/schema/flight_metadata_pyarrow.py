@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Non-C++ Flight SQL client: pyarrow + ADBC read metadata streams.
+"""Document Flight SQL metadata offset alignment for third-party clients.
 
-Inspects String/Binary offset-buffer alignment on GetCatalogs, GetDbSchemas,
-GetTables (with include_schema), and GetTableTypes. Does not set
-IpcReadOptions.ensure_alignment — the server must send 4/8-byte-aligned
-offsets so third-party readers (pyarrow, ADBC, Go) are safe.
+gRPC zero-copy can deliver String/Binary offset buffers at align=1
+(addr % 8 == 7 is typical for GetTables include_schema). That is not a
+server-side guarantee. pyarrow / ADBC / JDBC must set
+IpcReadOptions.ensure_alignment = DataTypeSpecific on the reader.
+
+This script asserts:
+- without the option, GetTables include_schema offsets are misaligned;
+- with the option, the same stream is 4-byte aligned and safe to read.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import sys
 
 import pyarrow as pa
 import pyarrow.flight as flight
+import pyarrow.ipc as ipc
 
 
 def _varint(n: int) -> bytes:
@@ -77,8 +82,9 @@ def _align(addr: int) -> int:
     return addr % 8
 
 
-def expect_offset_aligned(table: pa.Table, label: str) -> None:
-    """Require 4-byte (and prefer 8-byte) alignment on string/binary offsets."""
+def offset_addrs(table: pa.Table) -> list[tuple[str, int, int]]:
+    """(column, chunk_index, offset_buffer_address) for string/binary columns."""
+    out: list[tuple[str, int, int]] = []
     for col in table.columns:
         for i, chunk in enumerate(col.chunks):
             if not pa.types.is_string(chunk.type) and not pa.types.is_binary(chunk.type):
@@ -86,15 +92,45 @@ def expect_offset_aligned(table: pa.Table, label: str) -> None:
             bufs = chunk.buffers()
             if len(bufs) < 2 or bufs[1] is None:
                 continue
-            addr = bufs[1].address
-            if addr % 4 != 0:
-                _fail(
-                    f"{label} {col._name} chunk {i} offsets at {addr:#x} "
-                    f"align={_align(addr)} (need 4/8)"
-                )
-            # Reading values is the ARM64 SIGSEGV path when offsets are unaligned.
-            _ = chunk.to_pylist()
+            out.append((col._name, i, bufs[1].address))
+    return out
+
+
+def report_offsets(table: pa.Table, label: str) -> list[tuple[str, int, int]]:
+    addrs = offset_addrs(table)
+    for name, i, addr in addrs:
+        print(f"{label} {name} chunk {i} offsets at {addr:#x} align={_align(addr)}")
+    return addrs
+
+
+def expect_offset_aligned(table: pa.Table, label: str) -> None:
+    """Require 4-byte alignment on string/binary offsets, then read values."""
+    for name, i, addr in offset_addrs(table):
+        if addr % 4 != 0:
+            _fail(
+                f"{label} {name} chunk {i} offsets at {addr:#x} "
+                f"align={_align(addr)} (need 4/8 after ensure_alignment)"
+            )
+        # Reading values is the ARM64 SIGSEGV path when offsets are unaligned.
+    for col in table.columns:
+        for chunk in col.chunks:
+            if pa.types.is_string(chunk.type) or pa.types.is_binary(chunk.type):
+                _ = chunk.to_pylist()
     print(f"ok {label} rows={table.num_rows} cols={table.num_columns} offsets aligned")
+
+
+def expect_offset_misaligned(table: pa.Table, label: str) -> None:
+    """Document the no-option path: inspect addresses only (do not read values)."""
+    addrs = report_offsets(table, label)
+    if not addrs:
+        _fail(f"{label} has no string/binary offset buffers to inspect")
+    mis = [(name, i, addr) for name, i, addr in addrs if addr % 4 != 0]
+    if not mis:
+        _fail(
+            f"{label} unexpectedly 4-byte aligned without ensure_alignment; "
+            "do not claim a server-side wire guarantee"
+        )
+    print(f"ok {label} misaligned without ensure_alignment ({len(mis)} buffer(s))")
 
 
 def do_command(client: flight.FlightClient, options: flight.FlightCallOptions, cmd: bytes) -> pa.Table:
@@ -104,6 +140,23 @@ def do_command(client: flight.FlightClient, options: flight.FlightCallOptions, c
         _fail("command returned no ticket")
     reader = client.do_get(info.endpoints[0].ticket, options)
     return reader.read_all()
+
+
+def alignment_option():
+    # pyarrow 26: Alignment.DataTypeSpecific. Older names kept as fallbacks.
+    align = getattr(ipc, "Alignment", None)
+    if align is not None:
+        for name in ("DataTypeSpecific", "DATA_TYPE_SPECIFIC", "kDataTypeSpecificAlignment"):
+            if hasattr(align, name):
+                return getattr(align, name)
+    return -3
+
+
+def call_options(headers: list[tuple[bytes, bytes]], *, ensure: bool) -> flight.FlightCallOptions:
+    if not ensure:
+        return flight.FlightCallOptions(headers=headers)
+    read = ipc.IpcReadOptions(ensure_alignment=alignment_option())
+    return flight.FlightCallOptions(headers=headers, read_options=read)
 
 
 def run_adbc(url: str, sandbox: str, key: str, caller: str) -> None:
@@ -121,7 +174,12 @@ def run_adbc(url: str, sandbox: str, key: str, caller: str) -> None:
             objects = objects.read_all()
         if objects is None or objects.num_rows < 1:
             _fail("ADBC get_objects returned no rows")
-        expect_offset_aligned(objects, "ADBC get_objects")
+        addrs = report_offsets(objects, "ADBC get_objects (no reader alignment option)")
+        mis = sum(1 for _, _, addr in addrs if addr % 4 != 0)
+        print(
+            f"ok ADBC get_objects rows={objects.num_rows} "
+            f"misaligned_buffers={mis} (enable reader alignment on ADBC/JDBC)"
+        )
         target = "nested_t"
         try:
             schema = conn.adbc_get_table_schema(target)
@@ -157,32 +215,38 @@ def main() -> int:
     ]
     if args.key:
         headers.append((b"x-duckbox-key", args.key.encode()))
-    options = flight.FlightCallOptions(headers=headers)
+    raw = call_options(headers, ensure=False)
+    aligned = call_options(headers, ensure=True)
     client = flight.FlightClient(args.url)
 
-    catalogs = do_command(client, options, command_get_catalogs())
-    expect_offset_aligned(catalogs, "pyarrow GetCatalogs")
-    schemas = do_command(client, options, command_get_db_schemas())
-    expect_offset_aligned(schemas, "pyarrow GetDbSchemas")
-    types = do_command(client, options, command_get_table_types())
-    expect_offset_aligned(types, "pyarrow GetTableTypes")
-    tables = do_command(client, options, command_get_tables(include_schema=False))
-    expect_offset_aligned(tables, "pyarrow GetTables")
+    include_cmd = command_get_tables(include_schema=True, table_name="nested_t")
+    include_raw = do_command(client, raw, include_cmd)
+    if include_raw.num_rows < 1:
+        include_cmd = command_get_tables(include_schema=True)
+        include_raw = do_command(client, raw, include_cmd)
+    expect_offset_misaligned(include_raw, "pyarrow GetTables include_schema (no ensure_alignment)")
 
-    include = do_command(client, options, command_get_tables(include_schema=True, table_name="nested_t"))
-    if include.num_rows < 1:
-        include = do_command(client, options, command_get_tables(include_schema=True))
-    expect_offset_aligned(include, "pyarrow GetTables include_schema")
-    if "table_name" in include.column_names:
-        names = include.column("table_name").to_pylist()
+    include_ok = do_command(client, aligned, include_cmd)
+    expect_offset_aligned(include_ok, "pyarrow GetTables include_schema (ensure_alignment)")
+
+    for label, cmd in (
+        ("pyarrow GetCatalogs", command_get_catalogs()),
+        ("pyarrow GetDbSchemas", command_get_db_schemas()),
+        ("pyarrow GetTableTypes", command_get_table_types()),
+        ("pyarrow GetTables", command_get_tables(include_schema=False)),
+    ):
+        expect_offset_aligned(do_command(client, aligned, cmd), f"{label} (ensure_alignment)")
+
+    if "table_name" in include_ok.column_names:
+        names = include_ok.column("table_name").to_pylist()
         if "nested_t" in names:
-            q = do_command(client, options, command_statement_query("SELECT lst, st, mp FROM nested_t"))
+            q = do_command(client, aligned, command_statement_query("SELECT lst, st, mp FROM nested_t"))
             if q.num_rows < 1:
                 _fail("nested_t query returned no rows")
             print(f"ok pyarrow nested query rows={q.num_rows}")
 
     run_adbc(args.url, args.sandbox, args.key, args.caller)
-    print("ok pyarrow/ADBC metadata alignment")
+    print("ok pyarrow documents metadata alignment (client ensure_alignment required)")
     return 0
 
 

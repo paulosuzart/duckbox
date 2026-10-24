@@ -607,16 +607,10 @@ MakeAlignedBatchStream(const std::shared_ptr<::arrow::RecordBatch> &batch) {
                                             batch, /*alignment=*/8, ::arrow::default_memory_pool()));
     ARROW_ASSIGN_OR_RAISE(auto reader,
                           ::arrow::RecordBatchReader::Make({aligned}, aligned->schema()));
-    // LZ4-compress metadata bodies so Flight clients (pyarrow/ADBC/Go) that
-    // zero-copy gRPC frames decompress into allocator-aligned buffers. Query
-    // DoGet stays uncompressed via StreamIpc.
-    auto opts = ::arrow::ipc::IpcWriteOptions::Defaults();
-    opts.alignment = 8;
-    ARROW_ASSIGN_OR_RAISE(opts.codec,
-                          ::arrow::util::Codec::Create(::arrow::Compression::LZ4_FRAME));
-    auto inner = std::make_unique<RecordBatchStream>(reader, opts);
-    return std::unique_ptr<FlightDataStream>(
-        std::make_unique<AlignedFlightDataStream>(std::move(inner)));
+    // Align payload bodies before gRPC. That is not a wire guarantee:
+    // zero-copy gRPC can still deliver String/Binary offsets at align=1.
+    // Query DoGet stays on StreamIpc. Clients must set ensure_alignment.
+    return MakeAlignedBatchStream(reader);
 }
 
 ::arrow::Result<std::unique_ptr<FlightDataStream>>

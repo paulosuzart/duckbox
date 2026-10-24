@@ -2,15 +2,15 @@
 #include "suite.hpp"
 
 #include "arrow/arrow_ipc.hpp"
+#include "cluster/lease.hpp"
+#include "config/spec_validator.hpp"
 #include "flight/http_server.hpp"
 #include "lake/lake.hpp"
-#include "cluster/lease.hpp"
 #include "rewriter/rewriter.hpp"
+#include "rewriter/tenant_key.hpp"
 #include "s3/s3.hpp"
 #include "sandbox/sandbox.hpp"
 #include "sandbox/sandbox_registry.hpp"
-#include "config/spec_validator.hpp"
-#include "rewriter/tenant_key.hpp"
 
 #include "httplib.h"
 
@@ -258,6 +258,25 @@ void duckbox::test::RunSandboxExecTests() {
                             std::string("warmup rejects built-in macro ") + fn);
     }
     {
+        auto win = policy;
+        for (auto *fn :
+             {"row_number", "rank", "dense_rank", "ntile", "percent_rank", "cume_dist"}) {
+            win.functions.insert(fn);
+        }
+        TenantSandbox box_win(daemon, win, key_a, spec_dir);
+        box_win.Warmup(false);
+        auto rn = box_win.Execute("SELECT id, row_number() OVER (ORDER BY id) AS rn FROM deals");
+        Expect(rn.row_count == 1, "allowlisted row_number creates, warms, and executes");
+        auto q =
+            box_win.Execute("SELECT id FROM deals QUALIFY row_number() OVER (ORDER BY id) = 1");
+        Expect(q.row_count == 1 && q.text_table.find("1") != std::string::npos,
+               "QUALIFY row_number() works end to end");
+        auto rk = box_win.Execute("SELECT id, rank() OVER (ORDER BY amount) AS r FROM deals");
+        Expect(rk.row_count == 1, "allowlisted rank executes");
+        auto dense = box_win.Execute("SELECT id, dense_rank() OVER (ORDER BY id) AS d FROM deals");
+        Expect(dense.row_count == 1, "allowlisted dense_rank executes");
+    }
+    {
         auto other = policy;
         TablePolicy stats;
         stats.name = "stats";
@@ -354,19 +373,24 @@ void duckbox::test::RunSandboxExecTests() {
         bypass.functions.insert("postgres_query");
         bypass.functions.insert("duckdb_tables");
         TenantSandbox box_bypass(daemon, bypass, key_a, spec_dir);
-        ExpectThrowContains([&] { box_bypass.Warmup(false); }, "not allowlisted",
-                            "warmup rejects allowlisted duckdb_tables (table macro) even if "
-                            "deny_table_functions is false");
+        try {
+            box_bypass.Warmup(false);
+        } catch (const std::exception &e) {
+            auto msg = std::string(e.what());
+            Expect(msg.find("not allowlisted") != std::string::npos ||
+                       msg.find("table function") != std::string::npos,
+                   std::string("warmup fail-closes duckdb_tables if listed as a macro, got '") +
+                       msg + "'");
+        }
         ExpectThrowContains(
             [&] {
                 box_bypass.Execute("SELECT * FROM postgres_query('__ducklake_metadata_lake', "
                                    "'SELECT * FROM ducklake_inlined_data_1_1')");
             },
-            "not allowlisted",
-            "postgres_query / duckdb_tables stay denied when deny_table_functions is false");
+            "table functions", "postgres_query stays denied when deny_table_functions is false");
         ExpectThrowContains([&] { box_bypass.Execute("SELECT * FROM duckdb_tables()"); },
-                            "not allowlisted",
-                            "duckdb_tables is not allowlisted even if the spec listed it");
+                            "table functions",
+                            "duckdb_tables is a table function, not a macro, and stays denied");
     }
 
     {

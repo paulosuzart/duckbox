@@ -4,9 +4,9 @@
 // a sandbox on first warmup for a policy hash, then the daemon registry caches
 // the result. `duckbox validate --spec` uses a throwaway sandbox.
 
-#include "node/daemon_config.hpp"
 #include "common/duckdb_layer.hpp"
 #include "config/policy.hpp"
+#include "node/daemon_config.hpp"
 
 #include <string>
 #include <unordered_set>
@@ -28,9 +28,11 @@ class SpecValidator : public ISpecValidator {
     std::vector<common::SpecIssue>
     ValidateStatic(const SandboxSpec &spec) const override; // all errors, field paths
     std::vector<common::SpecIssue> ValidateStatic(const SandboxSpec &spec,
-                                          const node::DaemonConfig &daemon) const;
-    std::vector<common::SpecIssue> ValidateLake(SandboxSpec &spec, ddb::Connection &con) const override;
-    void ThrowIf(const std::vector<common::SpecIssue> &issues) const; // common::SpecError if nonempty
+                                                  const node::DaemonConfig &daemon) const;
+    std::vector<common::SpecIssue> ValidateLake(SandboxSpec &spec,
+                                                ddb::Connection &con) const override;
+    void
+    ThrowIf(const std::vector<common::SpecIssue> &issues) const; // common::SpecError if nonempty
 };
 
 int RunValidateCommand(const node::DaemonConfig &daemon,
@@ -52,6 +54,8 @@ void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string
 // Catalog-API check after lake attach. Looks up each allowlisted name as
 // MACRO_ENTRY / TABLE_MACRO_ENTRY in every attached catalog and schema.
 // Does not run SQL through search_path (so a duckdb_functions() shadow cannot hide macros).
+// Entries whose catalog type is not a scalar/table macro (window and aggregate
+// functions that DuckDB 2.0 may return from the same scan) are ignored.
 void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con);
 
 } // namespace config

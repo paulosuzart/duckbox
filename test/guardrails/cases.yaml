@@ -269,6 +269,36 @@ cases:
     expect: deny
     reason: window function not allowlisted
 
+  - id: spec_window_functions_allowlisted
+    sql: "SELECT 1"
+    expect: allow
+    stage: spec
+    extra_functions:
+      - row_number
+      - rank
+      - dense_rank
+      - ntile
+      - percent_rank
+      - cume_dist
+
+  - id: window_row_number_allowlisted
+    sql: "SELECT row_number() OVER (ORDER BY id) FROM deals"
+    expect: allow
+    extra_functions:
+      - row_number
+      - rank
+      - dense_rank
+      - ntile
+      - percent_rank
+      - cume_dist
+
+  - id: qualify_row_number_allowlisted
+    sql: "SELECT id FROM deals QUALIFY row_number() OVER (ORDER BY id) = 1"
+    expect: allow
+    extra_functions:
+      - row_number
+      - rank
+
   - id: attach_user_sql
     sql: "ATTACH 'foo.db' AS x"
     expect: deny
