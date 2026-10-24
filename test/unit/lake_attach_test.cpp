@@ -140,6 +140,52 @@ void duckbox::test::RunLakeAttachSecretTests() {
                    .find("note") != std::string::npos,
            "SanitizeClientError keeps binder diagnostics");
 
+    auto doubled_eq = RedactSecretText("password=\"fa\"\"ke-quoted\"");
+    Expect(doubled_eq.find("ke-quoted") == std::string::npos,
+           "RedactSecretText strips doubled double-quotes in password=");
+    auto sql_esc = RedactSecretText("CREATE SECRET s (SECRET 'FA\\'KE-sql')");
+    Expect(sql_esc.find("KE-sql") == std::string::npos,
+           "RedactSecretText strips libpq escape inside SECRET '…'");
+    auto unclosed = RedactSecretText("password='unclosed-secret-value");
+    Expect(unclosed.find("unclosed-secret-value") == std::string::npos,
+           "RedactSecretText redacts an unclosed quoted password");
+    Expect(RedactSecretText("postgresql://duckbox@127.0.0.1/lake").find("duckbox@") !=
+               std::string::npos,
+           "URI without a password is left intact");
+
+    SecretRedactionContext dup;
+    AddSecretValue(dup, "same-secret-value");
+    AddSecretValue(dup, "same-secret-value");
+    AddSecretValue(dup, "ab");
+    Expect(dup.exact_values.size() == 1, "AddSecretValue de-duplicates and skips short values");
+
+    auto uri_ctx = CollectSecretRedactionContext(
+        "postgresql://duckbox:uri-collect-secret@127.0.0.1:5432/lake", "", "");
+    bool has_uri_pw = false;
+    for (const auto &v : uri_ctx.exact_values) {
+        if (v == "uri-collect-secret") {
+            has_uri_pw = true;
+        }
+    }
+    Expect(has_uri_pw, "CollectSecretRedactionContext extracts URI userinfo password");
+
+    auto quoted_ctx =
+        CollectSecretRedactionContext("dbname=lake password='quoted-collect-pw'", "", "");
+    bool has_quoted_pw = false;
+    for (const auto &v : quoted_ctx.exact_values) {
+        if (v == "quoted-collect-pw") {
+            has_quoted_pw = true;
+        }
+    }
+    Expect(has_quoted_pw, "CollectSecretRedactionContext extracts quoted password=");
+
+    SandboxSpec mem;
+    mem.lake.kind = LakeKind::Memory;
+    EnvFileSecretResolver empty_secrets;
+    auto from_mem = CollectSecretRedactionContextFromSpec(mem, empty_secrets);
+    Expect(from_mem.exact_values.empty(),
+           "CollectSecretRedactionContextFromSpec is empty for a memory lake");
+
     auto collected = CollectSecretRedactionContext(
         "ducklake:postgres:dbname=lake host=pg password=collected-secret-1", "AKIACOLLECTEDKEY",
         "collected-s3-secret");
