@@ -51,11 +51,12 @@ std::string MacroNotAllowlistedMessage(const std::string &name);
 bool IsAllowlistedMacroException(const std::string &name);
 // CREATE MACRO / CREATE TEMP MACRO names in trusted SQL (lake bootstrap).
 void CollectCreatedMacros(const std::string &sql, std::unordered_set<std::string> &out);
-// Catalog-API check after lake attach. Looks up each allowlisted name as
-// MACRO_ENTRY / TABLE_MACRO_ENTRY in every attached catalog and schema.
-// Does not run SQL through search_path (so a duckdb_functions() shadow cannot hide macros).
-// Entries whose catalog type is not a scalar/table macro (window and aggregate
-// functions that DuckDB 2.0 may return from the same scan) are ignored.
+// Catalog-API check after lake attach. Looks up each allowlisted name in every
+// attached catalog and schema (macro, table macro, aggregate, scalar, table
+// function). Does not run SQL through search_path (so a duckdb_functions()
+// shadow cannot hide macros). WINDOW_FUNCTION_ENTRY is ignored (B1). Every
+// other catalog hit that is not a trusted system exception is rejected with
+// the 1.5.6 message "macro is not allowlisted: <name>".
 void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con);
 
 } // namespace config

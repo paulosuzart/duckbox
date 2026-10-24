@@ -245,15 +245,6 @@ private:
 	node::ListenerPlane plane_ = node::ListenerPlane::Public;
 };
 
-// Best-effort 8-byte alignment of Flight payload body buffers *before*
-// gRPC. Zero-copy receive can still hand clients String/Binary offsets
-// at align=1. Third-party readers (pyarrow, ADBC, JDBC) must set
-// IpcReadOptions::ensure_alignment (DataTypeSpecific) on their reader.
-::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>>
-MakeAlignedBatchStream(const std::shared_ptr<::arrow::RecordBatch> &batch);
-::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>>
-MakeAlignedBatchStream(const std::shared_ptr<::arrow::RecordBatchReader> &reader);
-
 } // namespace flight
 
 } // namespace duckbox

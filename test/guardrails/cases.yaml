@@ -480,6 +480,30 @@ cases:
     expect: deny
     reason: not allowlisted
 
+  - id: spec_string_agg_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: "macro is not allowlisted: string_agg"
+    stage: spec
+    extra_functions:
+      - string_agg
+
+  - id: spec_concat_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: "macro is not allowlisted: concat"
+    stage: spec
+    extra_functions:
+      - concat
+
+  - id: spec_read_csv_in_functions
+    sql: "SELECT 1"
+    expect: deny
+    reason: never allowlisted
+    stage: spec
+    extra_functions:
+      - read_csv
+
   - id: spec_pg_get_viewdef_in_functions
     sql: "SELECT 1"
     expect: deny

@@ -553,12 +553,12 @@ void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con) {
         started = true;
     }
     try {
-        // DuckDB 2.0 GetAllEntries(MACRO_ENTRY) / GetEntry can also yield
-        // WINDOW_FUNCTION_ENTRY (rank, row_number, …) and aggregates. Those
-        // are not macros; only scalar/table macros are rejected.
+        // DuckDB 2.0 GetAllEntries(MACRO_ENTRY) / GetEntry also yields window,
+        // aggregate, scalar, and table-function entries. Keep the 1.5.6 reject
+        // for those non-window names (string_agg, concat, duckdb_tables, …).
+        // WINDOW_FUNCTION_ENTRY is the B1 exception (row_number, rank, …).
         auto reject_if_listed = [&](const ddb::CatalogEntry &entry) {
-            if (entry.type != ddb::CatalogType::MACRO_ENTRY &&
-                entry.type != ddb::CatalogType::TABLE_MACRO_ENTRY) {
+            if (entry.type == ddb::CatalogType::WINDOW_FUNCTION_ENTRY) {
                 return;
             }
             auto n = ddb::StringUtil::Lower(IdentName(entry.name));
@@ -573,12 +573,18 @@ void RejectAllowlistedMacros(const SandboxSpec &spec, ddb::Connection &con) {
             }
         }
         auto schemas = ddb::Catalog::GetAllSchemas(ctx);
+        static const ddb::CatalogType kLookup[] = {
+            ddb::CatalogType::MACRO_ENTRY,
+            ddb::CatalogType::TABLE_MACRO_ENTRY,
+            ddb::CatalogType::AGGREGATE_FUNCTION_ENTRY,
+            ddb::CatalogType::SCALAR_FUNCTION_ENTRY,
+            ddb::CatalogType::TABLE_FUNCTION_ENTRY,
+        };
         for (auto &fn : spec.functions) {
             for (auto &sref : schemas) {
                 auto &schema = sref.get();
                 auto txn = schema.GetCatalogTransaction(ctx);
-                for (auto type :
-                     {ddb::CatalogType::MACRO_ENTRY, ddb::CatalogType::TABLE_MACRO_ENTRY}) {
+                for (auto type : kLookup) {
                     if (auto found = schema.GetEntry(txn, type, ddb::Identifier(fn))) {
                         reject_if_listed(*found);
                     }

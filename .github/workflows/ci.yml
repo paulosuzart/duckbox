@@ -52,7 +52,13 @@ jobs:
           max-size: 500M
       - name: Build
         run: make build CXX=g++
+      - name: pyarrow (Flight SQL metadata alignment)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r examples/python/requirements.txt
       - name: Unit tests
+        env:
+          DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: ctest --test-dir build -L unit --output-on-failure
       - name: Guardrail tests
         run: ctest --test-dir build -L guardrails --output-on-failure
@@ -162,9 +168,14 @@ jobs:
           bash scripts/install_aws_sdk.sh
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
           cmake --build build --parallel
+      - name: Python deps
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r examples/python/requirements.txt
       - name: Tests (README step 3)
         env:
           DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
+          DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: |
           ctest --test-dir build --output-on-failure
           make validate
@@ -177,10 +188,6 @@ jobs:
           DUCKBOX_S3_SECRET: rustfsadmin
           DUCKBOX_OIDC_ENDPOINT: 127.0.0.1:18088
         run: ./build/duckbox_s3_sts_tests
-      - name: Python deps
-        run: |
-          python3 -m venv .venv
-          .venv/bin/pip install -r examples/python/requirements.txt
       - name: Seed DuckLake
         env:
           DUCKBOX_S3_KEY: rustfsadmin

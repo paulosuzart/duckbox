@@ -192,32 +192,9 @@ std::shared_ptr<::arrow::Table> TicketTable(::arrow::flight::FlightClient &raw,
     return *tbl;
 }
 
-void ExpectServerPayloadAligned(const std::shared_ptr<::arrow::RecordBatch> &batch,
-                                const std::string &msg) {
-    auto stream_res = duckbox::flight::MakeAlignedBatchStream(batch);
-    duckbox::test::Expect(stream_res.ok(),
-                          msg + " MakeAlignedBatchStream: " + stream_res.status().ToString());
-    if (!stream_res.ok()) {
-        return;
-    }
-    auto next = (*stream_res)->Next();
-    duckbox::test::Expect(next.ok(), msg + " payload Next: " + next.status().ToString());
-    if (!next.ok()) {
-        return;
-    }
-    for (const auto &buf : next->ipc_message.body_buffers) {
-        if (!buf || !buf->data() || buf->size() == 0) {
-            continue;
-        }
-        duckbox::test::Expect((reinterpret_cast<uintptr_t>(buf->data()) % 8) == 0,
-                              msg + " server-sent body buffer is 8-byte aligned");
-    }
-}
-
 void ExpectMetadataStreams(::arrow::flight::sql::FlightSqlClient &sql,
                            ::arrow::flight::FlightClient &raw,
                            const ::arrow::flight::FlightCallOptions &opt) {
-    using SqlSchema = ::arrow::flight::sql::SqlSchema;
     {
         auto info = sql.GetCatalogs(opt);
         duckbox::test::Expect(info.ok(), "GetCatalogs: " + info.status().ToString());
@@ -225,12 +202,6 @@ void ExpectMetadataStreams(::arrow::flight::sql::FlightSqlClient &sql,
             auto tbl = TicketTable(raw, opt, **info, "GetCatalogs");
             duckbox::test::Expect(tbl && tbl->num_rows() >= 1, "GetCatalogs has a catalog");
         }
-        ::arrow::StringBuilder b;
-        duckbox::test::Expect(b.Append("lake").ok(), "payload catalogs append");
-        std::shared_ptr<::arrow::Array> arr;
-        duckbox::test::Expect(b.Finish(&arr).ok(), "payload catalogs finish");
-        ExpectServerPayloadAligned(
-            ::arrow::RecordBatch::Make(SqlSchema::GetCatalogsSchema(), 1, {arr}), "GetCatalogs");
     }
     {
         auto info = sql.GetDbSchemas(opt, nullptr, nullptr);
@@ -238,13 +209,6 @@ void ExpectMetadataStreams(::arrow::flight::sql::FlightSqlClient &sql,
         if (info.ok()) {
             (void)TicketTable(raw, opt, **info, "GetDbSchemas");
         }
-        ::arrow::StringBuilder cat, sch;
-        duckbox::test::Expect(cat.Append("lake").ok() && sch.Append("main").ok(),
-                              "payload schemas append");
-        std::shared_ptr<::arrow::Array> a, b;
-        duckbox::test::Expect(cat.Finish(&a).ok() && sch.Finish(&b).ok(), "payload schemas finish");
-        ExpectServerPayloadAligned(
-            ::arrow::RecordBatch::Make(SqlSchema::GetDbSchemasSchema(), 1, {a, b}), "GetDbSchemas");
     }
     {
         auto info = sql.GetTables(opt, nullptr, nullptr, nullptr, false, nullptr);
@@ -259,29 +223,6 @@ void ExpectMetadataStreams(::arrow::flight::sql::FlightSqlClient &sql,
         if (info.ok()) {
             (void)TicketTable(raw, opt, **info, "GetTableTypes");
         }
-        ::arrow::StringBuilder b;
-        duckbox::test::Expect(b.Append("TABLE").ok(), "payload table types append");
-        std::shared_ptr<::arrow::Array> arr;
-        duckbox::test::Expect(b.Finish(&arr).ok(), "payload table types finish");
-        ExpectServerPayloadAligned(
-            ::arrow::RecordBatch::Make(SqlSchema::GetTableTypesSchema(), 1, {arr}),
-            "GetTableTypes");
-    }
-    {
-        ::arrow::StringBuilder cat, db, name, typ;
-        ::arrow::BinaryBuilder schb;
-        duckbox::test::Expect(cat.Append("lake").ok() && db.Append("main").ok() &&
-                                  name.Append("nested_t").ok() && typ.Append("TABLE").ok() &&
-                                  schb.Append("schema").ok(),
-                              "payload include_schema append");
-        std::shared_ptr<::arrow::Array> a, b, n, t, s;
-        duckbox::test::Expect(cat.Finish(&a).ok() && db.Finish(&b).ok() && name.Finish(&n).ok() &&
-                                  typ.Finish(&t).ok() && schb.Finish(&s).ok(),
-                              "payload include_schema finish");
-        ExpectServerPayloadAligned(
-            ::arrow::RecordBatch::Make(SqlSchema::GetTablesSchemaWithIncludedSchema(), 1,
-                                       {a, b, n, t, s}),
-            "GetTables include_schema");
     }
 }
 
@@ -290,6 +231,11 @@ void MaybeRunPyarrowMetadata(int port, const std::string &sandbox) {
     std::string py = py_env && *py_env ? py_env : "python3";
     std::string probe = py + " -c \"import pyarrow.flight, adbc_driver_flightsql\"";
     if (std::system(probe.c_str()) != 0) {
+        if (std::getenv("GITHUB_ACTIONS")) {
+            duckbox::test::Expect(false, "pyarrow and adbc_driver_flightsql are required in CI "
+                                         "(set DUCKBOX_PYTHON to a venv with "
+                                         "examples/python/requirements.txt)");
+        }
         return;
     }
     std::string script =
@@ -298,8 +244,7 @@ void MaybeRunPyarrowMetadata(int port, const std::string &sandbox) {
     cmd << py << " " << script << " --url grpc://127.0.0.1:" << port << " --sandbox " << sandbox
         << " --key tenant_21:user_sergio --caller analyst-svc";
     duckbox::test::Expect(std::system(cmd.str().c_str()) == 0,
-                          "pyarrow documents GetTables offset alignment with/without "
-                          "ensure_alignment");
+                          "pyarrow GetTables offsets are aligned with ensure_alignment");
 }
 
 std::shared_ptr<::arrow::Schema> IncludedTableSchema(::arrow::flight::sql::FlightSqlClient &sql,

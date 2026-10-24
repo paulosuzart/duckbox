@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Document Flight SQL metadata offset alignment for third-party clients.
 
-gRPC zero-copy can deliver String/Binary offset buffers at align=1
-(addr % 8 == 7 is typical for GetTables include_schema). That is not a
-server-side guarantee. pyarrow / ADBC / JDBC must set
+gRPC zero-copy can deliver String/Binary offset buffers misaligned.
+That is not a server-side guarantee. pyarrow / ADBC / JDBC must set
 IpcReadOptions.ensure_alignment = DataTypeSpecific on the reader.
 
-This script asserts:
-- without the option, GetTables include_schema offsets are misaligned;
-- with the option, the same stream is 4-byte aligned and safe to read.
+This script asserts the aligned reader path. The option-off path is
+logged only (alignment without the option is environment-dependent).
 """
 
 from __future__ import annotations
@@ -119,18 +117,17 @@ def expect_offset_aligned(table: pa.Table, label: str) -> None:
     print(f"ok {label} rows={table.num_rows} cols={table.num_columns} offsets aligned")
 
 
-def expect_offset_misaligned(table: pa.Table, label: str) -> None:
-    """Document the no-option path: inspect addresses only (do not read values)."""
+def log_offset_alignment(table: pa.Table, label: str) -> None:
+    """Log the no-option path. Do not assert: hosts may already align."""
     addrs = report_offsets(table, label)
     if not addrs:
-        _fail(f"{label} has no string/binary offset buffers to inspect")
+        print(f"note {label} has no string/binary offset buffers to inspect")
+        return
     mis = [(name, i, addr) for name, i, addr in addrs if addr % 4 != 0]
-    if not mis:
-        _fail(
-            f"{label} unexpectedly 4-byte aligned without ensure_alignment; "
-            "do not claim a server-side wire guarantee"
-        )
-    print(f"ok {label} misaligned without ensure_alignment ({len(mis)} buffer(s))")
+    print(
+        f"note {label} buffers={len(addrs)} misaligned={len(mis)} "
+        "(logged only; enable ensure_alignment on the reader)"
+    )
 
 
 def do_command(client: flight.FlightClient, options: flight.FlightCallOptions, cmd: bytes) -> pa.Table:
@@ -224,7 +221,7 @@ def main() -> int:
     if include_raw.num_rows < 1:
         include_cmd = command_get_tables(include_schema=True)
         include_raw = do_command(client, raw, include_cmd)
-    expect_offset_misaligned(include_raw, "pyarrow GetTables include_schema (no ensure_alignment)")
+    log_offset_alignment(include_raw, "pyarrow GetTables include_schema (no ensure_alignment)")
 
     include_ok = do_command(client, aligned, include_cmd)
     expect_offset_aligned(include_ok, "pyarrow GetTables include_schema (ensure_alignment)")

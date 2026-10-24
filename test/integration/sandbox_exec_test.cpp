@@ -277,6 +277,21 @@ void duckbox::test::RunSandboxExecTests() {
         Expect(dense.row_count == 1, "allowlisted dense_rank executes");
     }
     {
+        auto agg = policy;
+        agg.functions.insert("string_agg");
+        TenantSandbox box_agg(daemon, agg, key_a, spec_dir);
+        ExpectThrowContains([&] { box_agg.Warmup(false); },
+                            MacroNotAllowlistedMessage("string_agg"),
+                            "warmup rejects aggregate string_agg (1.5.6 contract)");
+    }
+    {
+        auto sc = policy;
+        sc.functions.insert("concat");
+        TenantSandbox box_sc(daemon, sc, key_a, spec_dir);
+        ExpectThrowContains([&] { box_sc.Warmup(false); }, MacroNotAllowlistedMessage("concat"),
+                            "warmup rejects scalar concat (1.5.6 contract)");
+    }
+    {
         auto other = policy;
         TablePolicy stats;
         stats.name = "stats";
@@ -373,24 +388,18 @@ void duckbox::test::RunSandboxExecTests() {
         bypass.functions.insert("postgres_query");
         bypass.functions.insert("duckdb_tables");
         TenantSandbox box_bypass(daemon, bypass, key_a, spec_dir);
-        try {
-            box_bypass.Warmup(false);
-        } catch (const std::exception &e) {
-            auto msg = std::string(e.what());
-            Expect(msg.find("not allowlisted") != std::string::npos ||
-                       msg.find("table function") != std::string::npos,
-                   std::string("warmup fail-closes duckdb_tables if listed as a macro, got '") +
-                       msg + "'");
-        }
+        ExpectThrowContains([&] { box_bypass.Warmup(false); }, "not allowlisted",
+                            "warmup rejects duckdb_tables (table function) as not allowlisted");
         ExpectThrowContains(
             [&] {
                 box_bypass.Execute("SELECT * FROM postgres_query('__ducklake_metadata_lake', "
                                    "'SELECT * FROM ducklake_inlined_data_1_1')");
             },
-            "table functions", "postgres_query stays denied when deny_table_functions is false");
+            "not allowlisted",
+            "postgres_query stays denied: warmup fail-closes listed table functions");
         ExpectThrowContains([&] { box_bypass.Execute("SELECT * FROM duckdb_tables()"); },
-                            "table functions",
-                            "duckdb_tables is a table function, not a macro, and stays denied");
+                            "not allowlisted",
+                            "duckdb_tables stays denied at warmup as not allowlisted");
     }
 
     {

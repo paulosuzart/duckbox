@@ -18,8 +18,6 @@
 #include <arrow/ipc/options.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
-#include <arrow/util/align_util.h>
-#include <arrow/util/compression.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
@@ -189,56 +187,6 @@ std::string CreateUpdateResultJson(const SandboxRecord &rec, const char *action)
     ARROW_ASSIGN_OR_RAISE(auto info, FlightInfo::Make(*schema, desc, endpoints, -1, -1));
     return std::make_unique<FlightInfo>(std::move(info));
 }
-
-::arrow::Result<std::shared_ptr<::arrow::Buffer>>
-CopyAligned(const std::shared_ptr<::arrow::Buffer> &buf) {
-    if (!buf) {
-        return buf;
-    }
-    ARROW_ASSIGN_OR_RAISE(auto out, ::arrow::AllocateBuffer(buf->size()));
-    if (buf->size() > 0 && buf->data()) {
-        std::memcpy(out->mutable_data(), buf->data(), static_cast<size_t>(buf->size()));
-    }
-    return std::shared_ptr<::arrow::Buffer>(std::move(out));
-}
-
-::arrow::Result<FlightPayload> AlignFlightPayload(FlightPayload payload) {
-    if (payload.ipc_message.metadata) {
-        ARROW_ASSIGN_OR_RAISE(payload.ipc_message.metadata,
-                              CopyAligned(payload.ipc_message.metadata));
-    }
-    for (auto &buf : payload.ipc_message.body_buffers) {
-        ARROW_ASSIGN_OR_RAISE(buf, CopyAligned(buf));
-    }
-    return payload;
-}
-
-class AlignedFlightDataStream : public FlightDataStream {
-  public:
-    explicit AlignedFlightDataStream(std::unique_ptr<RecordBatchStream> inner)
-        : inner_(std::move(inner)) {}
-
-    std::shared_ptr<::arrow::Schema> schema() override {
-        return inner_->schema();
-    }
-    ::arrow::Result<FlightPayload> GetSchemaPayload() override {
-        ARROW_ASSIGN_OR_RAISE(auto p, inner_->GetSchemaPayload());
-        return AlignFlightPayload(std::move(p));
-    }
-    ::arrow::Result<FlightPayload> Next() override {
-        ARROW_ASSIGN_OR_RAISE(auto p, inner_->Next());
-        if (!p.ipc_message.metadata) {
-            return p;
-        }
-        return AlignFlightPayload(std::move(p));
-    }
-    Status Close() override {
-        return inner_->Close();
-    }
-
-  private:
-    std::unique_ptr<RecordBatchStream> inner_;
-};
 
 } // namespace
 
@@ -593,28 +541,10 @@ DuckboxFlightSqlServer::MetaInfo(const FlightDescriptor &descriptor,
 }
 
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
-MakeAlignedBatchStream(const std::shared_ptr<::arrow::RecordBatchReader> &reader) {
-    auto opts = ::arrow::ipc::IpcWriteOptions::Defaults();
-    opts.alignment = 8;
-    auto inner = std::make_unique<RecordBatchStream>(reader, opts);
-    return std::unique_ptr<FlightDataStream>(
-        std::make_unique<AlignedFlightDataStream>(std::move(inner)));
-}
-
-::arrow::Result<std::unique_ptr<FlightDataStream>>
-MakeAlignedBatchStream(const std::shared_ptr<::arrow::RecordBatch> &batch) {
-    ARROW_ASSIGN_OR_RAISE(auto aligned, ::arrow::util::EnsureAlignment(
-                                            batch, /*alignment=*/8, ::arrow::default_memory_pool()));
-    ARROW_ASSIGN_OR_RAISE(auto reader,
-                          ::arrow::RecordBatchReader::Make({aligned}, aligned->schema()));
-    // Align payload bodies before gRPC. That is not a wire guarantee:
-    // zero-copy gRPC can still deliver String/Binary offsets at align=1.
-    // Query DoGet stays on StreamIpc. Clients must set ensure_alignment.
-    return MakeAlignedBatchStream(reader);
-}
-
-::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::StreamIpc(const std::vector<uint8_t> &ipc) const {
+    // Own the IPC blob so the reader outlives this call. Decoded batches are
+    // streamed as-is (no per-buffer re-encode). Clients that need aligned
+    // String/Binary offsets set IpcReadOptions::ensure_alignment.
     ARROW_ASSIGN_OR_RAISE(auto buf, ::arrow::AllocateBuffer(static_cast<int64_t>(ipc.size())));
     if (!ipc.empty()) {
         std::memcpy(buf->mutable_data(), ipc.data(), ipc.size());
@@ -622,12 +552,13 @@ DuckboxFlightSqlServer::StreamIpc(const std::vector<uint8_t> &ipc) const {
     std::shared_ptr<::arrow::Buffer> owned(std::move(buf));
     auto reader = std::make_shared<::arrow::io::BufferReader>(owned);
     ARROW_ASSIGN_OR_RAISE(auto br, ::arrow::ipc::RecordBatchStreamReader::Open(reader));
-    return MakeAlignedBatchStream(br);
+    return std::make_unique<RecordBatchStream>(br);
 }
 
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::StreamBatch(const std::shared_ptr<::arrow::RecordBatch> &batch) const {
-    return MakeAlignedBatchStream(batch);
+    ARROW_ASSIGN_OR_RAISE(auto reader, ::arrow::RecordBatchReader::Make({batch}, batch->schema()));
+    return std::make_unique<RecordBatchStream>(reader);
 }
 
 ::arrow::Result<std::unique_ptr<FlightInfo>>

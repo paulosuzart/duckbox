@@ -1,6 +1,7 @@
 #include "check.hpp"
 #include "suite.hpp"
 
+#include "common/duckdb_layer.hpp"
 #include "common/error.hpp"
 #include "config/policy.hpp"
 #include "config/spec_validator.hpp"
@@ -400,7 +401,7 @@ void duckbox::test::RunValidatorTests() {
             win.functions.insert(fn);
         }
         Expect(validator.ValidateStatic(win).empty(),
-               "ValidateStatic accepts window functions on the functions list");
+               "ValidateStatic accepts window functions on the functions list (B1)");
         ddb::DuckDB db(nullptr);
         ddb::Connection con(db);
         try {
@@ -434,6 +435,46 @@ void duckbox::test::RunValidatorTests() {
         } catch (const PolicyError &e) {
             Expect(std::string(e.what()) == MacroNotAllowlistedMessage("user_win"),
                    "unallowlisted user macro is still rejected");
+        }
+    }
+    {
+        // N1: 1.5.6 rejected these names when they appeared in the macro scan.
+        // DuckDB 2.0 types them as aggregate / scalar / table function; still reject.
+        for (auto *fn : {"string_agg", "list", "approx_count_distinct"}) {
+            auto spec = loaded;
+            spec.functions.insert(fn);
+            Expect(has_path(validator.ValidateStatic(spec), "functions",
+                            MacroNotAllowlistedMessage(fn)),
+                   std::string("ValidateStatic rejects aggregate ") + fn);
+        }
+        for (auto *fn : {"concat", "regexp_matches"}) {
+            auto spec = loaded;
+            spec.functions.insert(fn);
+            Expect(has_path(validator.ValidateStatic(spec), "functions",
+                            MacroNotAllowlistedMessage(fn)),
+                   std::string("ValidateStatic rejects scalar ") + fn);
+        }
+        {
+            auto spec = loaded;
+            spec.functions.insert("read_csv");
+            auto iss = validator.ValidateStatic(spec);
+            Expect(has_path(iss, "functions", "never allowlisted") ||
+                       has_path(iss, "functions", MacroNotAllowlistedMessage("read_csv")),
+                   "ValidateStatic rejects table function read_csv");
+        }
+        {
+            ddb::DuckDB db(nullptr);
+            ddb::Connection con(db);
+            EnsureLinkedDuckDb();
+            auto spec = loaded;
+            spec.functions.insert("duckdb_tables");
+            try {
+                RejectAllowlistedMacros(spec, con);
+                Expect(false, "catalog lookup rejects table function duckdb_tables");
+            } catch (const PolicyError &e) {
+                Expect(std::string(e.what()) == MacroNotAllowlistedMessage("duckdb_tables"),
+                       "table function duckdb_tables uses the 1.5.6 macro message");
+            }
         }
     }
     {
