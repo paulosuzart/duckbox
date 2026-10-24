@@ -113,22 +113,6 @@ buffers should not SIGSEGV on this path. The server still does not guarantee
 Interface in place can fault. Dictionary-encoded and nested columns are
 printed as `<format>`.
 
-**`goose_init` / thread affinity.** A standalone goose program (`fn main`)
-compiles to C `main` → `gs_program_init` → `main_g` on the **same thread**.
-`gs_program_init` is process-global (`gs_program_initialized`). The runtime
-comment is: it starts on main's thread. TLS data stacks are `__thread`.
-
-`goose_init` is the **library-host** entry (`goose --header` plus `export fn`).
-Tutorial §19: generated exports are not thread-safe; call them from the
-`goose_init` thread. That is the constraint seen when goose was embedded
-inside the multi-threaded C++ server.
-
-This example is a single-threaded client: goose owns `main`, and every ADBC
-call runs on that thread. The documented affinity is satisfied. ADBC
-connections themselves are not concurrent-safe. `query.build` sets
-`main_thread_only = true`. A later UI that calls `export fn`s from worker
-threads would have to keep those calls on the init thread.
-
 **Auth / TLS.** Same as the Python ADBC helper: works with
 `auth.allow_insecure_dev`. Production bearer/JWT still needs the Flight
 `auth-token-bin` work (see issue #16).
@@ -155,10 +139,7 @@ What this example does *not* do, and what it would take:
    backend must load a spec, resolve secret refs, attach the lake, run
    bootstrap SQL, then `lock_configuration` — the same warmup `serve`
    already does.
-4. **Threading.** If goose remains the process `main` (CLI/UI), calling
-   into the core on that thread is fine. If the C++ server hosts goose
-   as a library, `goose_init` thread affinity returns.
-5. **Swap.** Add `shim/core_backend.c` (or `.cc` via the Makefile),
+4. **Swap.** Add `shim/core_backend.c` (or `.cc` via the Makefile),
    implement `dbx_connect` / `dbx_query` / cell accessors, and link
    `duckbox_core` instead of the Flight SQL driver. `duckbox.goose`
    stays the API.
