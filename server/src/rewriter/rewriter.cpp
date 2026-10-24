@@ -65,6 +65,9 @@ void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx);
 void RewriteSelectInPlace(ddb::SelectStatement &stmt, RewriteContext &ctx);
 ddb::unique_ptr<ddb::ParsedExpression> FilterBoundToKey(ddb::unique_ptr<ddb::ParsedExpression> expr,
                                                         const TablePolicy &spec);
+ddb::unique_ptr<ddb::TableRef> WrapProjectedTable(ddb::unique_ptr<ddb::TableRef> base,
+                                                  const TablePolicy &spec, const Policy &policy,
+                                                  ddb::unique_ptr<ddb::ParsedExpression> where);
 
 void RewriteExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr, RewriteContext &ctx) {
     if (!expr) {
@@ -254,24 +257,10 @@ bool WhereHasBoundFilters(const ddb::ParsedExpression *where, const TablePolicy 
     return true;
 }
 
-void EnforceVisibleColumns(ddb::SelectNode &sel, const TablePolicy &spec) {
-    if (spec.columns.empty() || sel.select_list.size() != 1 || !sel.select_list[0]) {
-        return;
-    }
-    auto &expr = *sel.select_list[0];
-    if (!ddb::StarExpression::IsStar(expr) && !ddb::StarExpression::IsColumns(expr)) {
-        return;
-    }
-    sel.select_list.clear();
-    for (auto &col : spec.columns) {
-        sel.select_list.push_back(ddb::make_uniq<ddb::ColumnRefExpression>(ddb::Identifier(col)));
-    }
-}
-
-// Already-rewritten SQL keeps filters on the raw table. Wrapping again would
-// project spec.columns first and then re-apply those predicates, which fails
-// when a filter column is hidden. Reuse the existing filter and only enforce
-// the visible projection.
+// Already-rewritten SQL keeps filters on the raw table. Wrapping again with
+// spec.filters on the same SELECT as spec.columns would re-bind those
+// predicates after the projection. Reuse the existing WHERE on the raw table
+// and always wrap a columns-only subquery so hidden columns cannot leak.
 bool TryReuseFilteredBaseTable(ddb::SelectNode &sel, RewriteContext &ctx) {
     if (!sel.from_table || sel.from_table->type != ddb::TableReferenceType::BASE_TABLE) {
         return false;
@@ -289,8 +278,8 @@ bool TryReuseFilteredBaseTable(ddb::SelectNode &sel, RewriteContext &ctx) {
     if (sel.from_table->alias.empty()) {
         sel.from_table->alias = base.Table();
     }
-    QualifyAllowlistedTable(base, *spec, *ctx.policy);
-    EnforceVisibleColumns(sel, *spec);
+    sel.from_table = WrapProjectedTable(std::move(sel.from_table), *spec, *ctx.policy,
+                                        std::move(sel.where_clause));
     return true;
 }
 
@@ -323,8 +312,9 @@ ddb::unique_ptr<ddb::ParsedExpression> FilterBoundToKey(ddb::unique_ptr<ddb::Par
     return expr;
 }
 
-ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> base,
-                                                 const TablePolicy &spec, const Policy &policy) {
+ddb::unique_ptr<ddb::TableRef> WrapProjectedTable(ddb::unique_ptr<ddb::TableRef> base,
+                                                  const TablePolicy &spec, const Policy &policy,
+                                                  ddb::unique_ptr<ddb::ParsedExpression> where) {
     auto inner_from = base->Copy();
     inner_from->alias = "";
     inner_from->column_name_alias.clear();
@@ -342,17 +332,6 @@ ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> 
         }
     }
     inner->from_table = std::move(inner_from);
-
-    ddb::unique_ptr<ddb::ParsedExpression> where;
-    for (auto &filter : spec.filters) {
-        auto expr = FilterBoundToKey(ParsePolicyFilter(filter), spec);
-        if (!where) {
-            where = std::move(expr);
-        } else {
-            where = ddb::make_uniq<ddb::ConjunctionExpression>(ddb::ExpressionType::CONJUNCTION_AND,
-                                                               std::move(where), std::move(expr));
-        }
-    }
     inner->where_clause = std::move(where);
 
     auto stmt = ddb::make_uniq<ddb::SelectStatement>();
@@ -365,6 +344,21 @@ ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> 
     auto sub = ddb::make_uniq<ddb::SubqueryRef>(std::move(stmt), ddb::Identifier(alias));
     sub->column_name_alias = base->column_name_alias;
     return sub;
+}
+
+ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> base,
+                                                 const TablePolicy &spec, const Policy &policy) {
+    ddb::unique_ptr<ddb::ParsedExpression> where;
+    for (auto &filter : spec.filters) {
+        auto expr = FilterBoundToKey(ParsePolicyFilter(filter), spec);
+        if (!where) {
+            where = std::move(expr);
+        } else {
+            where = ddb::make_uniq<ddb::ConjunctionExpression>(ddb::ExpressionType::CONJUNCTION_AND,
+                                                               std::move(where), std::move(expr));
+        }
+    }
+    return WrapProjectedTable(std::move(base), spec, policy, std::move(where));
 }
 
 void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx) {

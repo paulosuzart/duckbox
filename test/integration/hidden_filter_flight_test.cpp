@@ -231,6 +231,33 @@ void duckbox::test::RunHiddenFilterFlightTests() {
     }
 
     try {
+        auto extra = FetchSql(sql_client, *raw_client, q21,
+                              "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND "
+                              "_deleted = false");
+        Expect(extra->num_rows() == 1, "Flight star-plus-extra tenant 21 sees 1 row");
+        expect_hidden(*extra, "Flight star-plus-extra");
+        auto extra22 = FetchSql(sql_client, *raw_client, q22,
+                                "SELECT *, 1 AS one FROM deals WHERE tenant_id = 22 AND "
+                                "_deleted = false");
+        Expect(extra22->num_rows() == 2, "Flight star-plus-extra tenant 22 sees 2 rows");
+        expect_hidden(*extra22, "Flight star-plus-extra tenant 22");
+    } catch (const std::exception &e) {
+        Expect(false, std::string("Flight hidden-filter star-plus-extra: ") + e.what());
+    }
+
+    try {
+        auto leaked = FetchSql(sql_client, *raw_client, q21,
+                               "SELECT tenant_id FROM deals WHERE tenant_id = 21 AND "
+                               "_deleted = false");
+        Expect(false, "Flight SELECT tenant_id under the repeated predicate must be rejected");
+        (void)leaked;
+    } catch (const std::exception &e) {
+        std::string w = e.what();
+        Expect(w.find("tenant_id") != std::string::npos || w.find("column") != std::string::npos,
+               "Flight hidden tenant_id under the repeated predicate is not selectable");
+    }
+
+    try {
         auto sneak = FetchSql(sql_client, *raw_client, q21,
                               "SELECT id, title FROM deals WHERE tenant_id = 22");
         Expect(sneak->num_rows() == 0, "Flight tenant 21 cannot read tenant 22 via WHERE");

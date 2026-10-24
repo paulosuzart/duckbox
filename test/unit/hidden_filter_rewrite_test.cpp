@@ -68,8 +68,41 @@ void duckbox::test::RunHiddenFilterRewriteTests() {
     auto already = RewriteTwice("SELECT * FROM deals WHERE tenant_id = 21 AND _deleted = false",
                                 hidden, key_a, "already-filtered star");
     ExpectHiddenFilterWrap(already, 1, "already-filtered star keeps one tenant predicate");
-    Expect(!absl::StrContains(absl::AsciiStrToLower(already), "select *"),
-           "already-filtered star is projected to spec.columns");
+
+    auto star_extra =
+        RewriteTwice("SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND _deleted = false",
+                     hidden, key_a, "already-filtered star-plus-extra");
+    ExpectHiddenFilterWrap(star_extra, 1, "star-plus-extra keeps one tenant predicate");
+
+    auto hide_amt = HiddenAmountPolicy();
+    // tenant_id is also a visible column here, so wrap SELECT lists mention it
+    // again; count it as a predicate only when it is omitted from columns.
+    auto amt_extra = RewriteUserSql(
+        "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND _deleted = false", hide_amt, key_a);
+    Expect(amt_extra.find("21") != std::string::npos && HasI(amt_extra, "tenant_id") &&
+               HasI(amt_extra, "_deleted"),
+           "hidden-amount star-plus-extra keeps the bound filter wrap");
+    auto amt_extra2 = RewriteUserSql(amt_extra, hide_amt, key_a);
+    Expect(amt_extra2.find("21") != std::string::npos,
+           "hidden-amount star-plus-extra second rewrite keeps the bound tenant");
+    auto amt_named = RewriteUserSql(
+        "SELECT amount FROM deals WHERE tenant_id = 21 AND _deleted = false", hide_amt, key_a);
+    Expect(amt_named.find("21") != std::string::npos && HasI(amt_named, "tenant_id") &&
+               HasI(amt_named, "_deleted"),
+           "hidden-amount explicit column keeps the bound filter wrap");
+    auto amt_named2 = RewriteUserSql(amt_named, hide_amt, key_a);
+    Expect(amt_named2.find("21") != std::string::npos,
+           "hidden-amount explicit column second rewrite keeps the bound tenant");
+
+    auto hid_tid =
+        RewriteTwice("SELECT tenant_id FROM deals WHERE tenant_id = 21 AND _deleted = false",
+                     hidden, key_a, "hidden tenant_id under repeated predicate");
+    Expect(hid_tid.find("21") != std::string::npos,
+           "hidden tenant_id under repeated predicate keeps the bound tenant");
+    auto hid_del =
+        RewriteTwice("SELECT _deleted FROM deals WHERE tenant_id = 21 AND _deleted = false", hidden,
+                     key_a, "hidden _deleted under repeated predicate");
+    ExpectHiddenFilterWrap(hid_del, 1, "hidden _deleted under repeated predicate");
 
     auto cte = RewriteTwice("WITH d AS (SELECT id FROM deals) SELECT id FROM d", hidden, key_a,
                             "CTE hidden-filter");

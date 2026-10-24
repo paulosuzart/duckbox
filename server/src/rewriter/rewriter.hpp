@@ -4,11 +4,12 @@
 // become subqueries with spec filters; `:tenant_id` binds from the sandbox
 // key (never a spec literal). Filters run on the raw table so they may name
 // columns omitted from `columns`; the wrap projects only `columns`. A second
-// rewrite is a no-op on an already-filtered table so Flight+sandbox do not
-// apply the predicate twice. CTE bodies, subqueries, joins, set ops, and AT
-// clauses are walked the same way. Qualified names never match a CTE. Lake
-// views are allowlisted like tables and wrapped the same way. User `?` / `$n`
-// parameters are left for Flight SQL binding at execute.
+// rewrite keeps that bound filter on the raw table and wraps a columns-only
+// projection so hidden columns stay unreachable. CTE bodies, subqueries,
+// joins, set ops, and AT clauses are walked the same way. Qualified names
+// never match a CTE. Lake views are allowlisted like tables and wrapped the
+// same way. User `?` / `$n` parameters are left for Flight SQL binding at
+// execute.
 
 #include "common/duckdb_layer.hpp"
 #include "config/policy.hpp"

@@ -42,8 +42,10 @@ void duckbox::test::RunHiddenFilterExecTests() {
     auto spec_dir = MemorySpecDir();
     auto key_a = ParseTenantKey("tenant_21:user_sergio", hidden.key);
     auto key_b = ParseTenantKey("tenant_22:user_kim", hidden.key);
+    auto hide_amt = HiddenAmountPolicy();
     TenantSandbox box_a(daemon, hidden, key_a, spec_dir);
     TenantSandbox box_b(daemon, hidden, key_b, spec_dir);
+    TenantSandbox box_amt(daemon, hide_amt, key_a, spec_dir);
 
     ExpectTenant21Live(box_a.Execute("SELECT id, title, amount FROM deals ORDER BY id"),
                        "hidden-filter execute tenant 21");
@@ -62,6 +64,50 @@ void duckbox::test::RunHiddenFilterExecTests() {
                         "hidden tenant_id is not selectable");
     ExpectThrowContains([&] { box_a.Execute("SELECT _deleted FROM deals"); }, "_deleted",
                         "hidden _deleted is not selectable");
+    ExpectThrowContains(
+        [&] {
+            box_a.Execute("SELECT tenant_id FROM deals WHERE tenant_id = 21 AND _deleted = false");
+        },
+        "tenant_id", "hidden tenant_id stays unselectable under the repeated predicate");
+    ExpectThrowContains(
+        [&] {
+            box_a.Execute("SELECT _deleted FROM deals WHERE tenant_id = 21 AND _deleted = false");
+        },
+        "_deleted", "hidden _deleted stays unselectable under the repeated predicate");
+
+    auto star_extra = box_a.Execute(
+        "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND _deleted = false ORDER BY id");
+    ExpectTenant21Live(star_extra, "hidden-filter star-plus-extra tenant 21");
+
+    auto amt_extra = box_amt.Execute(
+        "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND _deleted = false ORDER BY id");
+    Expect(amt_extra.row_count == 1 && HasCol(amt_extra.text_table, "alpha deal"),
+           "hidden-amount star-plus-extra tenant 21 sees alpha");
+    Expect(!HasCol(amt_extra.text_table, "amount"),
+           "hidden-amount star-plus-extra does not leak amount");
+    Expect(!HasCol(amt_extra.text_table, "bravo"),
+           "hidden-amount star-plus-extra does not leak tenant 22");
+    ExpectThrowContains(
+        [&] {
+            box_amt.Execute("SELECT amount FROM deals WHERE tenant_id = 21 AND _deleted = false");
+        },
+        "amount", "hidden amount stays unselectable under the repeated predicate");
+    ExpectThrowContains(
+        [&] {
+            box_amt.ExecuteRewritten(
+                "SELECT amount FROM deals WHERE tenant_id = 21 AND _deleted = false", {});
+        },
+        "amount", "forged hidden amount under the repeated predicate stays unselectable");
+    auto forged_extra = box_amt.ExecuteRewritten(
+        "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND _deleted = false", {});
+    Expect(!HasCol(forged_extra.text_table, "amount"),
+           "forged star-plus-extra does not leak hidden amount");
+    ExpectThrowContains(
+        [&] {
+            box_a.ExecuteRewritten(
+                "SELECT tenant_id FROM deals WHERE tenant_id = 21 AND _deleted = false", {});
+        },
+        "tenant_id", "forged hidden tenant_id under the repeated predicate stays unselectable");
 
     auto rw =
         RewriteUserSqlDetailed("SELECT id, title, amount FROM deals ORDER BY id", hidden, key_a);
