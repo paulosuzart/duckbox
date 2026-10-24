@@ -27,6 +27,7 @@ int ReportAndExit(const char *suite);
 node::DaemonConfig TestDaemon();
 config::Policy TestPolicy();
 config::Policy HiddenAmountPolicy(); // TestPolicy with deals.amount omitted
+config::Policy HiddenFilterPolicy(); // TestPolicy with filter columns omitted from deals.columns
 config::Policy TestDucklakePolicy(const config::Policy &base);
 std::string MemorySpecDir();
 std::string MemoryAnalystPath();

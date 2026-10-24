@@ -6,6 +6,8 @@ int main() {
     RunSandboxExecTests();
     RunCteExecTests();
     RunCteFlightTests();
+    RunHiddenFilterExecTests();
+    RunHiddenFilterFlightTests();
     RunRuntimeTests();
     RunS3RegistryTests();
     RunAuthFlightTests();

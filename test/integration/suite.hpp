@@ -6,6 +6,8 @@ namespace test {
 void RunSandboxExecTests();
 void RunCteExecTests();
 void RunCteFlightTests();
+void RunHiddenFilterExecTests();
+void RunHiddenFilterFlightTests();
 void RunRuntimeTests();
 void RunS3RegistryTests();
 void RunAuthFlightTests();
