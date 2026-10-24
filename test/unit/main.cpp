@@ -27,5 +27,6 @@ int main() {
     RunAgentModeDenyTests();
     RunTableFunction20Tests();
     RunMacroCatalog20Tests();
+    RunLakeAttachSecretTests();
     return ReportAndExit("unit");
 }

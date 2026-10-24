@@ -290,7 +290,7 @@ class MemoryS3ControlClient final : public S3ControlClient {
         std::lock_guard<std::mutex> hold(mu_);
         S3ListResult out;
         for (auto &kv : objects_) {
-            if (prefix.empty() || kv.first.rfind(prefix, 0) == 0) {
+            if (prefix.empty() || kv.first.starts_with(prefix)) {
                 out.objects.push_back(S3ListedObject{kv.first, kv.second.last_modified_ms});
             }
         }
@@ -656,7 +656,7 @@ void DeleteStaleProbes(const S3ControlClient &client, const std::string &stale_p
         stale_after_ms = kDefaultStaleAfterMs;
     }
     for (auto &o : listed.objects) {
-        if (o.key.rfind(stale_prefix, 0) != 0) {
+        if (!o.key.starts_with(stale_prefix)) {
             continue;
         }
         if (!IsHexNonce16(o.key.substr(stale_prefix.size()))) {

@@ -1,11 +1,11 @@
 #include "check.hpp"
 
-#include "node/daemon_config.hpp"
-#include "lake/lake.hpp"
 #include "config/policy.hpp"
+#include "config/spec_validator.hpp"
+#include "lake/lake.hpp"
+#include "node/daemon_config.hpp"
 #include "s3/s3.hpp"
 #include "s3/s3_credentials.hpp"
-#include "config/spec_validator.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -559,6 +559,12 @@ int main() {
             Expect(attach_err.find("CREATE OR REPLACE SECRET") == std::string::npos,
                    std::string(msg) + " CREATE SECRET must run before attach fails (" + attach_err +
                        ")");
+            Expect(attach_err.find("password=") == std::string::npos &&
+                       attach_err.find("SECRET '") == std::string::npos,
+                   std::string(msg) + " attach error must not include credentials");
+            Expect(attach_err.find(kCatalogAttachClientError) != std::string::npos ||
+                       attach_err.find(kS3SecretClientError) != std::string::npos,
+                   std::string(msg) + " attach uses a generic client error");
         }
         auto listed = con.Query("SELECT name, type, provider FROM duckdb_secrets()");
         Expect(!listed->HasError() && listed->ToString().find("duckbox_s3") != std::string::npos,
@@ -589,9 +595,12 @@ int main() {
             Expect(false, "role_arn CREATE SECRET should fail without a reachable STS");
         } catch (const std::exception &e) {
             auto w = std::string(e.what());
-            Expect(w.find("Role-arn") != std::string::npos ||
-                       w.find("Secret Validation") != std::string::npos,
-                   std::string("role_arn AttachLakeFromSpec reaches CREATE SECRET (") + w + ")");
+            Expect(w.find(kS3SecretClientError) != std::string::npos,
+                   std::string("role_arn AttachLakeFromSpec uses the generic secret error (") + w +
+                       ")");
+            Expect(w.find("SECRET '") == std::string::npos &&
+                       w.find("password=") == std::string::npos,
+                   "role_arn CREATE SECRET error must not include credentials");
         }
     }
 

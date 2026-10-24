@@ -2,6 +2,8 @@
 #include "common/error.hpp"
 #include "rewriter/validator.hpp"
 
+#include "absl/strings/match.h"
+
 #include <cctype>
 
 namespace duckbox {
@@ -10,10 +12,6 @@ using namespace common;
 using namespace config;
 namespace {
 
-std::string Lower(const std::string &s) {
-    return ddb::StringUtil::Lower(s);
-}
-
 bool IsCte(const RewriteContext &ctx, const ddb::BaseTableRef &base) {
     // Qualified names never match a CTE.
     const auto &qn = base.GetQualifiedName();
@@ -21,7 +19,7 @@ bool IsCte(const RewriteContext &ctx, const ddb::BaseTableRef &base) {
         return false;
     }
     for (auto it = ctx.cte_scope.rbegin(); it != ctx.cte_scope.rend(); ++it) {
-        if (it->count(Lower(IdentName(base.Table())))) {
+        if (it->count(NormalizeSqlIdent(IdentName(base.Table())))) {
             return true;
         }
     }
@@ -33,7 +31,7 @@ void PushCteFrame(RewriteContext &ctx) {
 }
 
 void AddCteName(RewriteContext &ctx, const std::string &name) {
-    ctx.cte_scope.back().insert(Lower(name));
+    ctx.cte_scope.back().insert(NormalizeSqlIdent(name));
 }
 
 void PopCteFrame(RewriteContext &ctx) {
@@ -85,7 +83,7 @@ bool IsTenantColumn(const ddb::ParsedExpression &e, const std::string &tenant_co
     }
     auto &c = e.Cast<ddb::ColumnRefExpression>();
     return !c.ColumnNames().empty() &&
-           Lower(IdentName(c.ColumnNames().back())) == Lower(tenant_col);
+           absl::EqualsIgnoreCase(IdentName(c.ColumnNames().back()), tenant_col);
 }
 
 ddb::unique_ptr<ddb::ParsedExpression> FilterBoundToKey(ddb::unique_ptr<ddb::ParsedExpression> expr,
@@ -470,7 +468,7 @@ ddb::Value ValueFromKeyVar(const std::string &name, const std::string &raw) {
             break;
         }
     }
-    if (numeric && (name == "tenant_id" || ddb::StringUtil::EndsWith(name, "_id"))) {
+    if (numeric && (name == "tenant_id" || name.ends_with("_id"))) {
         try {
             auto n = std::stoll(raw);
             return ddb::Value::BIGINT(n);

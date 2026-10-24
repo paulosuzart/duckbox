@@ -1,8 +1,8 @@
 #include "check.hpp"
 
-#include "sandbox/sandbox.hpp"
 #include "rewriter/tenant_key.hpp"
 #include "rewriter/validator.hpp"
+#include "sandbox/sandbox.hpp"
 
 #include <string>
 #include <vector>
@@ -36,18 +36,20 @@ int main() {
                  "duckdb_secrets() is denied after warmup");
     ExpectDenied(box, "SELECT * FROM which_secret('s3://duckbox-lake/data/', 's3')", "denied",
                  "which_secret is denied after warmup");
-    ExpectDenied(box, "CREATE SECRET sneak (TYPE s3, KEY_ID 'x', SECRET 'y')", "only SELECT",
-                 "CREATE SECRET is denied after warmup");
+    ExpectDenied(box, "CREATE SECRET sneak (TYPE s3, KEY_ID 'x', SECRET 'y')",
+                 "CREATE SECRET is denied", "CREATE SECRET is denied after warmup");
     ExpectDenied(box, "CREATE OR REPLACE SECRET duckbox_s3 (TYPE s3, KEY_ID 'x', SECRET 'y')",
-                 "only SELECT", "CREATE OR REPLACE SECRET is denied after warmup");
-    ExpectDenied(box, "DROP SECRET duckbox_s3", "only SELECT",
+                 "CREATE SECRET is denied", "CREATE OR REPLACE SECRET is denied after warmup");
+    ExpectDenied(box, "DROP SECRET duckbox_s3", "DROP SECRET is denied",
                  "DROP SECRET is denied after warmup");
-    ExpectDenied(box, "SET s3_access_key_id='stolen'", "only SELECT",
+    ExpectDenied(box, "SET s3_access_key_id='stolen'", "secret-related setting is denied",
                  "SET s3_access_key_id is denied after warmup");
-    ExpectDenied(box, "SET s3_secret_access_key='stolen'", "only SELECT",
+    ExpectDenied(box, "SET s3_secret_access_key='stolen'", "secret-related setting is denied",
                  "SET s3_secret_access_key is denied after warmup");
-    ExpectDenied(box, "SET s3_session_token='stolen'", "only SELECT",
+    ExpectDenied(box, "SET s3_session_token='stolen'", "secret-related setting is denied",
                  "SET s3_session_token is denied after warmup");
+    ExpectDenied(box, "SET allow_persistent_secrets=true", "secret-related setting is denied",
+                 "SET allow_persistent_secrets is denied after warmup");
     ExpectDenied(box, "SELECT current_setting('s3_access_key_id')", "function not allowlisted",
                  "current_setting cannot read s3 keys");
     ExpectDenied(box, "SELECT current_setting('s3_secret_access_key')", "function not allowlisted",
@@ -60,7 +62,8 @@ int main() {
     } catch (const std::exception &e) {
         auto w = std::string(e.what());
         Expect(w.find("only SELECT") != std::string::npos ||
-                   w.find("denied") != std::string::npos || w.find("Parser") != std::string::npos,
+                   w.find("denied") != std::string::npos || w.find("SECRET") != std::string::npos ||
+                   w.find("Parser") != std::string::npos,
                "CREATE PERSISTENT SECRET is denied after warmup");
     }
     ExpectDenied(box, "SELECT * FROM read_text('/proc/self/environ')", "table functions",

@@ -7,6 +7,8 @@
 #include "s3/s3_credentials.hpp"
 #include "s3/secrets.hpp"
 
+#include "absl/strings/ascii.h"
+
 #include "arrow/result.h"
 #include "arrow/util/uri.h"
 
@@ -176,10 +178,7 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
             throw PolicyError(
                 "auth.peer_secret is not allowed; use auth.peer_secret_ref (env: or file:)");
         }
-        auto mode = auth->GetString("mode", "trusted");
-        for (char &c : mode) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
+        auto mode = absl::AsciiStrToLower(auth->GetString("mode", "trusted"));
         if (mode == "trusted") {
             d.auth_mode = AuthMode::Trusted;
         } else if (mode == "token") {
@@ -227,7 +226,8 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
         if (!d.peer_secret_ref.empty()) {
             auto ref = ParseSecretRef(d.peer_secret_ref, "auth.peer_secret_ref");
             d.peer_secret_ref = ref.Spec();
-            d.peer_secret = TrimCopy(EnvFileSecretResolver{}.Resolve(ref, "auth.peer_secret_ref"));
+            d.peer_secret = std::string(absl::StripAsciiWhitespace(
+                EnvFileSecretResolver{}.Resolve(ref, "auth.peer_secret_ref")));
             if (ref.scheme == SecretRef::Scheme::File) {
                 struct stat st {};
                 if (stat(ref.locator.c_str(), &st) == 0 && (st.st_mode & S_IROTH)) {
