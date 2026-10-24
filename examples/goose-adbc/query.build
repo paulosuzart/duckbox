@@ -1,0 +1,10 @@
+// Sidecar for query.goose. Goose compiles only .c; the ADBC driver manager
+// is C++ and is built by the Makefile into libadbc_driver_manager.a, then
+// found via LIBRARY_PATH.
+c_sources = ["shim/adbc_backend.c"];
+c_include = [".deps/adbc/include"];
+c_libs_linux = ["adbc_driver_manager", "dl", "stdc++"];
+c_libs_macos = ["adbc_driver_manager", "c++"];
+c_flags_cc = ["-Wno-unused-parameter"];
+main_thread_only = true;
+output = "query";
