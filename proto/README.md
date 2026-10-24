@@ -1,13 +1,13 @@
 # proto/
 
-v1 is **Arrow Flight SQL** (gRPC). JDBC and ADBC clients work.
+v1 is **Arrow Flight SQL** (gRPC). JDBC and ADBC clients work. The Flight listener does not terminate TLS; bearer secrets and JWTs travel in the clear on `grpc://`. Outside local development, terminate TLS in front of the public Flight listener. Peer traffic may stay plaintext gRPC; TLS between nodes is opt-in only.
 
 Per-RPC headers:
 
 - `x-duckbox-sandbox` — named sandbox id (required for queries). Tenant binding is the definition’s key after caller auth, not a client-chosen header alone
 - `x-duckbox-key` — optional per-query key for `auth.key` variable extraction; must match the definition key when sent
-- `x-duckbox-caller` — trusted caller identity (default `local` / handshake peer). Ignored when `auth.bearer_secrets` or JWT is configured
-- `Authorization: Bearer …` — static bearer secret (constant-time) or HS256 JWT (`auth.jwt_secret`). Validated on every call; the Flight handshake is optional. `sub` and `exp` are required (`nbf` optional). Unsigned tokens are rejected. Failures are `Unauthenticated` and do not echo the token.
+- `x-duckbox-caller` — trusted caller identity (default `local` / handshake peer). Used only with `auth.allow_insecure_dev`. Ignored when `auth.bearer_secrets` or JWT is configured
+- `Authorization: Bearer …` — static bearer secret (constant-time) or HS256 JWT (`auth.jwt_secret`). Validated on every call; the Flight handshake is optional. `sub` and `exp` are required (`nbf` optional). Unsigned tokens are rejected. Failures are `Unauthenticated` and do not echo the token. The listener itself is still plaintext unless TLS is terminated in front of it.
 
 Public `DoAction` types: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes`, `ExpireSandbox`. Create/Update body is the spec YAML. `ListSandboxes` body is optional YAML filters (`id_prefix`, `key_prefix`, `policy_class`, `state`, `limit`, `offset`); items are summaries, not full specs (`owner` is the lease holder). `ExpireSandbox` body is the id.
 
@@ -17,4 +17,4 @@ Prepared statements are signed opaque handles (HMAC) carrying **id + version**, 
 
 `GetCatalogs` / `GetTables` / … are served by the **sandbox** and filtered to spec-whitelisted objects.
 
-**Debug HTTP** `POST /v1/query` exists only with `--debug-http` (off by default). Header `X-Duckbox-Sandbox`; JSON `{"sql":"…"}`; Arrow IPC body.
+**Debug HTTP** `POST /v1/query` exists only with `--debug-http` (off by default) and `auth.allow_insecure_dev`. Header `X-Duckbox-Sandbox`; JSON `{"sql":"…"}`; Arrow IPC body.

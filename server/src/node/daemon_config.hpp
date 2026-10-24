@@ -91,7 +91,7 @@ struct DaemonConfig {
     std::string jwt_secret;
     bool allow_insecure_dev = false;
     LakeAllow lake_allow;
-    std::string debug_http;
+    std::string debug_http; // POST /v1/query; refused unless allow_insecure_dev
     std::string metrics_listen = "127.0.0.1:9477";
     std::unordered_set<std::string> metrics_policy_classes;
 };

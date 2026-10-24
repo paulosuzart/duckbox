@@ -455,6 +455,9 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     if (cfg.auth_mode == AuthMode::Token && cfg.jwt_secret.empty() && !cfg.allow_insecure_dev) {
         add("auth.jwt_secret", "required for token mode");
     }
+    if (!cfg.debug_http.empty() && !cfg.allow_insecure_dev) {
+        add("debug_http", "requires auth.allow_insecure_dev");
+    }
     if (cfg.handle_ttl_seconds <= 0) {
         add("limits.handle_ttl_seconds", "must be > 0");
     }
