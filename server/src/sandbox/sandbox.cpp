@@ -91,9 +91,12 @@ void RequireHardeningSetting(ddb::Connection &con, const char *name, const char 
     }
     got->Complete();
     std::string text;
-    if (got->RowCount() > 0) {
-        text = got->Collection().GetValue(0, 0).ToString();
+    if (auto chunk = got->Fetch()) {
+        if (chunk->size() > 0) {
+            text = chunk->GetValue(0, 0).ToString();
+        }
     }
+    got->Close();
     if (!g_hardening_mismatch_setting.empty() && g_hardening_mismatch_setting == name) {
         auto want = LowerAscii(expected);
         if (want == "true") {
