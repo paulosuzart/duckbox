@@ -455,6 +455,9 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     if (cfg.auth_mode == AuthMode::Token && cfg.jwt_secret.empty() && !cfg.allow_insecure_dev) {
         add("auth.jwt_secret", "required for token mode");
     }
+    if (!cfg.debug_http.empty() && !cfg.allow_insecure_dev) {
+        add("debug_http", "requires auth.allow_insecure_dev");
+    }
     if (cfg.handle_ttl_seconds <= 0) {
         add("limits.handle_ttl_seconds", "must be > 0");
     }
@@ -590,14 +593,16 @@ std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::strin
     if (!from_secret.empty()) {
         return reject_reserved(from_secret);
     }
-    if (cfg.auth_mode == AuthMode::Token) {
+    const bool jwt_configured = !cfg.jwt_secret.empty();
+    if (cfg.auth_mode == AuthMode::Token || jwt_configured) {
         if (cfg.jwt_secret.empty()) {
             throw AuthError("token mode requires auth.jwt_secret");
         }
-        if (bearer.empty()) {
+        std::string jwt_tok = !bearer.empty() ? bearer : peer_identity;
+        if (jwt_tok.empty()) {
             throw AuthError("token mode requires Authorization: Bearer");
         }
-        return reject_reserved(VerifyJwtHs256(bearer, cfg.jwt_secret));
+        return reject_reserved(VerifyJwtHs256(jwt_tok, cfg.jwt_secret));
     }
     if (!cfg.bearer_secrets.empty()) {
         throw AuthError("invalid caller credential");

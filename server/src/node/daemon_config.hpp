@@ -91,7 +91,7 @@ struct DaemonConfig {
     std::string jwt_secret;
     bool allow_insecure_dev = false;
     LakeAllow lake_allow;
-    std::string debug_http;
+    std::string debug_http; // POST /v1/query; refused unless allow_insecure_dev
     std::string metrics_listen = "127.0.0.1:9477";
     std::unordered_set<std::string> metrics_policy_classes;
 };
@@ -111,7 +111,8 @@ inline bool ValidNodeIdChars(const std::string &s) {
     return true;
 }
 
-// Bearer secret, then JWT HS256, else x-duckbox-caller only when allow_insecure_dev.
+// Bearer secret (constant-time), then HS256 JWT when jwt_secret is set (or
+// auth.mode=token), else x-duckbox-caller only when allow_insecure_dev.
 // Throws AuthError; never treats an unsigned token as a spec payload.
 std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::string &peer_identity,
                                        const std::string &bearer, const std::string &caller_header,
