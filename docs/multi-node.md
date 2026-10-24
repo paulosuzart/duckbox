@@ -2,7 +2,7 @@
 
 N duckbox daemons share one named-sandbox registry and coordinate **per-sandbox ownership** with S3 conditional writes. Sandboxes stay **in-process** (no process-per-sandbox, no cgroups). The daemon is still a control plane: its only S3 credential is the lease/registry prefix. Lake attach happens inside each sandbox at warmup.
 
-DuckLake multi-node is **read-only or a Postgres catalog**. duckbox does not replicate or sync lake data between nodes. Catalog compatibility (an existing Postgres+S3 lake, no migration) is [docs/ducklake-compatibility.md](ducklake-compatibility.md) and CI job `ducklake-compat` — not this multi-node e2e. If you put PgBouncer in front of a Postgres DuckLake catalog, use session pooling (transaction pooling breaks `SET search_path` / prepared catalog statements). That is a catalog-ops warning, not a duckbox feature.
+DuckLake multi-node is **read-only**: `kind: ducklake` requires `read_only: true` (a writable lake is a spec-validation error). The shared catalog is Postgres; duckbox does not replicate or sync lake data between nodes. Catalog compatibility (an existing Postgres+S3 lake, no migration) is [docs/ducklake-compatibility.md](ducklake-compatibility.md) and CI job `ducklake-compat` — not this multi-node e2e. If you put PgBouncer in front of a Postgres DuckLake catalog, use session pooling (transaction pooling breaks `SET search_path` / prepared catalog statements). That is a catalog-ops warning, not a duckbox feature.
 
 ## Architecture
 

@@ -56,6 +56,11 @@ seed_with() {
 		--s3-secret "$DUCKBOX_S3_SECRET"
 }
 
+if [[ -n "${DUCKBOX_REQUIRE_LAKE_ENGINE:-}" && "${DUCKBOX_REQUIRE_LAKE_ENGINE}" != "1.5.6" ]]; then
+	echo "DUCKBOX_REQUIRE_LAKE_ENGINE must be exactly 1.5.6 (got '${DUCKBOX_REQUIRE_LAKE_ENGINE}')" >&2
+	exit 1
+fi
+
 require_legacy_engine() {
 	[[ "${DUCKBOX_REQUIRE_LAKE_ENGINE:-}" == "1.5.6" ]]
 }
@@ -88,7 +93,7 @@ else
 	if [[ ! -x "$LEGACY_VENV/bin/python" ]]; then
 		echo "creating $LEGACY_VENV with duckdb==1.5.6"
 		if python3 -m venv "$LEGACY_VENV" &&
-			"$LEGACY_VENV/bin/pip" install -q 'duckdb==1.5.6' boto3 'urllib3>=2'; then
+			"$LEGACY_VENV/bin/pip" install -q 'duckdb==1.5.6' boto3 pytz 'urllib3>=2'; then
 			true
 		else
 			fallback_or_die "could not create a duckdb==1.5.6 venv (pip/venv failed)"
