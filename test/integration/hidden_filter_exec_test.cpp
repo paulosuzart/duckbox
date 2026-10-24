@@ -54,9 +54,12 @@ void duckbox::test::RunHiddenFilterExecTests() {
 
     ExpectTenant21Live(box_a.Execute("SELECT * FROM deals ORDER BY id"),
                        "hidden-filter SELECT * tenant 21");
-    ExpectTenant21Live(box_a.Execute("SELECT * FROM deals WHERE tenant_id = 21 AND _deleted = "
-                                     "false ORDER BY id"),
-                       "already-filtered star still hides filter columns");
+    ExpectThrowContains(
+        [&] {
+            box_a.Execute("SELECT * FROM deals WHERE tenant_id = 21 AND _deleted = false ORDER BY "
+                          "id");
+        },
+        "tenant_id", "repeated hidden filter in WHERE is not evaluated on the raw table");
     ExpectTenant22Live(box_b.Execute("SELECT * FROM deals ORDER BY id"),
                        "hidden-filter SELECT * tenant 22");
 
@@ -74,10 +77,14 @@ void duckbox::test::RunHiddenFilterExecTests() {
             box_a.Execute("SELECT _deleted FROM deals WHERE tenant_id = 21 AND _deleted = false");
         },
         "_deleted", "hidden _deleted stays unselectable under the repeated predicate");
-
-    auto star_extra = box_a.Execute(
-        "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND _deleted = false ORDER BY id");
-    ExpectTenant21Live(star_extra, "hidden-filter star-plus-extra tenant 21");
+    ExpectTenant21Live(box_a.Execute("SELECT *, 1 AS one FROM deals ORDER BY id"),
+                       "hidden-filter star-plus-extra tenant 21");
+    ExpectThrowContains(
+        [&] {
+            box_a.Execute(
+                "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND _deleted = false");
+        },
+        "tenant_id", "star-plus-extra with a hidden filter in WHERE errors");
 
     auto amt_extra = box_amt.Execute(
         "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND _deleted = false ORDER BY id");
@@ -98,6 +105,30 @@ void duckbox::test::RunHiddenFilterExecTests() {
                 "SELECT amount FROM deals WHERE tenant_id = 21 AND _deleted = false", {});
         },
         "amount", "forged hidden amount under the repeated predicate stays unselectable");
+    ExpectThrowContains(
+        [&] {
+            box_amt.Execute(
+                "SELECT id FROM deals WHERE tenant_id = 21 AND _deleted = false AND amount > 400");
+        },
+        "amount", "hidden amount in WHERE under the repeated predicate errors");
+    ExpectThrowContains(
+        [&] {
+            box_amt.ExecuteRewritten(
+                "SELECT id FROM deals WHERE tenant_id = 21 AND _deleted = false AND amount > 400",
+                {});
+        },
+        "amount", "forged hidden amount in WHERE under the repeated predicate errors");
+    {
+        std::vector<ddb::Value> params;
+        params.push_back(ddb::Value::INTEGER(400));
+        ExpectThrowContains(
+            [&] {
+                box_amt.ExecuteRewritten("SELECT id FROM deals WHERE tenant_id = 21 AND "
+                                         "_deleted = false AND amount > ?",
+                                         params);
+            },
+            "amount", "prepared hidden amount in WHERE under the repeated predicate errors");
+    }
     auto forged_extra = box_amt.ExecuteRewritten(
         "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND _deleted = false", {});
     Expect(!HasCol(forged_extra.text_table, "amount"),
@@ -111,12 +142,12 @@ void duckbox::test::RunHiddenFilterExecTests() {
 
     auto rw =
         RewriteUserSqlDetailed("SELECT id, title, amount FROM deals ORDER BY id", hidden, key_a);
-    ExpectTenant21Live(box_a.ExecuteRewritten(rw.sql, {}),
-                       "ExecuteRewritten of already-rewritten SQL tenant 21");
+    ExpectTenant21Live(box_a.ExecuteHandle(rw.sql, {}),
+                       "ExecuteHandle of already-rewritten SQL tenant 21");
     ExpectTenant22Live(
-        box_b.ExecuteRewritten(
+        box_b.ExecuteHandle(
             RewriteUserSql("SELECT id, title, amount FROM deals ORDER BY id", hidden, key_b), {}),
-        "ExecuteRewritten of already-rewritten SQL tenant 22");
+        "ExecuteHandle of already-rewritten SQL tenant 22");
 
     auto forged = box_a.ExecuteRewritten("SELECT * FROM deals", {});
     ExpectTenant21Live(forged, "forged SELECT * is re-wrapped for tenant 21");

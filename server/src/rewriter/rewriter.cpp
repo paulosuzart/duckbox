@@ -2,11 +2,9 @@
 #include "common/error.hpp"
 #include "rewriter/validator.hpp"
 
-#include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 
 #include <cctype>
-#include <optional>
 
 namespace duckbox {
 namespace rewriter {
@@ -63,11 +61,6 @@ namespace {
 void RewriteQueryNode(ddb::unique_ptr<ddb::QueryNode> &node, RewriteContext &ctx);
 void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx);
 void RewriteSelectInPlace(ddb::SelectStatement &stmt, RewriteContext &ctx);
-ddb::unique_ptr<ddb::ParsedExpression> FilterBoundToKey(ddb::unique_ptr<ddb::ParsedExpression> expr,
-                                                        const TablePolicy &spec);
-ddb::unique_ptr<ddb::TableRef> WrapProjectedTable(ddb::unique_ptr<ddb::TableRef> base,
-                                                  const TablePolicy &spec, const Policy &policy,
-                                                  ddb::unique_ptr<ddb::ParsedExpression> where);
 
 void RewriteExpression(ddb::unique_ptr<ddb::ParsedExpression> &expr, RewriteContext &ctx) {
     if (!expr) {
@@ -91,196 +84,6 @@ bool IsTenantColumn(const ddb::ParsedExpression &e, const std::string &tenant_co
     auto &c = e.Cast<ddb::ColumnRefExpression>();
     return !c.ColumnNames().empty() &&
            absl::EqualsIgnoreCase(IdentName(c.ColumnNames().back()), tenant_col);
-}
-
-void QualifyAllowlistedTable(ddb::BaseTableRef &base, const TablePolicy &spec,
-                             const Policy &policy) {
-    // Always the allowlisted catalog.schema, never an agent-written qualifier
-    // that happened to share the table name (e.g. staging.deals).
-    base.SetQualifiedName(
-        ddb::Identifier(spec.catalog.empty() ? DefaultTableCatalog(policy.lake) : spec.catalog),
-        ddb::Identifier(spec.schema.empty() ? DefaultTableSchema() : spec.schema), base.Table());
-}
-
-ddb::case_insensitive_map_t<ddb::Value> KeyBindParams(const TenantKey &key) {
-    ddb::case_insensitive_map_t<ddb::Value> params;
-    for (auto &kv : key.vars) {
-        params[kv.first] = ValueFromKeyVar(kv.first, kv.second);
-    }
-    if (!key.tenant_id.empty() && params.find("tenant_id") == params.end()) {
-        params["tenant_id"] = ddb::Value::BIGINT(key.tenant_id_i64);
-    }
-    return params;
-}
-
-ddb::unique_ptr<ddb::ParsedExpression> BoundPolicyFilters(const TablePolicy &spec,
-                                                          const TenantKey &key) {
-    ddb::unique_ptr<ddb::ParsedExpression> where;
-    for (auto &filter : spec.filters) {
-        auto expr = FilterBoundToKey(ParsePolicyFilter(filter), spec);
-        if (!where) {
-            where = std::move(expr);
-        } else {
-            where = ddb::make_uniq<ddb::ConjunctionExpression>(ddb::ExpressionType::CONJUNCTION_AND,
-                                                               std::move(where), std::move(expr));
-        }
-    }
-    if (where) {
-        BindParsedExpression(where, KeyBindParams(key));
-    }
-    return where;
-}
-
-void FlattenAnd(const ddb::ParsedExpression &expr,
-                std::vector<const ddb::ParsedExpression *> &out) {
-    if (expr.GetExpressionClass() == ddb::ExpressionClass::CONJUNCTION &&
-        expr.GetExpressionType() == ddb::ExpressionType::CONJUNCTION_AND) {
-        for (auto &child : expr.Cast<ddb::ConjunctionExpression>().GetChildren()) {
-            if (child) {
-                FlattenAnd(*child, out);
-            }
-        }
-        return;
-    }
-    out.push_back(&expr);
-}
-
-const ddb::ParsedExpression &UnwrapCasts(const ddb::ParsedExpression &expr) {
-    const auto *cur = &expr;
-    while (cur->GetExpressionClass() == ddb::ExpressionClass::CAST) {
-        cur = &cur->Cast<ddb::CastExpression>().Child();
-    }
-    return *cur;
-}
-
-bool ColumnRefMatches(const ddb::ParsedExpression &a, const ddb::ParsedExpression &b) {
-    if (a.GetExpressionClass() != ddb::ExpressionClass::COLUMN_REF ||
-        b.GetExpressionClass() != ddb::ExpressionClass::COLUMN_REF) {
-        return a.Equals(b);
-    }
-    auto &ac = a.Cast<ddb::ColumnRefExpression>();
-    auto &bc = b.Cast<ddb::ColumnRefExpression>();
-    if (ac.ColumnNames().empty() || bc.ColumnNames().empty()) {
-        return false;
-    }
-    return absl::EqualsIgnoreCase(IdentName(ac.ColumnNames().back()),
-                                  IdentName(bc.ColumnNames().back()));
-}
-
-std::optional<bool> LiteralAsBool(const ddb::Literal &lit) {
-    auto text = absl::AsciiStrToLower(lit.text);
-    if (lit.kind == ddb::LiteralKind::BOOLEAN) {
-        return text == "true";
-    }
-    if (text == "t" || text == "true" || text == "1") {
-        return true;
-    }
-    if (text == "f" || text == "false" || text == "0") {
-        return false;
-    }
-    return std::nullopt;
-}
-
-bool LiteralMatches(const ddb::ParsedExpression &got, const ddb::ParsedExpression &want) {
-    auto &g = UnwrapCasts(got);
-    auto &w = UnwrapCasts(want);
-    if (g.GetExpressionClass() != ddb::ExpressionClass::CONSTANT ||
-        w.GetExpressionClass() != ddb::ExpressionClass::CONSTANT) {
-        return g.Equals(w);
-    }
-    auto &gl = g.Cast<ddb::ConstantExpression>().GetLiteral();
-    auto &wl = w.Cast<ddb::ConstantExpression>().GetLiteral();
-    if (gl == wl) {
-        return true;
-    }
-    int64_t gi = 0;
-    int64_t wi = 0;
-    if (gl.TryGetInt64(gi) && wl.TryGetInt64(wi)) {
-        return gi == wi;
-    }
-    auto gb = LiteralAsBool(gl);
-    auto wb = LiteralAsBool(wl);
-    if (gb && wb) {
-        return *gb == *wb;
-    }
-    return absl::EqualsIgnoreCase(gl.text, wl.text);
-}
-
-bool ComparisonSidesMatch(const ddb::ParsedExpression &got_a, const ddb::ParsedExpression &got_b,
-                          const ddb::ParsedExpression &want_a,
-                          const ddb::ParsedExpression &want_b) {
-    return (ColumnRefMatches(got_a, want_a) && LiteralMatches(got_b, want_b)) ||
-           (ColumnRefMatches(got_a, want_b) && LiteralMatches(got_b, want_a));
-}
-
-bool PredicateMatchesBoundFilter(const ddb::ParsedExpression &got,
-                                 const ddb::ParsedExpression &want) {
-    if (got.GetExpressionClass() != ddb::ExpressionClass::COMPARISON ||
-        want.GetExpressionClass() != ddb::ExpressionClass::COMPARISON ||
-        got.GetExpressionType() != want.GetExpressionType()) {
-        return got.Equals(want);
-    }
-    auto &gc = got.Cast<ddb::ComparisonExpression>();
-    auto &wc = want.Cast<ddb::ComparisonExpression>();
-    if (ComparisonSidesMatch(gc.Left(), gc.Right(), wc.Left(), wc.Right())) {
-        return true;
-    }
-    return got.GetExpressionType() == ddb::ExpressionType::COMPARE_EQUAL &&
-           ComparisonSidesMatch(gc.Right(), gc.Left(), wc.Left(), wc.Right());
-}
-
-bool WhereHasBoundFilters(const ddb::ParsedExpression *where, const TablePolicy &spec,
-                          const TenantKey &key) {
-    if (!where || spec.filters.empty()) {
-        return false;
-    }
-    auto expected = BoundPolicyFilters(spec, key);
-    if (!expected) {
-        return false;
-    }
-    std::vector<const ddb::ParsedExpression *> got;
-    std::vector<const ddb::ParsedExpression *> want;
-    FlattenAnd(*where, got);
-    FlattenAnd(*expected, want);
-    for (auto *w : want) {
-        bool found = false;
-        for (auto *g : got) {
-            if (PredicateMatchesBoundFilter(*g, *w)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Already-rewritten SQL keeps filters on the raw table. Wrapping again with
-// spec.filters on the same SELECT as spec.columns would re-bind those
-// predicates after the projection. Reuse the existing WHERE on the raw table
-// and always wrap a columns-only subquery so hidden columns cannot leak.
-bool TryReuseFilteredBaseTable(ddb::SelectNode &sel, RewriteContext &ctx) {
-    if (!sel.from_table || sel.from_table->type != ddb::TableReferenceType::BASE_TABLE) {
-        return false;
-    }
-    auto &base = sel.from_table->Cast<ddb::BaseTableRef>();
-    if (IsCte(ctx, base)) {
-        return false;
-    }
-    const auto &qn = base.GetQualifiedName();
-    auto *spec = ctx.policy->FindTable(IdentName(qn.Catalog()), IdentName(qn.Schema()),
-                                       IdentName(qn.Name()));
-    if (!spec || !WhereHasBoundFilters(sel.where_clause.get(), *spec, ctx.key)) {
-        return false;
-    }
-    if (sel.from_table->alias.empty()) {
-        sel.from_table->alias = base.Table();
-    }
-    sel.from_table = WrapProjectedTable(std::move(sel.from_table), *spec, *ctx.policy,
-                                        std::move(sel.where_clause));
-    return true;
 }
 
 ddb::unique_ptr<ddb::ParsedExpression> FilterBoundToKey(ddb::unique_ptr<ddb::ParsedExpression> expr,
@@ -312,14 +115,18 @@ ddb::unique_ptr<ddb::ParsedExpression> FilterBoundToKey(ddb::unique_ptr<ddb::Par
     return expr;
 }
 
-ddb::unique_ptr<ddb::TableRef> WrapProjectedTable(ddb::unique_ptr<ddb::TableRef> base,
-                                                  const TablePolicy &spec, const Policy &policy,
-                                                  ddb::unique_ptr<ddb::ParsedExpression> where) {
+ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> base,
+                                                 const TablePolicy &spec, const Policy &policy) {
     auto inner_from = base->Copy();
     inner_from->alias = "";
     inner_from->column_name_alias.clear();
     if (inner_from->type == ddb::TableReferenceType::BASE_TABLE) {
-        QualifyAllowlistedTable(inner_from->Cast<ddb::BaseTableRef>(), spec, policy);
+        auto &b = inner_from->Cast<ddb::BaseTableRef>();
+        // Always the allowlisted catalog.schema, never an agent-written qualifier
+        // that happened to share the table name (e.g. staging.deals).
+        b.SetQualifiedName(
+            ddb::Identifier(spec.catalog.empty() ? DefaultTableCatalog(policy.lake) : spec.catalog),
+            ddb::Identifier(spec.schema.empty() ? DefaultTableSchema() : spec.schema), b.Table());
     }
 
     auto inner = ddb::make_uniq<ddb::SelectNode>();
@@ -332,6 +139,17 @@ ddb::unique_ptr<ddb::TableRef> WrapProjectedTable(ddb::unique_ptr<ddb::TableRef>
         }
     }
     inner->from_table = std::move(inner_from);
+
+    ddb::unique_ptr<ddb::ParsedExpression> where;
+    for (auto &filter : spec.filters) {
+        auto expr = FilterBoundToKey(ParsePolicyFilter(filter), spec);
+        if (!where) {
+            where = std::move(expr);
+        } else {
+            where = ddb::make_uniq<ddb::ConjunctionExpression>(ddb::ExpressionType::CONJUNCTION_AND,
+                                                               std::move(where), std::move(expr));
+        }
+    }
     inner->where_clause = std::move(where);
 
     auto stmt = ddb::make_uniq<ddb::SelectStatement>();
@@ -344,21 +162,6 @@ ddb::unique_ptr<ddb::TableRef> WrapProjectedTable(ddb::unique_ptr<ddb::TableRef>
     auto sub = ddb::make_uniq<ddb::SubqueryRef>(std::move(stmt), ddb::Identifier(alias));
     sub->column_name_alias = base->column_name_alias;
     return sub;
-}
-
-ddb::unique_ptr<ddb::TableRef> WrapFilteredTable(ddb::unique_ptr<ddb::TableRef> base,
-                                                 const TablePolicy &spec, const Policy &policy) {
-    ddb::unique_ptr<ddb::ParsedExpression> where;
-    for (auto &filter : spec.filters) {
-        auto expr = FilterBoundToKey(ParsePolicyFilter(filter), spec);
-        if (!where) {
-            where = std::move(expr);
-        } else {
-            where = ddb::make_uniq<ddb::ConjunctionExpression>(ddb::ExpressionType::CONJUNCTION_AND,
-                                                               std::move(where), std::move(expr));
-        }
-    }
-    return WrapProjectedTable(std::move(base), spec, policy, std::move(where));
 }
 
 void RewriteTableRef(ddb::unique_ptr<ddb::TableRef> &ref, RewriteContext &ctx) {
@@ -434,9 +237,7 @@ void RewriteQueryNode(ddb::unique_ptr<ddb::QueryNode> &node, RewriteContext &ctx
     switch (node->type) {
     case ddb::QueryNodeType::SELECT_NODE: {
         auto &sel = node->Cast<ddb::SelectNode>();
-        if (!TryReuseFilteredBaseTable(sel, ctx)) {
-            RewriteTableRef(sel.from_table, ctx);
-        }
+        RewriteTableRef(sel.from_table, ctx);
         for (auto &expr : sel.select_list) {
             RewriteExpression(expr, ctx);
         }

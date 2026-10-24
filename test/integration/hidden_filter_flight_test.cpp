@@ -231,18 +231,26 @@ void duckbox::test::RunHiddenFilterFlightTests() {
     }
 
     try {
-        auto extra = FetchSql(sql_client, *raw_client, q21,
-                              "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND "
-                              "_deleted = false");
+        auto extra = FetchSql(sql_client, *raw_client, q21, "SELECT *, 1 AS one FROM deals");
         Expect(extra->num_rows() == 1, "Flight star-plus-extra tenant 21 sees 1 row");
         expect_hidden(*extra, "Flight star-plus-extra");
-        auto extra22 = FetchSql(sql_client, *raw_client, q22,
-                                "SELECT *, 1 AS one FROM deals WHERE tenant_id = 22 AND "
-                                "_deleted = false");
+        auto extra22 = FetchSql(sql_client, *raw_client, q22, "SELECT *, 1 AS one FROM deals");
         Expect(extra22->num_rows() == 2, "Flight star-plus-extra tenant 22 sees 2 rows");
         expect_hidden(*extra22, "Flight star-plus-extra tenant 22");
     } catch (const std::exception &e) {
         Expect(false, std::string("Flight hidden-filter star-plus-extra: ") + e.what());
+    }
+
+    try {
+        auto extra = FetchSql(sql_client, *raw_client, q21,
+                              "SELECT *, 1 AS one FROM deals WHERE tenant_id = 21 AND "
+                              "_deleted = false");
+        Expect(false, "Flight star-plus-extra with hidden filter in WHERE must be rejected");
+        (void)extra;
+    } catch (const std::exception &e) {
+        std::string w = e.what();
+        Expect(w.find("tenant_id") != std::string::npos || w.find("column") != std::string::npos,
+               "Flight star-plus-extra with a hidden filter in WHERE errors");
     }
 
     try {
@@ -255,6 +263,19 @@ void duckbox::test::RunHiddenFilterFlightTests() {
         std::string w = e.what();
         Expect(w.find("tenant_id") != std::string::npos || w.find("column") != std::string::npos,
                "Flight hidden tenant_id under the repeated predicate is not selectable");
+    }
+
+    try {
+        auto hidden_where = FetchSql(sql_client, *raw_client, q21,
+                                     "SELECT id FROM deals WHERE tenant_id = 21 AND "
+                                     "_deleted = false AND id > 0");
+        Expect(false, "Flight hidden filter column in WHERE must be rejected");
+        (void)hidden_where;
+    } catch (const std::exception &e) {
+        std::string w = e.what();
+        Expect(w.find("tenant_id") != std::string::npos ||
+                   w.find("_deleted") != std::string::npos || w.find("column") != std::string::npos,
+               "Flight hidden column in WHERE under the repeated predicate errors");
     }
 
     try {
@@ -314,6 +335,51 @@ void duckbox::test::RunHiddenFilterFlightTests() {
         }
     } catch (const std::exception &e) {
         Expect(false, std::string("Flight prepared hidden-filter: ") + e.what());
+    }
+
+    try {
+        auto prep = sql_client.Prepare(q21, "SELECT id FROM deals WHERE tenant_id = 21 AND "
+                                            "_deleted = false AND id = ?");
+        if (prep.ok()) {
+            auto ps = std::move(prep).ValueOrDie();
+            ::arrow::Int32Builder b;
+            Expect(b.Append(1).ok(), "bind hidden-where id=1");
+            std::shared_ptr<::arrow::Array> arr;
+            Expect(b.Finish(&arr).ok(), "finish hidden-where bind batch");
+            auto schema = ::arrow::schema({::arrow::field("$1", ::arrow::int32())});
+            auto batch = ::arrow::RecordBatch::Make(schema, 1, {arr});
+            Expect(ps->SetParameters(batch).ok(), "Flight SetParameters hidden-where");
+            auto ex = ps->Execute(q21);
+            if (ex.ok()) {
+                auto info = std::move(ex).ValueOrDie();
+                if (!info->endpoints().empty()) {
+                    auto stream_res = raw_client->DoGet(q21, info->endpoints()[0].ticket);
+                    if (stream_res.ok()) {
+                        Expect(false, "Flight prepared hidden column in WHERE must be rejected");
+                    } else {
+                        std::string w = stream_res.status().ToString();
+                        Expect(w.find("tenant_id") != std::string::npos ||
+                                   w.find("column") != std::string::npos,
+                               "Flight prepared hidden WHERE DoGet errors");
+                    }
+                }
+            } else {
+                std::string w = ex.status().ToString();
+                Expect(w.find("tenant_id") != std::string::npos ||
+                           w.find("column") != std::string::npos,
+                       "Flight prepared hidden WHERE Execute errors");
+            }
+            Expect(ps->Close(q21).ok(), "Flight ClosePreparedStatement hidden WHERE");
+        } else {
+            std::string w = prep.status().ToString();
+            Expect(w.find("tenant_id") != std::string::npos ||
+                       w.find("column") != std::string::npos,
+                   "Flight prepared hidden WHERE is rejected at Prepare");
+        }
+    } catch (const std::exception &e) {
+        std::string w = e.what();
+        Expect(w.find("tenant_id") != std::string::npos || w.find("column") != std::string::npos,
+               "Flight prepared hidden column in WHERE errors");
     }
 
     (void)server->Shutdown();

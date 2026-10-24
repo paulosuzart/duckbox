@@ -591,7 +591,9 @@ DuckboxFlightSqlServer::GetFlightInfoStatement(const ServerCallContext &context,
         auto token = signer_->Sign(h);
         try {
             auto box = Box(c);
-            auto schema = box->DescribeRewrittenArrow(rw.sql);
+            // Handle SQL is already rewritten. Describe it as-is; DoGet will
+            // ExecuteHandle the same string without wrapping again.
+            auto schema = box->DescribeHandleArrow(rw.sql);
             return Info(descriptor, token, schema);
         } catch (const RedirectError &re) {
             return MaybeProxyInfo(re, descriptor, c.rec.id, c.rec.key, token,
@@ -677,7 +679,7 @@ DuckboxFlightSqlServer::DoGetStatement(const ServerCallContext &context,
                 }
             }
         }
-        auto out = box->ExecuteRewritten(h.rewritten_sql, std::move(params));
+        auto out = box->ExecuteHandle(h.rewritten_sql, std::move(params));
         return StreamIpc(out.arrow_ipc);
     } catch (const std::exception &e) {
         return FromEx(e);
@@ -705,7 +707,7 @@ DuckboxFlightSqlServer::CreatePreparedStatement(
         res.prepared_statement_handle = token;
         try {
             auto box = Box(c);
-            res.dataset_schema = box->DescribeRewrittenArrow(rw.sql);
+            res.dataset_schema = box->DescribeHandleArrow(rw.sql);
         } catch (const RedirectError &) {
             res.dataset_schema = ::arrow::schema({::arrow::field("_empty", ::arrow::null())});
         }
@@ -782,7 +784,7 @@ DuckboxFlightSqlServer::GetFlightInfoPreparedStatement(const ServerCallContext &
         SandboxRuntime::RequestGuard inflight(*runtime_);
         try {
             auto box = runtime_->Get(rec);
-            auto schema = box->DescribeRewrittenArrow(h.rewritten_sql);
+            auto schema = box->DescribeHandleArrow(h.rewritten_sql);
             return Info(descriptor, token, schema);
         } catch (const RedirectError &re) {
             return MaybeProxyInfo(re, descriptor, rec.id, rec.key, token,
