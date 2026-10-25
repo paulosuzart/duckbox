@@ -207,7 +207,7 @@ void TenantSandbox::Passivate(const char *reason) {
     con_.reset();
     db_.reset();
     if (!managed_temp_directory_.empty()) {
-        RemoveSandboxTempDirectory(managed_temp_directory_);
+        RemoveSandboxTempDirectory(managed_temp_directory_, daemon_.temp_directory);
         managed_temp_directory_.clear();
     }
     if (was_warm) {
@@ -432,7 +432,7 @@ void TenantSandbox::WarmupLocked(bool validate_lake) {
         con_.reset();
         db_.reset();
         if (!managed_temp_directory_.empty()) {
-            RemoveSandboxTempDirectory(managed_temp_directory_);
+            RemoveSandboxTempDirectory(managed_temp_directory_, daemon_.temp_directory);
             managed_temp_directory_.clear();
         }
         throw;

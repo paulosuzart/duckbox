@@ -9,6 +9,7 @@
 #include "sandbox/temp_directory.hpp"
 
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <sys/stat.h>
 #include <system_error>
@@ -161,9 +162,11 @@ void duckbox::test::RunTempDirectoryExecTests() {
         Expect(!box.Warm(), "passivate frees DuckDB");
         Expect(box.ManagedTempDirectory().empty(), "passivate clears the managed path");
         Expect(!fs::exists(first_dir), "passivate removes the instance temp directory");
+        Expect(!fs::exists(base / "spill-a"), "passivate removes the empty {base}/{id} parent");
         Expect(fs::exists(other_dir), "passivate of one sandbox does not remove another");
         other.Passivate();
         Expect(!fs::exists(other_dir), "second sandbox cleanup removes its directory");
+        Expect(!fs::exists(base / "spill-b"), "second sandbox cleanup removes its empty parent");
     }
 
     {
@@ -186,9 +189,12 @@ void duckbox::test::RunTempDirectoryExecTests() {
         v1.Passivate();
         Expect(!fs::exists(d1), "passivate of v1 removes only v1's directory");
         Expect(fs::exists(d2), "v2's directory survives v1 passivate");
+        Expect(fs::is_directory(base / "grace-a"),
+               "shared parent remains while another version is live");
         RequireSpill(v2, "v2 still spills after v1's directory is removed");
         v2.Passivate();
         Expect(!fs::exists(d2), "passivate of v2 removes v2's directory");
+        Expect(!fs::exists(base / "grace-a"), "last version passivate removes the empty parent");
     }
 
     {
@@ -232,8 +238,52 @@ void duckbox::test::RunTempDirectoryExecTests() {
                "warmup does not chmod a pre-existing {base}/{id}");
         auto inst = box.ManagedTempDirectory();
         box.Passivate();
-        Expect(!fs::exists(inst), "passivate removes the instance child, not the parent");
-        Expect(fs::is_directory(parent), "pre-existing parent remains after passivate");
+        Expect(!fs::exists(inst), "passivate removes the instance child");
+        Expect(!fs::exists(parent), "empty pre-existing parent is removed after passivate");
+    }
+
+    {
+        DaemonConfig cfg = daemon;
+        cfg.temp_directory = base.string();
+        {
+            TenantSandbox box(cfg, policy, key, spec_dir, "react-a", 1);
+            box.Warmup(false);
+            Expect(box.Warm(), "first activation of react-a warms");
+            auto dir = box.ManagedTempDirectory();
+            Expect(dir.find("/react-a/1-") != std::string::npos,
+                   "first activation allocates a dir");
+            box.Passivate();
+            Expect(!fs::exists(dir), "passivate removes the instance directory");
+            Expect(!fs::exists(base / "react-a"), "passivate leaves no {base}/{id}/");
+        }
+        TenantSandbox again(cfg, policy, key, spec_dir, "react-a", 1);
+        again.Warmup(false);
+        Expect(again.Warm(), "re-activation of the same id after passivate works");
+        Expect(again.ManagedTempDirectory().find("/react-a/1-") != std::string::npos,
+               "re-activation recreates {base}/{id}/{version}-random");
+        Expect(fs::is_directory(again.ManagedTempDirectory()),
+               "re-activation recreates the instance directory");
+        again.Passivate();
+        Expect(!fs::exists(base / "react-a"), "second passivate also removes the empty parent");
+    }
+
+    {
+        DaemonConfig cfg = daemon;
+        cfg.temp_directory = base.string();
+        TenantSandbox box(cfg, policy, key, spec_dir, "plant-a", 1);
+        box.Warmup(false);
+        Expect(box.Warm(), "planted-file sandbox warms");
+        auto parent = base / "plant-a";
+        {
+            std::ofstream o(parent / "keep-me");
+            o << "planted\n";
+        }
+        box.Passivate();
+        Expect(box.ManagedTempDirectory().empty(),
+               "passivate succeeds when a file is planted in the parent");
+        Expect(fs::is_directory(parent), "non-empty parent is not removed");
+        Expect(fs::exists(parent / "keep-me"), "planted file remains after passivate");
+        fs::remove_all(parent);
     }
 
     {
@@ -250,6 +300,7 @@ void duckbox::test::RunTempDirectoryExecTests() {
                "failed warmup does not keep a managed temp directory");
         Expect(!HasInstanceChildren(base / "fail-a"),
                "failed warmup removes the instance directory");
+        Expect(!fs::exists(base / "fail-a"), "failed warmup removes the empty parent");
     }
     {
         DaemonConfig cfg = daemon;
@@ -263,6 +314,8 @@ void duckbox::test::RunTempDirectoryExecTests() {
         Expect(!box.Warm(), "temp_directory mismatch does not hand out a connection");
         Expect(!HasInstanceChildren(base / "mismatch-a"),
                "temp_directory mismatch cleanup removes the instance directory");
+        Expect(!fs::exists(base / "mismatch-a"),
+               "temp_directory mismatch removes the empty parent");
     }
     {
         DaemonConfig cfg = daemon;
@@ -276,6 +329,8 @@ void duckbox::test::RunTempDirectoryExecTests() {
         Expect(!box.Warm(), "temp_directory read error does not hand out a connection");
         Expect(!HasInstanceChildren(base / "readerr-a"),
                "temp_directory read-error cleanup removes the instance directory");
+        Expect(!fs::exists(base / "readerr-a"),
+               "temp_directory read-error cleanup removes the empty parent");
     }
     {
         DaemonConfig cfg = daemon;
@@ -310,6 +365,7 @@ void duckbox::test::RunTempDirectoryExecTests() {
         Expect(fs::is_directory(want), "runtime warmup created the temp directory");
         rt.PassivateId("runtime-a", "test");
         Expect(!fs::exists(want), "runtime PassivateId removes the instance temp directory");
+        Expect(!fs::exists(base / "runtime-a"), "runtime PassivateId removes the empty parent");
     }
 
     fs::remove_all(base);

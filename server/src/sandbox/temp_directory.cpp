@@ -106,6 +106,70 @@ std::string ExclusiveInstanceDir(const std::string &parent, int version) {
     throw Error("sandbox temp directory: exclusive create failed");
 }
 
+void LogTempCleanup(const char *level, const std::string &path, const std::string &error) {
+    Json log;
+    log["event"] = "sandbox_temp_cleanup";
+    log["level"] = level;
+    log["path"] = path;
+    if (!error.empty()) {
+        log["error"] = error;
+    }
+    std::clog << log.dump() << "\n";
+}
+
+// Lexical only: parent must be exactly one component under the configured
+// base (`{base}/{id}`). Does not follow symlinks and never names the base.
+bool ParentIsRemovableIdDir(const fs::path &parent, const fs::path &root) {
+    if (!parent.is_absolute() || !root.is_absolute()) {
+        return false;
+    }
+    auto norm_parent = parent.lexically_normal();
+    auto norm_root = root.lexically_normal();
+    if (norm_parent == norm_root) {
+        return false;
+    }
+    auto rel = norm_parent.lexically_relative(norm_root);
+    auto it = rel.begin();
+    if (it == rel.end() || *it == "." || *it == "..") {
+        return false;
+    }
+    ++it;
+    return it == rel.end();
+}
+
+void RemoveEmptySandboxParent(const fs::path &parent, const fs::path &root) {
+    if (!ParentIsRemovableIdDir(parent, root)) {
+        LogTempCleanup("warn", parent.string(), "refusing parent outside configured base");
+        return;
+    }
+    struct stat st {};
+    if (lstat(parent.c_str(), &st) != 0) {
+        if (errno == ENOENT) {
+            LogTempCleanup("debug", parent.string(), "already gone");
+        } else {
+            LogTempCleanup("warn", parent.string(), ErrnoMessage());
+        }
+        return;
+    }
+    if (S_ISLNK(st.st_mode) || !S_ISDIR(st.st_mode)) {
+        LogTempCleanup("warn", parent.string(), "parent is not a directory");
+        return;
+    }
+    std::error_code rec;
+    bool removed = fs::remove(parent, rec);
+    if (rec) {
+        if (rec == std::errc::directory_not_empty) {
+            LogTempCleanup("debug", parent.string(), rec.message());
+        } else {
+            LogTempCleanup("warn", parent.string(), rec.message());
+        }
+        return;
+    }
+    if (!removed) {
+        LogTempCleanup("debug", parent.string(), "already gone");
+    }
+}
+
 } // namespace
 
 void ValidateTempDirectoryBase(const std::string &base) {
@@ -159,19 +223,19 @@ std::string CreateSandboxTempDirectory(const std::string &base, const std::strin
     }
 }
 
-void RemoveSandboxTempDirectory(const std::string &path) {
+void RemoveSandboxTempDirectory(const std::string &path, const std::string &base) {
     if (path.empty()) {
         return;
     }
     std::error_code ec;
     fs::remove_all(path, ec);
     if (ec) {
-        Json log;
-        log["event"] = "sandbox_temp_cleanup";
-        log["path"] = path;
-        log["error"] = ec.message();
-        std::clog << log.dump() << "\n";
+        LogTempCleanup("warn", path, ec.message());
     }
+    if (base.empty()) {
+        return;
+    }
+    RemoveEmptySandboxParent(fs::path(path).parent_path(), fs::path(base));
 }
 
 bool SameTempDirectory(const std::string &a, const std::string &b) {

@@ -64,11 +64,14 @@ void duckbox::test::RunTempDirectoryTests() {
     auto second = CreateSandboxTempDirectory(root.string(), "perm-a", 1);
     Expect(first != second, "two creates for the same id@version get distinct directories");
     Expect(SameTempDirectory(first, first), "existing directory is equivalent to itself");
-    RemoveSandboxTempDirectory(first);
+    RemoveSandboxTempDirectory(first, root.string());
     Expect(!fs::exists(first), "remove deletes the instance directory");
     Expect(fs::exists(second), "remove of one instance leaves the other");
-    RemoveSandboxTempDirectory(second);
-    RemoveSandboxTempDirectory("");
+    Expect(fs::is_directory(root / "perm-a"),
+           "non-empty {base}/{id} parent is left while another instance lives");
+    RemoveSandboxTempDirectory(second, root.string());
+    Expect(!fs::exists(root / "perm-a"), "remove of the last instance deletes the empty parent");
+    RemoveSandboxTempDirectory("", root.string());
     Expect(true, "remove is idempotent and no-op on empty");
 
     {
@@ -85,7 +88,8 @@ void duckbox::test::RunTempDirectoryTests() {
         Expect(inst != parent.string(), "instance dir is not the pre-existing parent");
         auto after = fs::status(parent).permissions();
         Expect(before == after, "pre-existing parent is not chmod'd");
-        RemoveSandboxTempDirectory(inst);
+        RemoveSandboxTempDirectory(inst, root.string());
+        Expect(!fs::exists(parent), "empty pre-existing parent is removed after the last instance");
     }
 
     {
@@ -114,6 +118,139 @@ void duckbox::test::RunTempDirectoryTests() {
     ExpectThrowContains([&] { (void)CreateSandboxTempDirectory(root.string(), "file-a", 1); },
                         "must be a directory", "create fails when {base}/{id} is a file");
     fs::remove(file_path);
+
+    {
+        auto inst = CreateSandboxTempDirectory(root.string(), "keep-a", 1);
+        auto parent = root / "keep-a";
+        RemoveSandboxTempDirectory(inst, "");
+        Expect(!fs::exists(inst), "empty base still removes the instance directory");
+        Expect(fs::is_directory(parent), "empty base leaves {base}/{id} in place");
+        fs::remove_all(parent);
+    }
+
+    {
+        auto inst = CreateSandboxTempDirectory(root.string(), "gone-a", 1);
+        auto parent = root / "gone-a";
+        RemoveSandboxTempDirectory(inst, root.string());
+        Expect(!fs::exists(parent), "first remove deletes the empty parent");
+        RemoveSandboxTempDirectory(inst, root.string());
+        Expect(true, "second remove tolerates an already-gone parent");
+        Expect(fs::is_directory(root), "already-gone parent cleanup does not touch the base");
+    }
+
+    {
+        auto inst = CreateSandboxTempDirectory(root.string(), "plant-a", 1);
+        auto parent = root / "plant-a";
+        {
+            std::ofstream o(parent / "keep-me");
+            o << "planted\n";
+        }
+        RemoveSandboxTempDirectory(inst, root.string());
+        Expect(!fs::exists(inst), "instance dir is still removed when a file is planted");
+        Expect(fs::is_directory(parent), "non-empty parent is not removed");
+        Expect(fs::exists(parent / "keep-me"), "planted file is left in place");
+        fs::remove_all(parent);
+    }
+
+    {
+        auto inst = CreateSandboxTempDirectory(root.string(), "file-id", 1);
+        auto parent = root / "file-id";
+        fs::remove_all(inst);
+        fs::remove(parent);
+        {
+            std::ofstream o(parent);
+            o << "not-a-dir\n";
+        }
+        RemoveSandboxTempDirectory(inst, root.string());
+        Expect(fs::is_regular_file(parent), "file at {base}/{id} is not removed");
+        fs::remove(parent);
+    }
+
+    {
+        auto real = root / "real-id";
+        fs::create_directories(real);
+        fs::permissions(real, fs::perms::owner_all, fs::perm_options::replace);
+        auto link = root / "sym-id";
+        fs::create_directory_symlink(real, link);
+        auto fake = link / "1-aaa";
+        RemoveSandboxTempDirectory(fake.string(), root.string());
+        Expect(fs::is_symlink(link), "symlink at {base}/{id} is not removed");
+        Expect(fs::is_directory(real), "symlink target outside the instance dir is not removed");
+        fs::remove(link);
+        fs::remove_all(real);
+    }
+
+    {
+        auto leaf = root / "not-under-id";
+        fs::create_directories(leaf);
+        fs::permissions(leaf, fs::perms::owner_all, fs::perm_options::replace);
+        RemoveSandboxTempDirectory(leaf.string(), root.string());
+        Expect(fs::is_directory(root), "parent equal to the configured base is not removed");
+        Expect(!fs::exists(leaf), "instance-path remove_all still deletes the named path");
+    }
+
+    {
+        auto outsider = fs::temp_directory_path() / "duckbox-temp-unit-outside";
+        fs::remove_all(outsider);
+        auto foreign_parent = outsider / "escape-a";
+        auto foreign_inst = foreign_parent / "1-aaa";
+        fs::create_directories(foreign_inst);
+        fs::permissions(outsider, fs::perms::owner_all, fs::perm_options::replace);
+        fs::permissions(foreign_parent, fs::perms::owner_all, fs::perm_options::replace);
+        RemoveSandboxTempDirectory(foreign_inst.string(), root.string());
+        Expect(!fs::exists(foreign_inst), "instance path outside base is still remove_all'd");
+        Expect(fs::is_directory(foreign_parent),
+               "parent outside the configured base is not removed");
+        fs::remove_all(outsider);
+    }
+
+    {
+        auto nested = root / "deep-a" / "1-aaa" / "extra";
+        fs::create_directories(nested);
+        RemoveSandboxTempDirectory(nested.string(), root.string());
+        Expect(!fs::exists(nested), "deep instance path is still remove_all'd");
+        Expect(fs::is_directory(root / "deep-a" / "1-aaa"),
+               "parent more than one component under base is not removed");
+        fs::remove_all(root / "deep-a");
+    }
+
+    {
+        RemoveSandboxTempDirectory("rel/id/1-aaa", root.string());
+        Expect(true, "relative instance path does not throw");
+        Expect(fs::is_directory(root), "relative path cleanup does not touch the base");
+    }
+
+    {
+        auto inst = CreateSandboxTempDirectory(root.string(), "relbase-a", 1);
+        auto parent = root / "relbase-a";
+        RemoveSandboxTempDirectory(inst, "relative-base");
+        Expect(!fs::exists(inst), "relative base still remove_all's the instance");
+        Expect(fs::is_directory(parent), "relative base does not remove the parent");
+        fs::remove_all(parent);
+    }
+
+    {
+        auto notdir = root / "notdir-base";
+        {
+            std::ofstream o(notdir);
+            o << "file\n";
+        }
+        RemoveSandboxTempDirectory((notdir / "id" / "1-aaa").string(), notdir.string());
+        Expect(fs::is_regular_file(notdir),
+               "lstat ENOTDIR on parent does not delete the base file");
+        fs::remove(notdir);
+    }
+
+    if (geteuid() != 0) {
+        auto inst = CreateSandboxTempDirectory(root.string(), "perm-deny", 1);
+        auto parent = root / "perm-deny";
+        fs::permissions(parent, fs::perms::owner_read | fs::perms::owner_exec,
+                        fs::perm_options::replace);
+        RemoveSandboxTempDirectory(inst, root.string());
+        Expect(fs::is_directory(parent), "unwritable non-empty parent is not removed");
+        fs::permissions(parent, fs::perms::owner_all, fs::perm_options::replace);
+        fs::remove_all(parent);
+    }
 
     Expect(SameTempDirectory("", ""), "empty paths compare equal");
     Expect(!SameTempDirectory("", "/tmp/x"), "empty does not match a path");
