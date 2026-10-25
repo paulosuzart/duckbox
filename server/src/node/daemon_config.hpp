@@ -57,11 +57,9 @@ struct LeaseSettings {
     int64_t skew_ms = 1000;          // steal waits this long past expiry_ms (clock skew)
     int64_t cache_ms = 250;          // short Acquire cache; 0 disables
     int64_t gc_ms = 86'400'000;      // tombstone GC age; 0 disables (default 24h)
-    int64_t proxy_timeout_ms = 5000; // peer connect, handshake, GetFlightInfo (not DoGet)
-    // First-message wait when sandbox query_timeout_ms is 0. DoGet itself has
-    // no stream deadline; this only bounds waiting for the owner's schema.
+    int64_t proxy_timeout_ms = 5000; // peer connect, handshake, GetFlightInfo; added to DoGet deadline
+    // Whole-call proxied DoGet deadline when sandbox query_timeout_ms is 0.
     int64_t proxy_first_message_max_ms = 60000;
-    int64_t proxy_max_inflight = 64; // concurrent proxied DoGets; reject with "peer proxy busy"
     size_t max_leases = 0;           // 0 = unlimited
 };
 

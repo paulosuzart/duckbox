@@ -421,129 +421,30 @@ void TestLongProxiedQuery() {
     nb.Stop();
 }
 
-void TestOwnerInterruptOnCancel() {
+void TestDeadlineCancelsHungOwner() {
     ProxyFixture fx(kProxyTimeoutMs);
-    auto peers_b = std::make_shared<PeerFlight>(fx.daemon_b.peer_secret, kProxyTimeoutMs);
-    auto nb = StartDuckboxPair(fx.daemon_b, fx.defs, fx.rt_b, peers_b, fx.signer, fx.rewriter);
-    nb.Start();
-    fx.leases_b->set_flight("grpc://127.0.0.1:" + std::to_string(nb.int_port));
-    auto owned = fx.rt_b->Get(fx.rec);
-    Expect(owned && fx.leases_b->Peek("proxy-timeout-box").owned_locally,
-           "interrupt-test owner holds the sandbox");
-
-    int64_t n = 400000;
-    int64_t local_ms = 0;
-    std::string sql;
-    for (int i = 0; i < 6; i++) {
-        sql = "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM t WHERE x < " +
-              std::to_string(n) + ") SELECT max(x) FROM t";
-        auto t0 = std::chrono::steady_clock::now();
-        auto out = owned->Execute(sql);
-        local_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now() - t0)
-                       .count();
-        if (local_ms > 1500) {
-            break;
-        }
-        n *= 2;
-    }
-    Expect(local_ms > 1500, "calibrated owner query is long enough to observe Interrupt");
-
-    auto loc = Location::ForGrpcTcp("127.0.0.1", nb.pub_port);
-    auto cli_res = FlightClient::Connect(*loc);
-    Expect(cli_res.ok(), "interrupt-test client connects to the owner");
-    auto cli = std::shared_ptr<FlightClient>(std::move(cli_res).ValueOrDie());
-    ::arrow::flight::sql::FlightSqlClient sql_cli(cli);
-    auto info_res = sql_cli.Execute(QueryOpt(), sql);
-    Expect(info_res.ok(), "owner GetFlightInfo for the long query succeeds");
-    if (!info_res.ok()) {
-        nb.Stop();
-        return;
-    }
-    auto ticket = info_res.ValueOrDie()->endpoints()[0].ticket;
-    std::string owner_url = "grpc://127.0.0.1:" + std::to_string(nb.int_port);
-
-    FakeCallContext ctx;
-    std::atomic<bool> done{false};
-    Status status = Status::OK();
-    std::thread reader([&] {
-        auto stream_res = fx.peers_a->ForwardDoGet(owner_url, ticket, fx.rec.id, fx.rec.key, ctx,
-                                                   fx.rec.spec.resources.query_timeout_ms);
-        status = stream_res.status();
-        if (stream_res.ok()) {
-            (void)(*stream_res)->Close();
-        }
-        done.store(true, std::memory_order_release);
-    });
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    auto t0 = std::chrono::steady_clock::now();
-    ctx.Cancel();
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-            .count();
-    std::cout << "owner_interrupt_cancel_ms=" << elapsed_ms << " local_ms=" << local_ms << "\n";
-    if (!done.load(std::memory_order_acquire)) {
-        nb.Stop();
-    }
-    reader.join();
-    Expect(done.load(std::memory_order_acquire), "proxied DoGet returns after owner Interrupt");
-    Expect(!status.ok(), "cancel of a running owner query fails the proxied DoGet");
-    Expect(absl::StrContains(status.ToString(), "peer proxy cancelled") ||
-               absl::StrContains(status.ToString(), "peer proxy failed"),
-           "owner Interrupt maps to a fixed client message");
-    Expect(elapsed_ms < 1500, "owner Interrupt unblocks DoGet before the query finishes");
-    Expect(elapsed_ms < local_ms, "interrupted query is faster than the calibrated run");
-    nb.Stop();
-}
-
-void TestCancelPropagates() {
-    ProxyFixture fx(kProxyTimeoutMs);
+    fx.peers_a->set_first_message_max_ms(kProxyTimeoutMs);
     StubOwner owner;
     owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::HangBeforeSchema);
     auto *stub = owner.server.get();
     owner.Start(fx.daemon_b);
 
     FakeCallContext ctx;
-    std::atomic<bool> done{false};
-    Status status = Status::OK();
-    std::unique_ptr<FlightDataStream> held;
-    std::thread reader([&] {
-        auto stream_res = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-timeout"}, fx.rec.id,
-                                                   fx.rec.key, ctx);
-        status = stream_res.status();
-        if (stream_res.ok()) {
-            held = std::move(*stream_res);
-        }
-        done.store(true, std::memory_order_release);
-    });
-    Expect(WaitStub(stub, &OwnerStub::DoGetEntered, 4000),
-           "owner DoGet is in progress before cancel");
     auto t0 = std::chrono::steady_clock::now();
-    ctx.Cancel();
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    auto stream_res = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-timeout"}, fx.rec.id,
+                                               fx.rec.key, ctx, 0);
     auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
             .count();
-    std::cout << "cancel_before_schema_ms=" << elapsed_ms << "\n";
-    if (!done.load(std::memory_order_acquire)) {
-        owner.Stop();
-    }
-    reader.join();
-    Expect(done.load(std::memory_order_acquire), "proxied DoGet returns after client cancel");
-    Expect(!status.ok(), "cancel before schema fails the proxied DoGet");
-    Expect(absl::StrContains(status.ToString(), "peer proxy cancelled"),
-           "client cancel maps to a fixed message");
-    Expect(held == nullptr, "cancel before schema does not return a stream");
-    Expect(elapsed_ms < 1500, "cancel unblocks DoGet before the first message");
+    std::cout << "deadline_before_schema_ms=" << elapsed_ms << "\n";
+    Expect(!stream_res.ok(), "hung owner fails the whole-call DoGet deadline");
+    auto msg = stream_res.status().ToString();
+    Expect(absl::StrContains(msg, "peer proxy timed out"),
+           "deadline before schema is a fixed timeout error");
+    Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 2500,
+           "whole-call deadline fires around proxy_first_message_max_ms");
     Expect(WaitStub(stub, &OwnerStub::Cancelled, 2000),
-           "upstream owner DoGet is cancelled when the client cancels");
+           "gRPC deadline cancels the hung owner DoGet");
     owner.Stop();
 }
 
@@ -603,8 +504,7 @@ void TestSlowStubStream() {
 } // namespace
 
 void duckbox::test::RunProxyTimeoutTests() {
-    TestCancelPropagates();
-    TestOwnerInterruptOnCancel();
+    TestDeadlineCancelsHungOwner();
     TestGetFlightInfoTimeout();
     TestSlowStubStream();
     TestLongProxiedQuery();
