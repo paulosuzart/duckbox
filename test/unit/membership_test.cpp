@@ -181,6 +181,7 @@ void duckbox::test::RunMembershipTests() {
 		       "IsKnownFlight reuses the cache filled by AdvertisedAddressOf");
 		Expect(counted->lists() == lists_after_first,
 		       "IsKnownFlight does not ListKeys inside the AdvertisedAddressOf cache window");
+		Expect(!d.IsKnownFlight(""), "empty flight is not a known flight");
 		Expect(d.AdvertisedAddressOf("").empty(), "empty owner_id is not a directory lookup");
 		Expect(counted->lists() == lists_after_first, "empty owner_id does not ListKeys");
 		Expect(d.AdvertisedAddressOf("missing").empty(),
