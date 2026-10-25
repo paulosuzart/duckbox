@@ -68,7 +68,9 @@ using duckbox::test::MemoryAnalystPath;
 using duckbox::test::MemorySpecDir;
 using duckbox::test::TestDaemon;
 
-constexpr int64_t kProxyTimeoutMs = 800;
+// Sub-second FlightCallOptions.timeout can become 0 (no deadline) on
+// Apple Arrow / gRPC integer-second conversion. Use a whole second.
+constexpr int64_t kProxyTimeoutMs = 2000;
 
 struct FlightPair {
     std::unique_ptr<DuckboxFlightServer> pub;
@@ -447,14 +449,14 @@ void TestDeadlineCancelsHungOwner() {
            "deadline before schema is a fixed timeout error");
     Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 2500,
            "whole-call deadline fires around proxy_first_message_max_ms");
-    Expect(WaitStub(stub, &OwnerStub::Cancelled, 2000),
+    Expect(WaitStub(stub, &OwnerStub::Cancelled, 4000),
            "gRPC deadline cancels the hung owner DoGet");
     owner.Stop();
 }
 
 void TestDeadlineCapped() {
     ProxyFixture fx(500);
-    fx.peers_a->set_first_message_max_ms(800);
+    fx.peers_a->set_first_message_max_ms(kProxyTimeoutMs);
     StubOwner owner;
     owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::HangBeforeSchema);
     auto *stub = owner.server.get();
@@ -471,9 +473,9 @@ void TestDeadlineCapped() {
     Expect(!stream_res.ok(), "ceiling caps query_timeout_ms + proxy_timeout_ms");
     Expect(absl::StrContains(stream_res.status().ToString(), "peer proxy timed out"),
            "capped deadline is a fixed timeout error");
-    Expect(elapsed_ms >= 800 && elapsed_ms < 800 + 2500,
-           "whole-call deadline is the 800ms ceiling, not 8000+500");
-    Expect(WaitStub(stub, &OwnerStub::Cancelled, 2000),
+    Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 2500,
+           "whole-call deadline is the 2000ms ceiling, not 8000+500");
+    Expect(WaitStub(stub, &OwnerStub::Cancelled, 4000),
            "gRPC deadline cancels the hung owner DoGet");
     owner.Stop();
 }

@@ -41,9 +41,9 @@ struct QueryOutput {
     int64_t row_count = 0;
 };
 
-// BasicLockable with a deadline. Apple libc++ timed_mutex and try_lock
-// loops do not return; condition_variable::wait_until uses
-// pthread_cond_timedwait, which does.
+// BasicLockable with a deadline. Apple libc++ timed_mutex / try_lock
+// loops do not return, and wait_until(steady_clock) is unreliable
+// there. wait_for(remaining) uses a relative timeout.
 class SandboxMutex {
   public:
     void lock() {
@@ -61,8 +61,14 @@ class SandboxMutex {
     }
     bool try_lock_until(std::chrono::steady_clock::time_point deadline) {
         std::unique_lock<std::mutex> g(mu_);
-        if (!cv_.wait_until(g, deadline, [this] { return !held_; })) {
-            return false;
+        while (held_) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                return false;
+            }
+            if (cv_.wait_for(g, deadline - now) == std::cv_status::timeout && held_) {
+                return false;
+            }
         }
         held_ = true;
         return true;
