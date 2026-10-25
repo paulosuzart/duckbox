@@ -483,6 +483,9 @@ try:
     os.kill(owner, signal.SIGCONT)
 except OSError:
     pass
+# Skip pyarrow/gRPC atexit: tearing down live DoGet clients against a
+# just-continued owner has SIGSEGV'd the interpreter (CI exit 139).
+os._exit(0)
 PY
 # Always continue C in the shell so later steps (S3 pause) are not talking
 # to a still-frozen owner. The freeze case below uses a 60s client timeout

@@ -341,7 +341,16 @@ bool DeadlineReached(Deadline deadline) {
     if (now >= deadline) {
         return ::arrow::flight::TimeoutDuration(0);
     }
-    return ::arrow::flight::TimeoutDuration(std::chrono::duration<double>(deadline - now).count());
+    // Same units as FlightCallOptions (seconds). duration_cast to
+    // milliseconds then /1000 matches the previous working timeout_ms_
+    // assignment; constructing TimeoutDuration from a raw tick count
+    // can yield 0 (no deadline) on some libc++ / Arrow builds.
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+    if (ms <= 0) {
+        return ::arrow::flight::TimeoutDuration(0);
+    }
+    return ::arrow::flight::TimeoutDuration(static_cast<double>(ms) / 1000.0);
 }
 
 // Arrow maps gRPC DEADLINE_EXCEEDED to FlightStatusCode::TimedOut. That is the
