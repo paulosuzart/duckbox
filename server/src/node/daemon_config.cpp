@@ -6,6 +6,7 @@
 #include "s3/s3.hpp"
 #include "s3/s3_credentials.hpp"
 #include "s3/secrets.hpp"
+#include "sandbox/temp_directory.hpp"
 
 #include "absl/strings/ascii.h"
 
@@ -261,7 +262,7 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
     }
     if (auto *lim = root.Get("limits")) {
         YamlRejectUnknownKeys(*lim, {"handle_ttl_seconds", "idle_evict_ms", "idle_timeout",
-                                     "max_idle_timeout", "max_sandboxes"});
+                                     "max_idle_timeout", "max_sandboxes", "temp_directory"});
         d.handle_ttl_seconds = lim->GetInt("handle_ttl_seconds", d.handle_ttl_seconds);
         d.idle_evict_ms = lim->GetInt("idle_evict_ms", d.idle_evict_ms);
         auto idle_raw = lim->GetString("idle_timeout");
@@ -282,6 +283,8 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
         }
         d.max_sandboxes = static_cast<size_t>(
             lim->GetInt("max_sandboxes", static_cast<int64_t>(d.max_sandboxes)));
+        d.temp_directory =
+            std::string(absl::StripAsciiWhitespace(lim->GetString("temp_directory")));
     }
     if (auto *allow = root.Get("lake_allow")) {
         YamlRejectUnknownKeys(*allow, {"s3_endpoints", "secret_refs", "aws_profiles", "role_arns",
@@ -433,6 +436,13 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     }
     if (cfg.max_sandboxes == 0) {
         add("limits.max_sandboxes", "must be >= 1");
+    }
+    if (!cfg.temp_directory.empty()) {
+        try {
+            sandbox::ValidateTempDirectoryBase(cfg.temp_directory);
+        } catch (const std::exception &e) {
+            add("limits.temp_directory", e.what());
+        }
     }
     if (cfg.handle_secret.empty()) {
         add("handle_secret", "required (or handle_secret_env)");

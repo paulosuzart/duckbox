@@ -22,5 +22,6 @@ int main() {
     RunExtensionCapiRuntimeTests();
     RunAgentModeRuntimeTests();
     RunSecretFlightTests();
+    RunTempDirectoryExecTests();
     return ReportAndExit("integration");
 }

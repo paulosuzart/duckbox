@@ -22,6 +22,7 @@ void RunQuackRuntimeTests();
 void RunExtensionCapiRuntimeTests();
 void RunAgentModeRuntimeTests();
 void RunSecretFlightTests();
+void RunTempDirectoryExecTests();
 
 } // namespace test
 } // namespace duckbox
