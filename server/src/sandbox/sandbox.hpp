@@ -41,52 +41,6 @@ struct QueryOutput {
     int64_t row_count = 0;
 };
 
-// BasicLockable with a deadline. Apple libc++ timed_mutex / try_lock
-// loops do not return, and wait_until(steady_clock) is unreliable
-// there. wait_for(remaining) uses a relative timeout.
-class SandboxMutex {
-  public:
-    void lock() {
-        std::unique_lock<std::mutex> g(mu_);
-        cv_.wait(g, [this] { return !held_; });
-        held_ = true;
-    }
-    bool try_lock() {
-        std::unique_lock<std::mutex> g(mu_);
-        if (held_) {
-            return false;
-        }
-        held_ = true;
-        return true;
-    }
-    bool try_lock_until(std::chrono::steady_clock::time_point deadline) {
-        std::unique_lock<std::mutex> g(mu_);
-        while (held_) {
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= deadline) {
-                return false;
-            }
-            if (cv_.wait_for(g, deadline - now) == std::cv_status::timeout && held_) {
-                return false;
-            }
-        }
-        held_ = true;
-        return true;
-    }
-    void unlock() {
-        {
-            std::lock_guard<std::mutex> g(mu_);
-            held_ = false;
-        }
-        cv_.notify_one();
-    }
-
-  private:
-    std::mutex mu_;
-    std::condition_variable cv_;
-    bool held_{false};
-};
-
 // One warm DuckDB for id@version. Execute / ExecuteRewritten / ExecuteHandle /
 // ExtractPlan / DescribeRewritten take mu_ for the whole statement so Flight
 // DoGet and Execute on the same instance cannot interleave.
@@ -163,10 +117,9 @@ class TenantSandbox {
     // Held for the whole user statement (Execute / ExtractPlan / Describe).
     // DescribeHandleArrow waits until query_timeout_ms (else
     // proxy_first_message_max_ms) so GetFlightInfo cannot wait forever behind
-    // a DoGet stuck in Arrow #31235 send-after-cancel. Apple libc++
-    // timed_mutex / try_lock loops do not return; the wait is
-    // SandboxMutex::try_lock_until (condition_variable) until that deadline.
-    SandboxMutex mu_;
+    // a DoGet stuck in Arrow #31235 send-after-cancel. The wait is
+    // std::timed_mutex::try_lock_until until that deadline.
+    std::timed_mutex mu_;
     std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
     int64_t last_used_wall_ms_ = 0;
     int warmup_count_ = 0;
