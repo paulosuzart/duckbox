@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <system_error>
@@ -21,6 +22,12 @@ using namespace config;
 namespace fs = std::filesystem;
 
 namespace {
+
+// Serializes "{base}/{id} exists -> mkdirat child" against "rmdir empty
+// {base}/{id}" inside this process. Without it a teardown of id@v1 can rmdir
+// the parent between EnsureSafeDirectory and mkdirat of a concurrent id@v2
+// warmup. Held only around a few syscalls; no waits, no loops.
+std::mutex g_parent_mu;
 
 void RejectUnsafeBaseSyntax(const fs::path &root) {
     if (!root.is_absolute()) {
@@ -142,6 +149,7 @@ void RemoveEmptySandboxParent(const fs::path &parent, const fs::path &root) {
         LogTempCleanup("warn", parent.string(), "refusing parent outside configured base");
         return;
     }
+    std::lock_guard<std::mutex> hold(g_parent_mu);
     struct stat st {};
     if (lstat(parent.c_str(), &st) != 0) {
         if (errno == ENOENT) {
@@ -211,6 +219,7 @@ std::string CreateSandboxTempDirectory(const std::string &base, const std::strin
         return {};
     }
     try {
+        std::lock_guard<std::mutex> hold(g_parent_mu);
         EnsureSafeDirectory(base, "limits.temp_directory");
         EnsureSafeDirectory(parent, "sandbox temp directory");
         return ExclusiveInstanceDir(parent, version);

@@ -5,9 +5,13 @@
 #include "node/daemon_config.hpp"
 #include "sandbox/temp_directory.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 
 void duckbox::test::RunTempDirectoryTests() {
@@ -261,6 +265,57 @@ void duckbox::test::RunTempDirectoryTests() {
         fs::permissions(root, saved, fs::perm_options::replace);
         Expect(fs::is_directory(parent), "empty parent is left when rmdir is denied");
         fs::remove_all(parent);
+    }
+
+    {
+        // I1: parent is lexically ".." of a missing base. Path {W}/holder/1-aaa,
+        // base {W}/holder/base (does not exist). Must not delete {W}/holder.
+        auto w = fs::temp_directory_path() / "duckbox-temp-unit-dotdot";
+        fs::remove_all(w);
+        auto holder = w / "holder";
+        auto missing_base = holder / "base";
+        auto inst = holder / "1-aaa";
+        fs::create_directories(inst);
+        fs::permissions(w, fs::perms::owner_all, fs::perm_options::replace);
+        fs::permissions(holder, fs::perms::owner_all, fs::perm_options::replace);
+        Expect(!fs::exists(missing_base), "I1 configured base does not exist");
+        RemoveSandboxTempDirectory(inst.string(), missing_base.string());
+        Expect(!fs::exists(inst), "I1 instance path is still remove_all'd");
+        Expect(fs::is_directory(holder),
+               "parent that is '..' relative to a missing base is not removed");
+        Expect(!fs::exists(missing_base), "missing base is not created");
+        Expect(fs::is_directory(w), "nothing outside the missing base is removed");
+        fs::remove_all(w);
+    }
+
+    {
+        auto stress_root = root / "race-base";
+        fs::create_directories(stress_root);
+        fs::permissions(stress_root, fs::perms::owner_all, fs::perm_options::replace);
+        std::atomic<int> failures{0};
+        auto worker = [&](int version) {
+            for (int i = 0; i < 20000; i++) {
+                try {
+                    auto inst = CreateSandboxTempDirectory(stress_root.string(), "race-a", version);
+                    RemoveSandboxTempDirectory(inst, stress_root.string());
+                } catch (...) {
+                    failures.fetch_add(1);
+                }
+            }
+        };
+        auto t0 = std::chrono::steady_clock::now();
+        std::thread t1([&] { worker(1); });
+        std::thread t2([&] { worker(2); });
+        t1.join();
+        t2.join();
+        auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                      .count();
+        std::cerr << "temp_directory race stress_ms=" << ms << " failures=" << failures.load()
+                  << "\n";
+        Expect(failures.load() == 0,
+               "concurrent create/remove of the same id does not fail (failures=" +
+                   std::to_string(failures.load()) + ")");
+        fs::remove_all(stress_root);
     }
 
     Expect(SameTempDirectory("", ""), "empty paths compare equal");
