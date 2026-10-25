@@ -33,6 +33,7 @@ int main() {
     RunSecretFlightTests();
     RunTempDirectoryExecTests();
     RunTokenSanitizeTests();
+    RunRetryableErrorFlightTests();
     std::cerr << "integration suite proxy_hang\n" << std::flush;
     // Last: 150 hung DoGets can detach leftover gRPC threads (Arrow #31235).
     RunProxyHangTests();

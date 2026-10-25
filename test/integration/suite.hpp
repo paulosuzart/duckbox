@@ -29,6 +29,7 @@ void RunStorageFormatRuntimeTests();
 void RunSecretFlightTests();
 void RunTempDirectoryExecTests();
 void RunTokenSanitizeTests();
+void RunRetryableErrorFlightTests();
 
 } // namespace test
 } // namespace duckbox

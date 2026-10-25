@@ -287,6 +287,17 @@ v1 wire protocol. Clients authenticate with `Authorization: Bearer` on every cal
 - `x-duckbox-caller` — trusted caller identity; used only when `auth.allow_insecure_dev` is set (Flight SQL also ignores it when `auth.bearer_secrets` or `auth.jwt_secret` is set). Debug HTTP is refused without that flag.
 - `Authorization: Bearer` — static `auth.bearer_secrets` (constant-time compare) or HS256 JWT (`auth.jwt_secret`, also when `auth.mode` is `token`). `alg` must be `"HS256"` exactly (not a substring); `sub` and `exp` are required (`nbf` optional, 60s leeway). Unsigned tokens are rejected. JDBC/ADBC need only this header. The listener itself is still plaintext unless TLS is terminated in front of it.
 
+**Errors.** Tenant-facing Flight errors keep a stable `code:` prefix when the client must retry, plus compact JSON `extra_info` (`code`, and `owner` / `address` only when known). The secret-redaction safety net still runs on the message. Other errors keep their existing status.
+
+| Code | Flight / gRPC status | When |
+| --- | --- | --- |
+| `owner_moved:` | `FlightStatusCode::Unavailable` / `UNAVAILABLE` | Sandbox owner changed; retry the query. Names the current owner and advertised address when known. `extra_info` example: `{"code":"owner_moved","owner":"node-c","address":"grpc://10.0.0.3:4747"}`. |
+| `no_owner:` | `FlightStatusCode::Unavailable` / `UNAVAILABLE` | No live owner (`sandbox has no owner; retry`), describe timed out, or the peer advertise URL is not a registered node. Retry. `extra_info`: `{"code":"no_owner"}`. |
+| `policy_violation` | unchanged (`Invalid`) | Spec or SQL enforcement rejected the statement (table/function not allowlisted, only SELECT, …). |
+| `Unauthenticated` | `Unauthenticated` / `UNAUTHENTICATED` | Missing or invalid caller credential. Never echoes the secret. |
+| `re-prepare` | `Invalid` | Prepared handle version is not current (outside `handles.stale_version_grace`). |
+| `lake catalog unavailable; see operator logs` | `Invalid` | Catalog attach / catalog IO failed. Fixed generic text. |
+
 Public CRUD actions: `CreateSandbox`, `GetSandbox`, `UpdateSandbox`, `DeleteSandbox`, `ListSandboxes`, `ExpireSandbox`. Create/Update body is spec YAML; ListSandboxes YAML body filters `id_prefix`, `key_prefix`, `policy_class`, `state` (`warm`|`passive`|`defined`) plus `limit`/`offset`. Each list item is a summary (`id`, `key`, `version`, `policy_class`, `state`, `owner`, `created_at`, `updated_at`, `last_used_at`, `expires_at`) — not the full spec. `owner` is the live lease holder. `ExpireSandbox` passivates the instance and invalidates prepared handles; the definition stays. Operator actions `DrainNode` / `NodeStatus` (`duckbox node drain`) are served only on the **internal** listener, restricted to `auth.operators` (deny by default; sandbox CRUD callers are not operators). Peer proxy calls use `auth.peer_secret_ref` (`env:` / `file:`). Never expose `internal_listen` publicly.
 
 Optional spec `lifecycle.idle_timeout` passivates an idle instance (daemon `limits.idle_timeout` / `idle_evict_ms` is the default; `limits.max_idle_timeout` caps it). `lifecycle.ttl` / `lifecycle.expires_at` tombstone the definition.
