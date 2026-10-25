@@ -64,6 +64,8 @@ jobs:
       - name: Guardrail tests
         run: ctest --test-dir build -L guardrails --output-on-failure
       - name: Integration tests
+        env:
+          DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: ctest --test-dir build -L integration --output-on-failure
       - name: Validate memory spec
         run: make validate

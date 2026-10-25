@@ -501,6 +501,8 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/s3_registry_test.cpp
   test/integration/auth_flight_test.cpp
   test/integration/bearer_flight_test.cpp
+  test/integration/cli_auth_test.cpp
+  test/integration/python_client_auth_test.cpp
   test/integration/cluster_test.cpp
   test/integration/signal_shutdown_test.cpp
   test/integration/connect_runtime_test.cpp

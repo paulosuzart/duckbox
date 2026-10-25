@@ -1482,8 +1482,12 @@ int RunSandboxCli(const SandboxCliRequest &req) {
         return 1;
     }
     auto client = std::move(*client_res);
+    auto token = ResolveBearerToken(req.token);
     ::arrow::flight::FlightCallOptions opt;
     opt.headers.emplace_back("x-duckbox-caller", req.caller.empty() ? "local" : req.caller);
+    if (!token.empty()) {
+        opt.headers.emplace_back("authorization", "Bearer " + token);
+    }
     if (!req.id.empty()) {
         opt.headers.emplace_back("x-duckbox-sandbox", req.id);
     }
@@ -1599,6 +1603,7 @@ int RunNodeDrain(const NodeCliRequest &req) {
         return 1;
     }
     auto client = std::move(*client_res);
+    auto token = ResolveBearerToken(req.token);
     std::string handshake = req.peer_secret;
     if (handshake.starts_with("env:") || handshake.starts_with("file:")) {
         try {
@@ -1609,8 +1614,8 @@ int RunNodeDrain(const NodeCliRequest &req) {
             return 1;
         }
     }
-    if (handshake.empty() && !req.token.empty()) {
-        handshake = req.token;
+    if (handshake.empty() && !token.empty()) {
+        handshake = token;
     }
     if (!handshake.empty()) {
         auto auth = std::make_unique<PeerClientAuth>(handshake);
@@ -1621,8 +1626,8 @@ int RunNodeDrain(const NodeCliRequest &req) {
         }
     }
     ::arrow::flight::FlightCallOptions opt;
-    if (!req.token.empty()) {
-        opt.headers.emplace_back("authorization", "Bearer " + req.token);
+    if (!token.empty()) {
+        opt.headers.emplace_back("authorization", "Bearer " + token);
     } else if (req.peer_secret.empty()) {
         opt.headers.emplace_back("x-duckbox-caller", req.caller.empty() ? "local" : req.caller);
     }
