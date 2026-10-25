@@ -18,7 +18,10 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -43,6 +46,7 @@ class EnvGuard {
             unsetenv(name_);
         }
     }
+    void Set(const std::string &value) { setenv(name_, value.c_str(), 1); }
     void Clear() { unsetenv(name_); }
 
   private:
@@ -83,7 +87,83 @@ void ExpectRejectsCli(const std::string &token, const std::string &secret, const
     req.url = "grpc://127.0.0.1:1";
     req.token = token;
     auto cap = RunCli(req);
-    duckbox::test::Expect(cap.rc != 0 && cap.rc != 134, std::string(what) + " is rejected");
+    duckbox::test::Expect(cap.rc != 0, std::string(what) + " is rejected");
+    duckbox::test::Expect(cap.out.find(duckbox::flight::kInvalidBearerToken) != std::string::npos,
+                          std::string(what) + " prints the generic error");
+    duckbox::test::Expect(cap.out.find(secret) == std::string::npos,
+                          std::string(what) + " must not echo the token");
+}
+
+std::string DuckboxBin() {
+    if (const char *env = std::getenv("DUCKBOX_BIN")) {
+        if (env[0] != '\0') {
+            return env;
+        }
+    }
+#ifdef DUCKBOX_BIN_PATH
+    if (::access(DUCKBOX_BIN_PATH, X_OK) == 0) {
+        return DUCKBOX_BIN_PATH;
+    }
+#endif
+    std::string cov = std::string(DUCKBOX_SOURCE_DIR) + "/build-cov/duckbox";
+    if (::access(cov.c_str(), X_OK) == 0) {
+        return cov;
+    }
+    return std::string(DUCKBOX_SOURCE_DIR) + "/build/duckbox";
+}
+
+bool HaveDuckbox() {
+    return ::access(DuckboxBin().c_str(), X_OK) == 0;
+}
+
+Captured RunDuckbox(const std::vector<std::string> &args) {
+    Captured c;
+    std::string bin = DuckboxBin();
+    int fds[2];
+    if (pipe(fds) != 0) {
+        return c;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return c;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        dup2(fds[1], STDERR_FILENO);
+        close(fds[1]);
+        std::vector<char *> argv;
+        argv.push_back(const_cast<char *>(bin.c_str()));
+        for (const auto &a : args) {
+            argv.push_back(const_cast<char *>(a.c_str()));
+        }
+        argv.push_back(nullptr);
+        execv(bin.c_str(), argv.data());
+        _exit(127);
+    }
+    close(fds[1]);
+    char buf[4096];
+    ssize_t nread;
+    while ((nread = read(fds[0], buf, sizeof(buf))) > 0) {
+        c.out.append(buf, static_cast<size_t>(nread));
+    }
+    close(fds[0]);
+    int st = 0;
+    if (waitpid(pid, &st, 0) == -1) {
+        c.rc = 1;
+    } else if (WIFEXITED(st)) {
+        c.rc = WEXITSTATUS(st);
+    } else if (WIFSIGNALED(st)) {
+        c.rc = 128 + WTERMSIG(st);
+    }
+    return c;
+}
+
+void ExpectBinRejects(const Captured &cap, const std::string &secret, const char *what) {
+    duckbox::test::Expect(cap.rc != 134, std::string(what) + " must not SIGABRT");
+    duckbox::test::Expect(cap.rc != 0, std::string(what) + " is rejected");
     duckbox::test::Expect(cap.out.find(duckbox::flight::kInvalidBearerToken) != std::string::npos,
                           std::string(what) + " prints the generic error");
     duckbox::test::Expect(cap.out.find(secret) == std::string::npos,
@@ -157,7 +237,7 @@ void duckbox::test::RunTokenSanitizeTests() {
         drain.url = "grpc://127.0.0.1:1";
         drain.token = crlf;
         auto cap = RunDrain(drain);
-        Expect(cap.rc != 0 && cap.rc != 134, "drain CLI CRLF token is rejected before metadata");
+        Expect(cap.rc != 0, "drain CLI CRLF token is rejected before metadata");
         Expect(cap.out.find(kInvalidBearerToken) != std::string::npos,
                "drain CLI CRLF prints the generic error");
         Expect(cap.out.find(crlf_secret) == std::string::npos,
@@ -168,11 +248,29 @@ void duckbox::test::RunTokenSanitizeTests() {
         drain.url = "grpc://127.0.0.1:1";
         drain.token = "LEAKTOK\xC3\xA9X";
         auto cap = RunDrain(drain);
-        Expect(cap.rc != 0 && cap.rc != 134, "drain CLI non-ASCII token is rejected");
+        Expect(cap.rc != 0, "drain CLI non-ASCII token is rejected");
         Expect(cap.out.find(kInvalidBearerToken) != std::string::npos,
                "drain CLI non-ASCII prints the generic error");
         Expect(cap.out.find(leak) == std::string::npos,
                "drain CLI non-ASCII must not echo the token");
+    }
+
+    if (!HaveDuckbox()) {
+        if (std::getenv("GITHUB_ACTIONS")) {
+            Expect(false, "duckbox binary is required in CI for out-of-process token tests");
+        }
+    } else {
+        const std::string bin_token = "LEAKTOK\xC3\xA9X";
+        ExpectBinRejects(
+            RunDuckbox({"sandbox", "list", "--url", "grpc://127.0.0.1:1", "--token", bin_token}),
+            leak, "binary --token non-ASCII");
+        token_env.Set(bin_token);
+        ExpectBinRejects(RunDuckbox({"sandbox", "list", "--url", "grpc://127.0.0.1:1"}), leak,
+                         "binary DUCKBOX_TOKEN non-ASCII");
+        token_env.Clear();
+        ExpectBinRejects(
+            RunDuckbox({"node", "drain", "--url", "grpc://127.0.0.1:1", "--token", bin_token}),
+            leak, "binary node drain --token non-ASCII");
     }
 
     // Cover RunNodeDrain's Authorization: Bearer header (flight_sql_server.cpp
@@ -187,6 +285,10 @@ void duckbox::test::RunTokenSanitizeTests() {
     bsec.identity = "ops";
     bsec.secret = ops_secret;
     cfg.bearer_secrets.push_back(bsec);
+    BearerSecret bang;
+    bang.identity = "ops";
+    bang.secret = "!ops-secret~";
+    cfg.bearer_secrets.push_back(bang);
     cfg.operators = {"ops"};
 
     auto defs = std::make_shared<MemorySandboxRegistry>();
@@ -220,6 +322,26 @@ void duckbox::test::RunTokenSanitizeTests() {
                "drain CLI Bearer header reaches DrainNode");
         Expect(cap.out.find(ops_secret) == std::string::npos,
                "successful drain must not echo the token");
+    }
+    {
+        NodeCliRequest nr;
+        nr.url = "grpc://127.0.0.1:" + std::to_string(iport);
+        nr.token = "\v\f" + ops_secret + "\f\v";
+        nr.timeout_ms = 1;
+        auto cap = RunDrain(nr);
+        Expect(cap.rc == 0, "drain CLI trims surrounding VT/FF");
+        Expect(cap.out.find(ops_secret) == std::string::npos,
+               "VT/FF-trimmed drain must not echo the token");
+    }
+    {
+        NodeCliRequest nr;
+        nr.url = "grpc://127.0.0.1:" + std::to_string(iport);
+        nr.token = "!ops-secret~";
+        nr.timeout_ms = 1;
+        auto cap = RunDrain(nr);
+        Expect(cap.rc == 0, "drain CLI accepts bang and tilde in the token");
+        Expect(cap.out.find("!ops-secret~") == std::string::npos,
+               "bang-tilde drain must not echo the token");
     }
 
     (void)int_server->Shutdown();
@@ -271,6 +393,25 @@ void duckbox::test::RunTokenSanitizeTests() {
     cmd << PythonBin() << " " << script << " --url grpc://127.0.0.1:" << pport
         << " --token super-secret-token";
     Expect(std::system(cmd.str().c_str()) == 0, "Python token sanitization and query() wrapper");
+
+    if (HaveDuckbox()) {
+        std::string huge_ascii(100 * 1024, 'A');
+        huge_ascii.replace(0, 13, "LEAKLONGASCII");
+        auto cap = RunDuckbox({"sandbox", "list", "--url",
+                               "grpc://127.0.0.1:" + std::to_string(pport), "--token", huge_ascii});
+        Expect(cap.rc != 134, "100 KiB visible-ASCII binary must not SIGABRT");
+        Expect(cap.out.find("LEAKLONGASCII") == std::string::npos,
+               "100 KiB visible-ASCII binary must not echo the token");
+        const bool clean_limit = cap.out.find("metadata size exceeds") != std::string::npos ||
+                                 cap.out.find("resource exhausted") != std::string::npos ||
+                                 cap.out.find("Resource exhausted") != std::string::npos;
+        const bool accepted = cap.rc == 0 || cap.out.find("Unauthenticated") != std::string::npos ||
+                              cap.out.find("unauthenticated") != std::string::npos;
+        Expect(clean_limit || accepted,
+               "100 KiB visible-ASCII is accepted end to end or hits a metadata size limit");
+        Expect(cap.out.find(kInvalidBearerToken) == std::string::npos,
+               "100 KiB visible-ASCII must not be rejected as an invalid token");
+    }
 
     (void)pserver->Shutdown();
     (void)pserver->Wait();
