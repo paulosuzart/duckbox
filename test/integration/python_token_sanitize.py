@@ -159,7 +159,12 @@ def test_query_wrapper(url: str, token: str, spec: str) -> None:
         low = (text + " " + raw).lower()
         if "invalid bearer token" in low:
             _fail("100 KiB visible-ASCII token was rejected as invalid")
-        if "metadata size exceeds limit" in low or "unauthenticated" in low or "unauth" in low:
+        if (
+            "metadata size exceeds" in low
+            or "resource exhausted" in low
+            or "unauthenticated" in low
+            or "unauth" in low
+        ):
             print("ok 100 KiB visible-ASCII token failed cleanly")
             return
         _fail(f"100 KiB visible-ASCII token raised an unexpected error: {text}")

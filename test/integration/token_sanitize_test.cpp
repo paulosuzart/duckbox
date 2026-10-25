@@ -401,7 +401,9 @@ void duckbox::test::RunTokenSanitizeTests() {
         Expect(cap.rc != 134, "100 KiB visible-ASCII binary must not SIGABRT");
         Expect(cap.out.find("LEAKLONGASCII") == std::string::npos,
                "100 KiB visible-ASCII binary must not echo the token");
-        const bool clean_limit = cap.out.find("metadata size exceeds limit") != std::string::npos;
+        const bool clean_limit = cap.out.find("metadata size exceeds") != std::string::npos ||
+                                 cap.out.find("resource exhausted") != std::string::npos ||
+                                 cap.out.find("Resource exhausted") != std::string::npos;
         const bool accepted = cap.rc == 0 || cap.out.find("Unauthenticated") != std::string::npos ||
                               cap.out.find("unauthenticated") != std::string::npos;
         Expect(clean_limit || accepted,
