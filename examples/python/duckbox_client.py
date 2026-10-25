@@ -88,11 +88,28 @@ class Duckbox:
         self.close()
 
 
+class TokenError(ValueError):
+    """Rejected bearer token. The message never includes the token bytes."""
+
+
 def resolve_token(token: Optional[str] = None) -> str:
-    """Explicit token wins; otherwise DUCKBOX_TOKEN. Empty means no Bearer header. Never logs."""
+    """Explicit token wins; otherwise DUCKBOX_TOKEN. Empty means no Bearer header.
+
+    Surrounding ASCII whitespace is stripped (space, tab, LF, CR, FF, VT).
+    After trim, every character must be visible ASCII (0x21-0x7E). Empty
+    after trim or any other character raises TokenError with a generic
+    message. Never logs the value.
+    """
     if token:
-        return token
-    return os.environ.get("DUCKBOX_TOKEN") or ""
+        raw = token
+    else:
+        raw = os.environ.get("DUCKBOX_TOKEN") or ""
+        if not raw:
+            return ""
+    trimmed = raw.strip(" \t\n\r\f\v")
+    if not trimmed or any(not (0x21 <= ord(c) <= 0x7E) for c in trimmed):
+        raise TokenError("invalid bearer token")
+    return trimmed
 
 
 def _flight_headers(

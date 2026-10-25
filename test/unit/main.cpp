@@ -35,5 +35,6 @@ int main() {
     RunDuckLakeAttachSqlTests();
     RunLakeAttachSecretTests();
     RunTempDirectoryTests();
+    RunTokenSanitizeTests();
     return ReportAndExit("unit");
 }

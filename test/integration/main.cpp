@@ -27,5 +27,6 @@ int main() {
     RunStorageFormatRuntimeTests();
     RunSecretFlightTests();
     RunTempDirectoryExecTests();
+    RunTokenSanitizeTests();
     return ReportAndExit("integration");
 }

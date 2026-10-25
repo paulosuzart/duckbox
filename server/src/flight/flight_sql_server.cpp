@@ -1624,6 +1624,13 @@ int RunServer(const ServerOptions &opt_in) {
 }
 
 int RunSandboxCli(const SandboxCliRequest &req) {
+    std::string token;
+    try {
+        token = ResolveBearerToken(req.token);
+    } catch (const AuthError &e) {
+        std::cerr << e.what() << "\n";
+        return 1;
+    }
     auto loc_res = ParseFlightLocation(req.url);
     if (!loc_res.ok()) {
         std::cerr << loc_res.status().ToString() << "\n";
@@ -1635,7 +1642,6 @@ int RunSandboxCli(const SandboxCliRequest &req) {
         return 1;
     }
     auto client = std::move(*client_res);
-    auto token = ResolveBearerToken(req.token);
     ::arrow::flight::FlightCallOptions opt;
     opt.headers.emplace_back("x-duckbox-caller", req.caller.empty() ? "local" : req.caller);
     if (!token.empty()) {
@@ -1745,6 +1751,13 @@ int RunSandboxCli(const SandboxCliRequest &req) {
 }
 
 int RunNodeDrain(const NodeCliRequest &req) {
+    std::string token;
+    try {
+        token = ResolveBearerToken(req.token);
+    } catch (const AuthError &e) {
+        std::cerr << e.what() << "\n";
+        return 1;
+    }
     auto loc_res = ParseFlightLocation(req.url);
     if (!loc_res.ok()) {
         std::cerr << loc_res.status().ToString() << "\n";
@@ -1756,7 +1769,6 @@ int RunNodeDrain(const NodeCliRequest &req) {
         return 1;
     }
     auto client = std::move(*client_res);
-    auto token = ResolveBearerToken(req.token);
     std::string handshake = req.peer_secret;
     if (handshake.starts_with("env:") || handshake.starts_with("file:")) {
         try {
