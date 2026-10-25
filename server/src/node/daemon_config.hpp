@@ -57,7 +57,15 @@ struct LeaseSettings {
     int64_t skew_ms = 1000;          // steal waits this long past expiry_ms (clock skew)
     int64_t cache_ms = 250;          // short Acquire cache; 0 disables
     int64_t gc_ms = 86'400'000;      // tombstone GC age; 0 disables (default 24h)
-    int64_t proxy_timeout_ms = 5000; // Flight peer-proxy deadline
+    int64_t proxy_timeout_ms = 5000; // peer connect, handshake, GetFlightInfo; added to DoGet deadline
+    // Ceiling for the proxied DoGet whole-call deadline, and for the owner
+    // DescribeHandleArrow mutex wait, when query_timeout_ms is 0.
+    int64_t proxy_first_message_max_ms = 60000;
+    int64_t proxy_max_inflight = 256;          // global concurrent proxied calls
+    int64_t proxy_max_inflight_per_peer = 256; // concurrent proxied calls to one owner URL
+    // After SIGTERM, _Exit if graceful shutdown (Drain + Flight Shutdown) exceeds this.
+    // Default 8s = Drain(2s) + Flight Shutdown(2s) + slack. Must be > 0.
+    int64_t shutdown_watchdog_ms = 8000;
     size_t max_leases = 0;           // 0 = unlimited
 };
 

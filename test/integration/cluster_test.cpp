@@ -371,6 +371,7 @@ void duckbox::test::RunClusterTests() {
 			Expect(p.pub->Init(fopt).ok(), "proxy public init");
 			::arrow::flight::FlightServerOptions iopt(*loc);
 			iopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
+			duckbox::flight::ApplyInternalListenerKeepalive(iopt);
 			Expect(p.intern->Init(iopt).ok(), "proxy internal init");
 			p.pub_port = p.pub->port();
 			p.int_port = p.intern->port();
