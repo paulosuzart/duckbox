@@ -6,6 +6,7 @@
 #include "s3/s3.hpp"
 #include "s3/s3_credentials.hpp"
 #include "s3/secrets.hpp"
+#include "sandbox/temp_directory.hpp"
 
 #include "absl/strings/ascii.h"
 
@@ -14,12 +15,10 @@
 
 #include <cctype>
 #include <cstdlib>
-#include <filesystem>
 #include <fnmatch.h>
 #include <iostream>
 #include <sstream>
 #include <sys/stat.h>
-#include <system_error>
 
 namespace duckbox {
 namespace node {
@@ -439,19 +438,10 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
         add("limits.max_sandboxes", "must be >= 1");
     }
     if (!cfg.temp_directory.empty()) {
-        std::filesystem::path root(cfg.temp_directory);
-        if (!root.is_absolute()) {
-            add("limits.temp_directory", "must be an absolute path");
-        }
-        for (const auto &part : root) {
-            if (part == "..") {
-                add("limits.temp_directory", "must not contain '..'");
-                break;
-            }
-        }
-        std::error_code ec;
-        if (std::filesystem::exists(root, ec) && !ec && !std::filesystem::is_directory(root)) {
-            add("limits.temp_directory", "must be a directory");
+        try {
+            sandbox::ValidateTempDirectoryBase(cfg.temp_directory);
+        } catch (const std::exception &e) {
+            add("limits.temp_directory", e.what());
         }
     }
     if (cfg.handle_secret.empty()) {

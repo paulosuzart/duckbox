@@ -242,10 +242,10 @@ void TenantSandbox::Warmup(bool validate_lake) {
         {
             // Operator temp_directory must be SET while enable_external_access
             // is still true. DuckDB refuses later changes. Specs cannot set this
-            // path; only the daemon base (plus sandbox id) does.
-            auto temp_dir = ResolveSandboxTempDirectory(daemon_.temp_directory, sandbox_id_);
+            // path; only the daemon base plus this instance's id@version does.
+            auto temp_dir =
+                CreateSandboxTempDirectory(daemon_.temp_directory, sandbox_id_, version_);
             if (!temp_dir.empty()) {
-                CreateSandboxTempDirectory(temp_dir);
                 managed_temp_directory_ = temp_dir;
                 ExecHardeningOrThrow(*con_,
                                      "SET temp_directory='" + EscapeSqlString(temp_dir) + "'");

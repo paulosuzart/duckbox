@@ -81,7 +81,7 @@ class TenantSandbox {
     config::Policy &GetPolicyMut() { return policy_; }
     const rewriter::TenantKey &GetKey() const { return key_; }
     const std::string &SandboxId() const { return sandbox_id_; }
-    // Per-sandbox DuckDB temp_directory created from daemon limits.temp_directory.
+    // Per-instance DuckDB temp_directory (`{base}/{id}/{version}-{random}`).
     // Empty when the daemon option is unset or this instance has no sandbox id.
     const std::string &ManagedTempDirectory() const { return managed_temp_directory_; }
     int Version() const { return version_; }
