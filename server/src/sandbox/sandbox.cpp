@@ -15,10 +15,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <ctime>
 #include <iostream>
 #include <mutex>
+#include <pthread.h>
 #include <sstream>
 #include <thread>
 
@@ -43,6 +46,48 @@ thread_local std::string g_hardening_read_error_setting;
 std::mutex g_query_error_mu;
 std::string g_query_error_inject;
 #endif
+
+// Apple libc++ timed_mutex::try_lock / try_lock_for and even a try_lock
+// yield loop have hung the macOS integration suite. pthread_mutex_timedlock
+// is the OS primitive that actually returns. Deadline is steady_clock;
+// timedlock uses CLOCK_REALTIME, so convert the remaining duration.
+bool LockMutexUntil(std::mutex &mu, std::chrono::steady_clock::time_point deadline) {
+    while (true) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            return mu.try_lock();
+        }
+        const auto rem =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now);
+        timespec ts{};
+        if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+            return mu.try_lock();
+        }
+        const auto add_ns = rem.count();
+        ts.tv_sec += static_cast<time_t>(add_ns / 1000000000LL);
+        ts.tv_nsec += static_cast<long>(add_ns % 1000000000LL);
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000L;
+        }
+        const int rc = pthread_mutex_timedlock(mu.native_handle(), &ts);
+        if (rc == 0) {
+            return true;
+        }
+        if (rc == ETIMEDOUT) {
+            return false;
+        }
+        if (rc == EINVAL || rc == ENOTSUP) {
+            while (!mu.try_lock()) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    return false;
+                }
+                std::this_thread::yield();
+            }
+            return true;
+        }
+    }
+}
 
 // Booleans compare case-insensitively after trim. allowed_configs must
 // read back as exactly [] — empty / null / none is not accepted.
@@ -797,16 +842,10 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeHandleArrow(const std::s
     const int64_t bound_ms = policy_.resources.query_timeout_ms > 0
                                  ? policy_.resources.query_timeout_ms
                                  : daemon_.lease.proxy_first_message_max_ms;
-    // Apple libc++ timed_mutex try_lock / try_lock_for do not return (held or
-    // not). Poll std::mutex::try_lock until the config deadline; yield is not
-    // a slack constant.
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(bound_ms);
-    while (!mu_.try_lock()) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            throw UnavailableError("sandbox describe timed out");
-        }
-        std::this_thread::yield();
+    if (!LockMutexUntil(mu_, deadline)) {
+        throw UnavailableError("sandbox describe timed out");
     }
     std::lock_guard<std::mutex> hold(mu_, std::adopt_lock);
     WarmupLocked(false);

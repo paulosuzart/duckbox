@@ -118,8 +118,8 @@ class TenantSandbox {
     // DescribeHandleArrow waits until query_timeout_ms (else
     // proxy_first_message_max_ms) so GetFlightInfo cannot wait forever behind
     // a DoGet stuck in Arrow #31235 send-after-cancel. Apple libc++
-    // timed_mutex::try_lock / try_lock_for do not return; use std::mutex and
-    // poll try_lock until that deadline.
+    // timed_mutex / try_lock loops do not return; the wait is
+    // pthread_mutex_timedlock until that deadline.
     std::mutex mu_;
     std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
     int64_t last_used_wall_ms_ = 0;
