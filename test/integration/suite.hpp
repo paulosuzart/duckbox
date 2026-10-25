@@ -26,6 +26,7 @@ void RunLambdaOldSyntaxRuntimeTests();
 void RunStorageFormatRuntimeTests();
 void RunSecretFlightTests();
 void RunTempDirectoryExecTests();
+void RunTokenSanitizeTests();
 
 } // namespace test
 } // namespace duckbox

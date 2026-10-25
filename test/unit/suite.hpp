@@ -35,6 +35,7 @@ void RunStorageFormatTests();
 void RunDuckLakeAttachSqlTests();
 void RunLakeAttachSecretTests();
 void RunTempDirectoryTests();
+void RunTokenSanitizeTests();
 
 } // namespace test
 } // namespace duckbox
