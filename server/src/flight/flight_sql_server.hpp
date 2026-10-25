@@ -14,8 +14,9 @@
 #include "sandbox/sandbox_registry.hpp"
 
 #include <arrow/flight/client.h>
-#include <arrow/flight/sql/server.h>
 #include <arrow/flight/server.h>
+#include <arrow/flight/sql/server.h>
+#include <arrow/flight/transport.h>
 #include <arrow/record_batch.h>
 #include <arrow/util/cancel.h>
 
@@ -23,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace duckbox {
 namespace flight {
@@ -126,7 +128,7 @@ private:
 	    const std::string &key, const std::string &token, const std::shared_ptr<::arrow::Schema> &schema);
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> MaybeProxyDoGet(
 	    const common::RedirectError &re, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
-	    const std::string &key, const ::arrow::flight::ServerCallContext &context);
+	    const std::string &key, const ::arrow::flight::ServerCallContext &context, int64_t query_timeout_ms);
 
 	node::DaemonConfig daemon_;
 	std::shared_ptr<sandbox::SandboxRegistry> defs_;
@@ -203,35 +205,52 @@ int RunNodeDrain(const NodeCliRequest &req);
 ::arrow::Result<::arrow::flight::Location> ParseFlightLocation(const std::string &url);
 
 // Handshake token is a bearer secret or JWT, never an unsigned spec payload.
+// Allow gRPC keepalive pings on the internal peer listener.
+void ApplyInternalListenerKeepalive(::arrow::flight::FlightServerOptions &opt);
+
 // Node-to-node Flight client. Authenticates with the shared peer secret, never the caller.
 class PeerFlight {
 public:
-	explicit PeerFlight(std::string secret, int64_t timeout_ms = 5000);
+	explicit PeerFlight(std::string secret, int64_t timeout_ms = 5000, int64_t first_message_max_ms = 60000);
 	void set_timeout_ms(int64_t timeout_ms) {
 		timeout_ms_ = timeout_ms > 0 ? timeout_ms : 5000;
+	}
+	void set_first_message_max_ms(int64_t first_message_max_ms) {
+		first_message_max_ms_ = first_message_max_ms > 0 ? first_message_max_ms : 60000;
 	}
 	void SetNodeDirectory(std::shared_ptr<cluster::S3NodeDirectory> nodes) {
 		nodes_ = std::move(nodes);
 	}
+	// Close in-flight peer clients so hung DoGets unblock (SIGTERM / tests).
+	void Shutdown();
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightInfo>> ForwardGetFlightInfo(
 	    const std::string &url, const ::arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
 	    const std::string &key);
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> ForwardDoGet(
 	    const std::string &url, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
-	    const std::string &key, const ::arrow::flight::ServerCallContext &context);
+	    const std::string &key, const ::arrow::flight::ServerCallContext &context, int64_t query_timeout_ms = 0);
 
 private:
+	::arrow::flight::FlightClientOptions PeerClientOpts() const;
+	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Dial(const std::string &url);
 	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Client(const std::string &url);
+	::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>> StreamTransport(
+	    const std::string &url);
+	void AbandonStream(std::shared_ptr<::arrow::flight::internal::ClientTransport> transport,
+	                   std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream);
 	::arrow::flight::FlightCallOptions BaseOpt(const std::string &sandbox_id, const std::string &key) const;
 	::arrow::flight::FlightCallOptions CallOpt(const std::string &sandbox_id, const std::string &key) const;
 	::arrow::flight::FlightCallOptions StreamOpt(const std::string &sandbox_id, const std::string &key,
 	                                            ::arrow::StopToken stop_token) const;
+	int64_t FirstMessageBoundMs(int64_t query_timeout_ms) const;
 
 	std::string secret_;
 	int64_t timeout_ms_ = 5000;
+	int64_t first_message_max_ms_ = 60000;
 	std::shared_ptr<cluster::S3NodeDirectory> nodes_;
 	std::mutex mu_;
 	std::unordered_map<std::string, std::shared_ptr<::arrow::flight::FlightClient>> clients_;
+	std::vector<std::weak_ptr<::arrow::flight::internal::ClientDataStream>> inflight_;
 };
 
 class HandshakeAuthHandler : public ::arrow::flight::ServerAuthHandler {

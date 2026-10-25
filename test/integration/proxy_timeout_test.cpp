@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -79,17 +80,18 @@ struct FlightPair {
     }
 
     void Stop() {
+        auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
         if (intern) {
-            (void)intern->Shutdown();
+            (void)intern->Shutdown(&deadline);
         }
         if (pub) {
-            (void)pub->Shutdown();
+            (void)pub->Shutdown(&deadline);
         }
         if (pub_th.joinable()) {
-            pub_th.join();
+            pub_th.detach();
         }
         if (int_th.joinable()) {
-            int_th.join();
+            int_th.detach();
         }
     }
 };
@@ -112,6 +114,7 @@ FlightPair StartDuckboxPair(const DaemonConfig &cfg, const std::shared_ptr<S3San
     Expect(p.pub->Init(fopt).ok(), "proxy-timeout public init");
     FlightServerOptions iopt(*loc);
     iopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
+    duckbox::flight::ApplyInternalListenerKeepalive(iopt);
     Expect(p.intern->Init(iopt).ok(), "proxy-timeout internal init");
     p.pub_port = p.pub->port();
     p.int_port = p.intern->port();
@@ -151,14 +154,14 @@ class HangingDataStream : public FlightDataStream {
 
 class OwnerStub : public FlightServerBase {
   public:
-    enum class Mode { SlowDoGet, HangDoGet, HangInfo };
+    enum class Mode { SlowDoGet, HangDoGet, HangInfo, HangBeforeSchema };
 
     explicit OwnerStub(Mode mode) : mode_(mode) {}
 
     Status GetFlightInfo(const ServerCallContext &context, const FlightDescriptor &request,
                          std::unique_ptr<FlightInfo> *info) override {
         if (mode_ == Mode::HangInfo) {
-            return Hang(context);
+            return Hang(context, nullptr);
         }
         return DummyInfo(request, info);
     }
@@ -166,6 +169,9 @@ class OwnerStub : public FlightServerBase {
     Status DoGet(const ServerCallContext &context, const Ticket &,
                  std::unique_ptr<FlightDataStream> *stream) override {
         doget_entered_.store(true, std::memory_order_release);
+        if (mode_ == Mode::HangBeforeSchema) {
+            return Hang(context, &cancelled_);
+        }
         if (mode_ == Mode::HangDoGet) {
             *stream = std::make_unique<HangingDataStream>(context, &cancelled_);
             return Status::OK();
@@ -178,11 +184,17 @@ class OwnerStub : public FlightServerBase {
 
     bool DoGetEntered() const { return doget_entered_.load(std::memory_order_acquire); }
     bool Cancelled() const { return cancelled_.load(std::memory_order_acquire); }
+    void Release() { stop_.store(true, std::memory_order_release); }
 
   private:
-    static Status Hang(const ServerCallContext &context) {
-        while (!context.is_cancelled()) {
+    std::atomic<bool> stop_{false};
+
+    Status Hang(const ServerCallContext &context, std::atomic<bool> *cancelled = nullptr) {
+        while (!context.is_cancelled() && !stop_.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (context.is_cancelled() && cancelled) {
+            cancelled->store(true, std::memory_order_release);
         }
         return Status::Cancelled("owner call cancelled");
     }
@@ -222,6 +234,7 @@ struct StubOwner {
         auto loc = Location::ForGrpcTcp("127.0.0.1", 0);
         FlightServerOptions opt(*loc);
         opt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
+        duckbox::flight::ApplyInternalListenerKeepalive(opt);
         Expect(server->Init(opt).ok(), "stub owner init");
         port = server->port();
         th = std::thread([this] { (void)server->Serve(); });
@@ -229,10 +242,13 @@ struct StubOwner {
 
     void Stop() {
         if (server) {
-            (void)server->Shutdown();
+            server->Release();
+            // Arrow FlightServerBase::Shutdown can hang after a cancelled
+            // client stream (Arrow #31235). Leak the server until process exit.
+            (void)server.release();
         }
         if (th.joinable()) {
-            th.join();
+            th.detach();
         }
     }
 
@@ -408,30 +424,46 @@ void TestLongProxiedQuery() {
 void TestCancelPropagates() {
     ProxyFixture fx(kProxyTimeoutMs);
     StubOwner owner;
-    owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::HangDoGet);
+    owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::HangBeforeSchema);
     auto *stub = owner.server.get();
     owner.Start(fx.daemon_b);
 
     FakeCallContext ctx;
     std::atomic<bool> done{false};
+    Status status = Status::OK();
+    std::unique_ptr<FlightDataStream> held;
     std::thread reader([&] {
-        (void)fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-timeout"}, fx.rec.id, fx.rec.key,
-                                       ctx);
+        auto stream_res = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-timeout"}, fx.rec.id,
+                                                   fx.rec.key, ctx);
+        status = stream_res.status();
+        if (stream_res.ok()) {
+            held = std::move(*stream_res);
+        }
         done.store(true, std::memory_order_release);
     });
     Expect(WaitStub(stub, &OwnerStub::DoGetEntered, 4000),
            "owner DoGet is in progress before cancel");
+    auto t0 = std::chrono::steady_clock::now();
     ctx.Cancel();
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::cout << "cancel_before_schema_ms=" << elapsed_ms << "\n";
     if (!done.load(std::memory_order_acquire)) {
         owner.Stop();
     }
     reader.join();
     Expect(done.load(std::memory_order_acquire), "proxied DoGet returns after client cancel");
-    Expect(WaitStub(stub, &OwnerStub::Cancelled, 4000),
+    Expect(!status.ok(), "cancel before schema fails the proxied DoGet");
+    Expect(absl::StrContains(status.ToString(), "peer proxy cancelled"),
+           "client cancel maps to a fixed message");
+    Expect(held == nullptr, "cancel before schema does not return a stream");
+    Expect(elapsed_ms < 1500, "cancel unblocks DoGet before the first message");
+    Expect(WaitStub(stub, &OwnerStub::Cancelled, 2000),
            "upstream owner DoGet is cancelled when the client cancels");
     owner.Stop();
 }
@@ -492,8 +524,8 @@ void TestSlowStubStream() {
 } // namespace
 
 void duckbox::test::RunProxyTimeoutTests() {
-    TestLongProxiedQuery();
-    TestSlowStubStream();
     TestCancelPropagates();
     TestGetFlightInfoTimeout();
+    TestSlowStubStream();
+    TestLongProxiedQuery();
 }

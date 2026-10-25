@@ -207,23 +207,36 @@ print("restart same node_id after SIGTERM ok", list(df["id"]))
 db.close()
 PY
 
-# Slow owner: C still holds the lease after drain(B); A/B proxy to C. SIGSTOP C.
-kill -STOP "$PID_C" 2>/dev/null || true
+# Slow owner: C still holds the lease after drain(B); A/B proxy to C.
+# GetFlightInfo while C is live, then SIGSTOP C and DoGet (first-message bound).
+export OWNER_PID="$PID_C"
 "$PY" - <<'PY'
-import time
-from duckbox_client import connect
+import os, signal, time
+import pyarrow.flight as flight
+from pyarrow.flight.sql import FlightSqlClient
+
+owner = int(os.environ["OWNER_PID"])
+client = flight.FlightClient("grpc://127.0.0.1:4747")
+options = flight.FlightCallOptions(headers=[
+    (b"x-duckbox-sandbox", b"cluster-analyst"),
+    (b"x-duckbox-caller", b"local"),
+    (b"x-duckbox-key", b"tenant_21:user_sergio"),
+])
+fsql = FlightSqlClient(client)
+info = fsql.execute("SELECT id FROM deals", options)
+print("GetFlightInfo before freeze ok")
+os.kill(owner, signal.SIGSTOP)
 t0 = time.time()
 try:
-    db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=1)
-    db.query("SELECT id FROM deals")
-    raise SystemExit("proxy to SIGSTOPped owner should not succeed")
+    list(client.do_get(info.endpoints[0].ticket, options))
+    raise SystemExit("DoGet to SIGSTOPped owner should not succeed")
 except SystemExit:
     raise
 except Exception as e:  # noqa: BLE001
     elapsed = time.time() - t0
-    print("slow owner proxy failed as expected", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 2))
+    print("slow owner DoGet failed as expected", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 2))
     if elapsed > 20:
-        raise SystemExit(f"proxy hung too long: {elapsed}")
+        raise SystemExit(f"proxied DoGet hung too long: {elapsed}")
 PY
 kill -CONT "$PID_C" 2>/dev/null || true
 

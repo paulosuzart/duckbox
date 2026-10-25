@@ -58,7 +58,10 @@ struct LeaseSettings {
     int64_t cache_ms = 250;          // short Acquire cache; 0 disables
     int64_t gc_ms = 86'400'000;      // tombstone GC age; 0 disables (default 24h)
     int64_t proxy_timeout_ms = 5000; // peer connect, handshake, GetFlightInfo (not DoGet)
-    size_t max_leases = 0;           // 0 = unlimited
+    // First-message wait when sandbox query_timeout_ms is 0. DoGet itself has
+    // no stream deadline; this only bounds waiting for the owner's schema.
+    int64_t proxy_first_message_max_ms = 60000;
+    size_t max_leases = 0; // 0 = unlimited
 };
 
 // Trusted caller → allowed tenant-key globs. Empty list is allow-all only when

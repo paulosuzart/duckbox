@@ -338,6 +338,14 @@ function(duckbox_link_core_deps target)
     OpenSSL::SSL
     OpenSSL::Crypto
     yaml-cpp)
+  if(NOT TARGET gRPC::grpc++)
+    find_package(gRPC CONFIG QUIET)
+  endif()
+  if(TARGET gRPC::grpc++)
+    target_link_libraries(${target} PUBLIC gRPC::grpc++)
+  else()
+    target_link_libraries(${target} PUBLIC grpc++)
+  endif()
   if(TARGET aws-cpp-sdk-s3)
     find_package(aws-cpp-sdk-core CONFIG QUIET)
     if(TARGET aws-cpp-sdk-core)
@@ -509,6 +517,7 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/python_client_auth_test.cpp
   test/integration/cluster_test.cpp
   test/integration/proxy_timeout_test.cpp
+  test/integration/proxy_hang_test.cpp
   test/integration/signal_shutdown_test.cpp
   test/integration/connect_runtime_test.cpp
   test/integration/trigger_runtime_test.cpp

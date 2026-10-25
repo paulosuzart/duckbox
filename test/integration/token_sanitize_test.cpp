@@ -200,6 +200,7 @@ void duckbox::test::RunTokenSanitizeTests() {
     auto int_loc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", 0);
     ::arrow::flight::FlightServerOptions iopt(*int_loc);
     iopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
+    duckbox::flight::ApplyInternalListenerKeepalive(iopt);
     Expect(int_server->Init(iopt).ok(), "token sanitize internal flight init");
     std::thread int_th([&] { (void)int_server->Serve(); });
     for (int i = 0; i < 50 && int_server->port() <= 0; i++) {

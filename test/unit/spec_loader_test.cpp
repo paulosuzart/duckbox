@@ -485,7 +485,7 @@ void duckbox::test::RunSpecLoaderTests() {
                  "lease:\n  endpoint: http://127.0.0.1:9\n  bucket: b\n  prefix: leases/\n  "
                  "skip_probe: true\n"
                  "  node_id: full-node\n  ttl: 15s\n  skew: 1s\n  cache_ms: 250\n  proxy_timeout: "
-                 "5s\n"
+                 "5s\n  proxy_first_message_max: 60s\n"
                  "  advertise: grpc://127.0.0.1:5747\n"
                  "limits:\n  idle_timeout: 30s\n  max_idle_timeout: 5m\n  max_sandboxes: 10\n";
         }
@@ -512,8 +512,8 @@ void duckbox::test::RunSpecLoaderTests() {
         Expect(d.lease.node_id == "full-node" && d.lease.ttl_ms == 15000,
                "daemon yaml lease node_id and ttl");
         Expect(d.lease.skew_ms == 1000 && d.lease.cache_ms == 250 &&
-                   d.lease.proxy_timeout_ms == 5000,
-               "daemon yaml lease skew, cache_ms, proxy_timeout");
+                   d.lease.proxy_timeout_ms == 5000 && d.lease.proxy_first_message_max_ms == 60000,
+               "daemon yaml lease skew, cache_ms, proxy_timeout, first_message_max");
         auto tls = ParseFlightLocation("grpc+tls://127.0.0.1:5747");
         Expect(tls.ok(), "ParseFlightLocation grpc+tls://");
         Expect(d.lease.advertise.find("5747") != std::string::npos,

@@ -16,6 +16,7 @@ int main() {
     RunPythonClientAuthTests();
     RunClusterTests();
     RunProxyTimeoutTests();
+    RunProxyHangTests();
     RunSignalShutdownTests();
     RunConnectRuntimeTests();
     RunTriggerRuntimeTests();

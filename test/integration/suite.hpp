@@ -16,6 +16,7 @@ void RunCliAuthTests();
 void RunPythonClientAuthTests();
 void RunClusterTests();
 void RunProxyTimeoutTests();
+void RunProxyHangTests();
 void RunSignalShutdownTests();
 void RunConnectRuntimeTests();
 void RunTriggerRuntimeTests();

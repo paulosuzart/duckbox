@@ -335,6 +335,8 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
                                        "gc_ms",
                                        "proxy_timeout",
                                        "proxy_timeout_ms",
+                                       "proxy_first_message_max",
+                                       "proxy_first_message_max_ms",
                                        "max_leases"});
         d.lease.endpoint = lease->GetString("endpoint");
         d.lease.endpoint_env = lease->GetString("endpoint_env");
@@ -411,6 +413,19 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
                 throw PolicyError("lease.proxy_timeout: expected duration like 5s");
             }
             d.lease.proxy_timeout_ms = ms;
+        }
+        d.lease.proxy_first_message_max_ms =
+            lease->GetInt("proxy_first_message_max_ms", d.lease.proxy_first_message_max_ms);
+        auto pfm_raw = lease->GetString("proxy_first_message_max");
+        if (!pfm_raw.empty()) {
+            int64_t ms = 0;
+            if (!ParseDurationMs(pfm_raw, &ms) || ms <= 0) {
+                throw PolicyError("lease.proxy_first_message_max: expected duration like 60s");
+            }
+            d.lease.proxy_first_message_max_ms = ms;
+        }
+        if (d.lease.proxy_first_message_max_ms <= 0) {
+            throw PolicyError("lease.proxy_first_message_max_ms must be > 0");
         }
     }
     if (root.Get("lake") || root.Get("tables") || root.Get("policy") || root.Get("spec")) {
