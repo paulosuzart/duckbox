@@ -14,9 +14,11 @@
 
 #include "httplib.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -805,6 +807,27 @@ void duckbox::test::RunSandboxExecTests() {
                    "same guess on two sandboxes is byte-identical");
         }
     }
+    auto describe_while_held = [](TenantSandbox &box, const std::function<void()> &fn) {
+        // timed_mutex is not recursive. Holding it on this thread and then
+        // try_lock_for in DescribeHandleArrow deadlocks on Apple libc++
+        // (Linux timedlock can return). Production GetFlightInfo vs DoGet
+        // are different threads; the test must match that.
+        std::atomic<bool> locked{false};
+        std::atomic<bool> release{false};
+        std::thread holder([&] {
+            DescribeLockHold hold(box);
+            locked.store(true, std::memory_order_release);
+            while (!release.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        });
+        while (!locked.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        fn();
+        release.store(true, std::memory_order_release);
+        holder.join();
+    };
     {
         // DescribeHandleArrow must not wait forever on mu_ (Warmup used
         // lock_guard; GetFlightInfo hung behind a DoGet holding the lock).
@@ -814,16 +837,17 @@ void duckbox::test::RunSandboxExecTests() {
         pol.resources.query_timeout_ms = query_bound_ms;
         TenantSandbox box(d, pol, key_a, spec_dir);
         box.Warmup(false);
-        DescribeLockHold hold(box);
-        auto t0 = std::chrono::steady_clock::now();
-        ExpectThrowExact([&] { (void)box.DescribeHandleArrow("SELECT 1"); },
-                         "sandbox describe timed out",
-                         "DescribeHandleArrow lock timeout is a fixed error");
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::steady_clock::now() - t0)
-                              .count();
-        Expect(elapsed_ms >= query_bound_ms && elapsed_ms < query_bound_ms + 2000,
-               "DescribeHandleArrow lock wait is query_timeout_ms");
+        describe_while_held(box, [&] {
+            auto t0 = std::chrono::steady_clock::now();
+            ExpectThrowExact([&] { (void)box.DescribeHandleArrow("SELECT 1"); },
+                             "sandbox describe timed out",
+                             "DescribeHandleArrow lock timeout is a fixed error");
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - t0)
+                                  .count();
+            Expect(elapsed_ms >= query_bound_ms && elapsed_ms < query_bound_ms + 2000,
+                   "DescribeHandleArrow lock wait is query_timeout_ms");
+        });
     }
     {
         const int64_t ceiling_ms = 250;
@@ -833,18 +857,19 @@ void duckbox::test::RunSandboxExecTests() {
         pol.resources.query_timeout_ms = 0;
         TenantSandbox box(d, pol, key_a, spec_dir);
         box.Warmup(false);
-        DescribeLockHold hold(box);
-        auto t0 = std::chrono::steady_clock::now();
-        ExpectThrowExact([&] { (void)box.DescribeHandleArrow("SELECT 1"); },
-                         "sandbox describe timed out",
-                         "DescribeHandleArrow lock timeout uses first-message ceiling when "
-                         "query_timeout_ms is 0");
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::steady_clock::now() - t0)
-                              .count();
-        Expect(elapsed_ms >= ceiling_ms && elapsed_ms < ceiling_ms + 2000,
-               "DescribeHandleArrow lock wait is proxy_first_message_max_ms when query_timeout_ms "
-               "is 0");
+        describe_while_held(box, [&] {
+            auto t0 = std::chrono::steady_clock::now();
+            ExpectThrowExact([&] { (void)box.DescribeHandleArrow("SELECT 1"); },
+                             "sandbox describe timed out",
+                             "DescribeHandleArrow lock timeout uses first-message ceiling when "
+                             "query_timeout_ms is 0");
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - t0)
+                                  .count();
+            Expect(elapsed_ms >= ceiling_ms && elapsed_ms < ceiling_ms + 2000,
+                   "DescribeHandleArrow lock wait is proxy_first_message_max_ms when "
+                   "query_timeout_ms is 0");
+        });
     }
 #ifdef DUCKBOX_BIN_PATH
     {
