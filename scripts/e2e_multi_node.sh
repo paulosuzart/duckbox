@@ -172,6 +172,7 @@ db.close()
 PY
 
 # SIGTERM should drain + deregister (must exit 0; no SIGKILL).
+term_t0=$(date +%s.%N)
 kill -TERM "$PID_A"
 term_ok=0
 for _ in $(seq 1 40); do
@@ -193,6 +194,13 @@ if [[ "$term_ok" -ne 1 ]]; then
 	wait "$PID_A" 2>/dev/null || true
 	exit 1
 fi
+term_t1=$(date +%s.%N)
+python3 - <<PY
+t0=float("$term_t0"); t1=float("$term_t1")
+print(f"sigterm_idle_exit_s={t1-t0:.3f}")
+if t1-t0 > 8:
+    raise SystemExit(f"SIGTERM took too long: {t1-t0}")
+PY
 PID_A=""
 "$BIN" serve --daemon "$ROOT/daemons/cluster-node-a.yaml" --no-metrics &
 PID_A=$!
@@ -207,23 +215,53 @@ print("restart same node_id after SIGTERM ok", list(df["id"]))
 db.close()
 PY
 
+# Flight SQL CommandStatementQuery without pyarrow.flight.sql (not a
+# package on the CI pyarrow build). Same encoding as test/schema/flight_metadata_pyarrow.py.
+py_flight_sql() {
+	cat <<'PY'
+import pyarrow.flight as flight
+
+def _varint(n):
+    out = bytearray()
+    while True:
+        bits = n & 0x7F
+        n >>= 7
+        out.append(bits | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+def _len_field(field, payload):
+    return _varint((field << 3) | 2) + _varint(len(payload)) + payload
+
+def command_statement_query(sql):
+    body = _len_field(1, sql.encode())
+    return _len_field(1, b"type.googleapis.com/arrow.flight.protocol.sql.CommandStatementQuery") + _len_field(2, body)
+
+def call_opts():
+    return flight.FlightCallOptions(headers=[
+        (b"x-duckbox-sandbox", b"cluster-analyst"),
+        (b"x-duckbox-caller", b"local"),
+        (b"x-duckbox-key", b"tenant_21:user_sergio"),
+    ])
+
+def statement_info(client, sql="SELECT id FROM deals"):
+    options = call_opts()
+    info = client.get_flight_info(
+        flight.FlightDescriptor.for_command(command_statement_query(sql)), options)
+    return info, options
+PY
+}
+
 # Slow owner: C still holds the lease after drain(B); A/B proxy to C.
 # GetFlightInfo while C is live, then SIGSTOP C and DoGet (first-message bound).
 export OWNER_PID="$PID_C"
-"$PY" - <<'PY'
+"$PY" - <<PY
+$(py_flight_sql)
 import os, signal, time
-import pyarrow.flight as flight
-from pyarrow.flight.sql import FlightSqlClient
 
 owner = int(os.environ["OWNER_PID"])
 client = flight.FlightClient("grpc://127.0.0.1:4747")
-options = flight.FlightCallOptions(headers=[
-    (b"x-duckbox-sandbox", b"cluster-analyst"),
-    (b"x-duckbox-caller", b"local"),
-    (b"x-duckbox-key", b"tenant_21:user_sergio"),
-])
-fsql = FlightSqlClient(client)
-info = fsql.execute("SELECT id FROM deals", options)
+info, options = statement_info(client)
 print("GetFlightInfo before freeze ok")
 os.kill(owner, signal.SIGSTOP)
 t0 = time.time()
@@ -239,6 +277,93 @@ except Exception as e:  # noqa: BLE001
         raise SystemExit(f"proxied DoGet hung too long: {elapsed}")
 PY
 kill -CONT "$PID_C" 2>/dev/null || true
+
+# Healthy-path proxied DoGet latency (owner C is live; client hits proxy A).
+"$PY" - <<PY
+$(py_flight_sql)
+import time
+
+client = flight.FlightClient("grpc://127.0.0.1:4747")
+info, options = statement_info(client)
+list(client.do_get(info.endpoints[0].ticket, options))
+samples = []
+for _ in range(8):
+    t0 = time.time()
+    info, options = statement_info(client)
+    list(client.do_get(info.endpoints[0].ticket, options))
+    samples.append((time.time() - t0) * 1000)
+print(f"healthy_proxied_doget_mean_ms={sum(samples)/len(samples):.3f}")
+print(f"healthy_proxied_doget_pmax_ms={max(samples):.3f}")
+PY
+
+# SIGTERM the proxy while N DoGets are hung on a frozen owner. Measure
+# proxy-process threads/RSS (not the client) before/during, then exit time.
+export OWNER_PID="$PID_C"
+export PROXY_PID="$PID_A"
+"$PY" - <<PY
+$(py_flight_sql)
+import os, signal, threading, time
+
+owner = int(os.environ["OWNER_PID"])
+proxy = int(os.environ["PROXY_PID"])
+N = 16
+
+def snap(pid):
+    threads, rss = 0, 0
+    with open(f"/proc/{pid}/status", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("Threads:"):
+                threads = int(line.split()[1])
+            elif line.startswith("VmRSS:"):
+                rss = int(line.split()[1])
+    return threads, rss
+
+client = flight.FlightClient("grpc://127.0.0.1:4747")
+info, options = statement_info(client)
+before = snap(proxy)
+os.kill(owner, signal.SIGSTOP)
+
+def hung_get():
+    try:
+        list(client.do_get(info.endpoints[0].ticket, options))
+    except Exception:
+        pass
+
+workers = [threading.Thread(target=hung_get, daemon=True) for _ in range(N)]
+for th in workers:
+    th.start()
+time.sleep(0.6)
+during = snap(proxy)
+print(
+    f"proxy_hung_doget_n={N} threads_before={before[0]} threads_during={during[0]} "
+    f"rss_before_kb={before[1]} rss_during_kb={during[1]}"
+)
+# Incoming public DoGets may use one gRPC handler thread each. A per-stream
+# watcher would add a second set of N on top of that.
+if during[0] - before[0] >= 2 * N:
+    raise SystemExit(
+        f"proxy grew {during[0] - before[0]} threads under {N} hung DoGets "
+        "(want no per-stream watcher threads)"
+    )
+t0 = time.time()
+os.kill(proxy, signal.SIGTERM)
+while time.time() - t0 < 8:
+    try:
+        os.kill(proxy, 0)
+    except OSError:
+        print(f"sigterm_hung_doget_exit_s={time.time()-t0:.3f}")
+        break
+    time.sleep(0.05)
+else:
+    raise SystemExit("proxy did not exit after SIGTERM with hung DoGet")
+os.kill(owner, signal.SIGCONT)
+PY
+wait "$PID_A" 2>/dev/null || true
+PID_A=""
+"$BIN" serve --daemon "$ROOT/daemons/cluster-node-a.yaml" --no-metrics &
+PID_A=$!
+wait_port 4747
+wait_port 5747
 
 # S3 outage longer than TTL (5s): nodes self-fence (exit 3), then restart recovers.
 docker compose pause rustfs

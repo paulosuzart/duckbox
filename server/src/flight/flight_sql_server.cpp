@@ -355,7 +355,10 @@ Status ProxyStatus(const Status &st, const char *op) {
     }
     const auto &mapped = st.message();
     if (mapped == "peer proxy timed out" || mapped == "peer proxy cancelled" ||
-        mapped == "peer proxy failed") {
+        mapped == "peer proxy failed" || mapped == "peer proxy busy") {
+        return st;
+    }
+    if (st.IsCapacityError()) {
         return st;
     }
     LogUpstream(op, st);
@@ -370,17 +373,20 @@ Status ProxyStatus(const Status &st, const char *op) {
 
 enum class StreamStop : int { None = 0, ClientCancel = 1, FirstMessageTimeout = 2, Shutdown = 3 };
 
-// Destroying a cancelled gRPC stream/transport can hang in channel shutdown
-// (Arrow #31235). Keep the objects until process exit.
+constexpr size_t kMaxLeakedStreams = 256;
+
+// Destroying a cancelled gRPC stream can hang in channel shutdown (Arrow #31235).
+// Streams are kept in a bounded graveyard; the transport stays in the peer cache.
 void LeakGrpcObject(std::shared_ptr<void> obj) {
     if (!obj) {
         return;
     }
-    // Heap-allocated so process exit does not destroy cancelled transports
-    // (Arrow #31235 hangs in static destructors too).
     static auto *leak = new std::vector<std::shared_ptr<void>>();
     static auto *leak_mu = new std::mutex();
     std::lock_guard<std::mutex> hold(*leak_mu);
+    if (leak->size() >= kMaxLeakedStreams) {
+        leak->erase(leak->begin());
+    }
     leak->push_back(std::move(obj));
 }
 
@@ -400,22 +406,20 @@ struct StreamCall {
     std::condition_variable cv;
 
     ~StreamCall() {
-        const bool dirty = reason.load(std::memory_order_acquire) != StreamStop::None ||
-                           !started.load(std::memory_order_acquire);
-        if (dirty) {
-            if (stream) {
-                stream->TryCancel();
-            }
+        if (stream) {
             LeakGrpcObject(std::move(stream));
-            LeakGrpcObject(std::move(transport));
         }
+        transport.reset();
     }
 
     bool ClientCancelled() const { return ctx != nullptr && ctx->is_cancelled(); }
 
     void TearDown(StreamStop why) {
         StreamStop expected = StreamStop::None;
-        reason.compare_exchange_strong(expected, why, std::memory_order_acq_rel);
+        if (!reason.compare_exchange_strong(expected, why, std::memory_order_acq_rel)) {
+            cv.notify_all();
+            return;
+        }
         std::shared_ptr<::arrow::flight::internal::ClientDataStream> s;
         {
             std::lock_guard<std::mutex> hold(mu);
@@ -430,16 +434,26 @@ struct StreamCall {
 
 class FlightDataMessageReader : public ::arrow::ipc::MessageReader {
   public:
-    explicit FlightDataMessageReader(
-        std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream)
-        : stream_(std::move(stream)) {}
+    FlightDataMessageReader(std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream,
+                            std::shared_ptr<StreamCall> state,
+                            ::arrow::flight::internal::FlightData first)
+        : stream_(std::move(stream)), state_(std::move(state)), first_(std::move(first)),
+          has_first_(true) {}
 
     ::arrow::Result<std::unique_ptr<::arrow::ipc::Message>> ReadNextMessage() override {
+        if (has_first_) {
+            has_first_ = false;
+            return first_.OpenMessage();
+        }
         if (!stream_) {
             return nullptr;
         }
         ::arrow::flight::internal::FlightData data;
         if (!stream_->ReadData(&data)) {
+            if (state_ && state_->reason.load(std::memory_order_acquire) != StreamStop::None) {
+                stream_.reset();
+                return Status::IOError("peer stream stopped");
+            }
             auto st = stream_->Finish(Status::OK());
             stream_.reset();
             if (!st.ok()) {
@@ -452,33 +466,139 @@ class FlightDataMessageReader : public ::arrow::ipc::MessageReader {
 
   private:
     std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream_;
+    std::shared_ptr<StreamCall> state_;
+    ::arrow::flight::internal::FlightData first_;
+    bool has_first_ = false;
+};
+
+// One process-wide thread. Arrow ServerCallContext has only is_cancelled()
+// (no CQ / callback), so cancel still needs a short poll. First-message
+// deadlines wake via wait_until. This is the only helper thread; it is
+// bounded (1) regardless of concurrent DoGets.
+class WatchHub {
+  public:
+    struct OwnerQuery {
+        const ServerCallContext *ctx = nullptr;
+        TenantSandbox *box = nullptr;
+        std::atomic<bool> *done = nullptr;
+    };
+
+    static WatchHub &Get() {
+        static auto *hub = new WatchHub();
+        return *hub;
+    }
+
+    void AddStream(const std::shared_ptr<StreamCall> &s) {
+        std::lock_guard<std::mutex> hold(mu_);
+        streams_.erase(
+            std::remove_if(streams_.begin(), streams_.end(),
+                           [](const std::weak_ptr<StreamCall> &w) { return w.expired(); }),
+            streams_.end());
+        streams_.push_back(s);
+        cv_.notify_all();
+    }
+
+    void RemoveStream(const std::shared_ptr<StreamCall> &s) {
+        std::lock_guard<std::mutex> hold(mu_);
+        streams_.erase(std::remove_if(streams_.begin(), streams_.end(),
+                                      [&](const std::weak_ptr<StreamCall> &w) {
+                                          auto locked = w.lock();
+                                          return !locked || locked == s;
+                                      }),
+                       streams_.end());
+        cv_.notify_all();
+    }
+
+    void AddQuery(OwnerQuery q) {
+        std::lock_guard<std::mutex> hold(mu_);
+        queries_.push_back(q);
+        cv_.notify_all();
+    }
+
+    void RemoveQuery(std::atomic<bool> *done) {
+        std::lock_guard<std::mutex> hold(mu_);
+        queries_.erase(std::remove_if(queries_.begin(), queries_.end(),
+                                      [&](const OwnerQuery &q) { return q.done == done; }),
+                       queries_.end());
+        cv_.notify_all();
+    }
+
+  private:
+    WatchHub() {
+        th_ = std::thread([this] { Run(); });
+        th_.detach();
+    }
+
+    void Run() {
+        for (;;) {
+            std::vector<std::weak_ptr<StreamCall>> streams;
+            std::vector<OwnerQuery> queries;
+            {
+                std::unique_lock<std::mutex> hold(mu_);
+                auto wake = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+                for (auto &w : streams_) {
+                    if (auto s = w.lock()) {
+                        if (!s->started.load(std::memory_order_acquire) &&
+                            s->first_deadline < wake) {
+                            wake = s->first_deadline;
+                        }
+                    }
+                }
+                cv_.wait_until(hold, wake);
+                streams_.erase(
+                    std::remove_if(streams_.begin(), streams_.end(),
+                                   [](const std::weak_ptr<StreamCall> &w) { return w.expired(); }),
+                    streams_.end());
+                queries_.erase(std::remove_if(queries_.begin(), queries_.end(),
+                                              [](const OwnerQuery &q) {
+                                                  return q.done &&
+                                                         q.done->load(std::memory_order_acquire);
+                                              }),
+                               queries_.end());
+                streams = streams_;
+                queries = queries_;
+            }
+            for (auto &w : streams) {
+                auto s = w.lock();
+                if (!s || s->done.load(std::memory_order_acquire)) {
+                    continue;
+                }
+                if (s->ClientCancelled()) {
+                    s->TearDown(StreamStop::ClientCancel);
+                    continue;
+                }
+                if (!s->started.load(std::memory_order_acquire) &&
+                    std::chrono::steady_clock::now() >= s->first_deadline) {
+                    s->TearDown(StreamStop::FirstMessageTimeout);
+                }
+            }
+            for (auto &q : queries) {
+                if (q.done && q.done->load(std::memory_order_acquire)) {
+                    continue;
+                }
+                if (q.ctx && q.ctx->is_cancelled() && q.box) {
+                    q.box->Interrupt();
+                    if (q.done) {
+                        q.done->store(true, std::memory_order_release);
+                    }
+                }
+            }
+        }
+    }
+
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::vector<std::weak_ptr<StreamCall>> streams_;
+    std::vector<OwnerQuery> queries_;
+    std::thread th_;
 };
 
 class StreamWatch {
   public:
     explicit StreamWatch(std::shared_ptr<StreamCall> state) : state_(std::move(state)) {
-        if (!state_) {
-            return;
+        if (state_) {
+            WatchHub::Get().AddStream(state_);
         }
-        // Arrow ServerCallContext exposes only is_cancelled() — no CQ / callback.
-        // The first-message deadline is wait_until; cancel still needs a short poll.
-        watch_ = std::thread([s = state_] {
-            // ServerCallContext has no cancel callback (Arrow public API). Poll
-            // is_cancelled and the first-message deadline; TryCancel is what
-            // actually unblocks the blocked ReadData.
-            while (!s->done.load(std::memory_order_acquire)) {
-                if (s->ClientCancelled()) {
-                    s->TearDown(StreamStop::ClientCancel);
-                    return;
-                }
-                if (!s->started.load(std::memory_order_acquire) &&
-                    std::chrono::steady_clock::now() >= s->first_deadline) {
-                    s->TearDown(StreamStop::FirstMessageTimeout);
-                    return;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        });
     }
 
     StreamWatch(const StreamWatch &) = delete;
@@ -488,9 +608,9 @@ class StreamWatch {
         if (state_) {
             state_->done.store(true, std::memory_order_release);
             state_->cv.notify_all();
-        }
-        if (watch_.joinable()) {
-            watch_.detach();
+            // Do not RemoveStream here: locking the hub on the RPC thread
+            // can race a TryCancel. The hub drops expired weaks.
+            state_.reset();
         }
     }
 
@@ -508,7 +628,6 @@ class StreamWatch {
 
   private:
     std::shared_ptr<StreamCall> state_;
-    std::thread watch_;
 };
 
 class ProxiedDoGetStream : public FlightDataStream {
@@ -549,15 +668,7 @@ class ProxiedDoGetStream : public FlightDataStream {
 class QueryInterruptWatch {
   public:
     QueryInterruptWatch(const ServerCallContext &ctx, TenantSandbox &box) : ctx_(ctx), box_(box) {
-        watch_ = std::thread([this] {
-            while (!done_.load(std::memory_order_acquire)) {
-                if (ctx_.is_cancelled()) {
-                    box_.Interrupt();
-                    return;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        });
+        WatchHub::Get().AddQuery({&ctx_, &box_, &done_});
     }
 
     QueryInterruptWatch(const QueryInterruptWatch &) = delete;
@@ -565,16 +676,13 @@ class QueryInterruptWatch {
 
     ~QueryInterruptWatch() {
         done_.store(true, std::memory_order_release);
-        if (watch_.joinable()) {
-            watch_.join();
-        }
+        WatchHub::Get().RemoveQuery(&done_);
     }
 
   private:
     const ServerCallContext &ctx_;
     TenantSandbox &box_;
     std::atomic<bool> done_{false};
-    std::thread watch_;
 };
 
 Status MappedStreamError(const std::shared_ptr<StreamCall> &state, const Status &st,
@@ -608,10 +716,27 @@ void ApplyInternalListenerKeepalive(::arrow::flight::FlightServerOptions &opt) {
     };
 }
 
-PeerFlight::PeerFlight(std::string secret, int64_t timeout_ms, int64_t first_message_max_ms)
+PeerFlight::PeerFlight(std::string secret, int64_t timeout_ms, int64_t first_message_max_ms,
+                       int64_t max_inflight)
     : secret_(std::move(secret)), timeout_ms_(timeout_ms > 0 ? timeout_ms : 5000),
       first_message_max_ms_(first_message_max_ms > 0 ? first_message_max_ms
-                                                     : kDefaultFirstMessageMaxMs) {}
+                                                     : kDefaultFirstMessageMaxMs),
+      max_inflight_(max_inflight > 0 ? max_inflight : 64) {}
+
+PeerFlight::~PeerFlight() {
+    std::lock_guard<std::mutex> hold(mu_);
+    for (auto &kv : transports_) {
+        LeakGrpcObject(kv.second);
+    }
+    transports_.clear();
+    for (auto &kv : clients_) {
+        if (kv.second) {
+            (void)kv.second->Close();
+        }
+        LeakGrpcObject(kv.second);
+    }
+    clients_.clear();
+}
 
 ::arrow::flight::FlightCallOptions PeerFlight::BaseOpt(const std::string &sandbox_id,
                                                        const std::string &key) const {
@@ -703,7 +828,7 @@ PeerFlight::Client(const std::string &url) {
 }
 
 ::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>>
-PeerFlight::StreamTransport(const std::string &url) {
+PeerFlight::DialTransport(const std::string &url) {
     if (secret_.empty()) {
         return Status::Invalid("peer proxy requires auth.peer_secret_ref");
     }
@@ -728,30 +853,55 @@ PeerFlight::StreamTransport(const std::string &url) {
     return transport;
 }
 
-void PeerFlight::Shutdown() {
+::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>>
+PeerFlight::StreamTransport(const std::string &url) {
+    {
+        std::lock_guard<std::mutex> hold(mu_);
+        auto it = transports_.find(url);
+        if (it != transports_.end()) {
+            return it->second;
+        }
+    }
+    ARROW_ASSIGN_OR_RAISE(auto transport, DialTransport(url));
     std::lock_guard<std::mutex> hold(mu_);
-    for (auto &w : inflight_) {
-        if (auto s = w.lock()) {
-            s->TryCancel();
-        }
+    auto it = transports_.find(url);
+    if (it != transports_.end()) {
+        LeakGrpcObject(std::move(transport));
+        return it->second;
     }
-    inflight_.clear();
-    for (auto &kv : clients_) {
-        if (kv.second) {
-            (void)kv.second->Close();
+    transports_[url] = transport;
+    return transport;
+}
+
+void PeerFlight::Shutdown() {
+    std::vector<std::shared_ptr<::arrow::flight::internal::ClientDataStream>> live;
+    {
+        std::lock_guard<std::mutex> hold(mu_);
+        for (auto &w : inflight_) {
+            if (auto s = w.lock()) {
+                live.push_back(s);
+            }
         }
+        inflight_.clear();
+        for (auto &kv : clients_) {
+            if (kv.second) {
+                (void)kv.second->Close();
+            }
+        }
+        clients_.clear();
+        // Keep transports_ — destroying a cached transport with leaked
+        // cancelled streams can hang (Arrow #31235).
     }
-    clients_.clear();
+    for (auto &s : live) {
+        s->TryCancel();
+    }
 }
 
 void PeerFlight::AbandonStream(
-    std::shared_ptr<::arrow::flight::internal::ClientTransport> transport,
     std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream) {
-    if (stream) {
-        stream->TryCancel();
-    }
+    // Leak only. TryCancel already ran on the watcher (or Shutdown). A second
+    // TryCancel on the request thread can hang after cancel (Arrow #31235).
     LeakGrpcObject(std::move(stream));
-    LeakGrpcObject(std::move(transport));
 }
 
 ::arrow::Result<std::unique_ptr<FlightInfo>>
@@ -770,6 +920,14 @@ PeerFlight::ForwardGetFlightInfo(const std::string &url, const FlightDescriptor 
 PeerFlight::ForwardDoGet(const std::string &url, const Ticket &ticket,
                          const std::string &sandbox_id, const std::string &key,
                          const ServerCallContext &context, int64_t query_timeout_ms) {
+    const int64_t n = inflight_count_.fetch_add(1) + 1;
+    struct InflightGuard {
+        std::atomic<int64_t> *count;
+        ~InflightGuard() { count->fetch_sub(1); }
+    } guard{&inflight_count_};
+    if (max_inflight_ > 0 && n > max_inflight_) {
+        return Status::CapacityError("peer proxy busy");
+    }
     ARROW_ASSIGN_OR_RAISE(auto transport, StreamTransport(url));
     std::unique_ptr<::arrow::flight::internal::ClientDataStream> raw;
     auto start = transport->DoGet(StreamOpt(sandbox_id, key, {}), ticket, &raw);
@@ -794,18 +952,26 @@ PeerFlight::ForwardDoGet(const std::string &url, const Ticket &ticket,
         inflight_.push_back(stream);
     }
     auto watch = std::make_unique<StreamWatch>(state);
-    auto msg_reader = std::make_unique<FlightDataMessageReader>(stream);
-    auto opened = ::arrow::ipc::RecordBatchStreamReader::Open(
-        std::move(msg_reader), StreamOpt(sandbox_id, key, {}).read_options);
-    if (!opened.ok()) {
-        auto mapped = MappedStreamError(state, opened.status(), "do_get");
+    ::arrow::flight::internal::FlightData first;
+    if (!stream->ReadData(&first)) {
+        auto mapped = MappedStreamError(state, Status::IOError("peer stream stopped"), "do_get");
         watch.reset();
-        AbandonStream(std::move(state->transport), state->stream);
+        AbandonStream(std::move(stream));
         state->stream.reset();
         return mapped;
     }
     state->started.store(true, std::memory_order_release);
     state->cv.notify_all();
+    auto msg_reader = std::make_unique<FlightDataMessageReader>(stream, state, std::move(first));
+    auto opened = ::arrow::ipc::RecordBatchStreamReader::Open(
+        std::move(msg_reader), StreamOpt(sandbox_id, key, {}).read_options);
+    if (!opened.ok()) {
+        auto mapped = MappedStreamError(state, opened.status(), "do_get");
+        watch.reset();
+        AbandonStream(state->stream);
+        state->stream.reset();
+        return mapped;
+    }
     std::shared_ptr<::arrow::RecordBatchReader> reader = std::move(*opened);
     return std::make_unique<ProxiedDoGetStream>(std::make_unique<RecordBatchStream>(reader),
                                                 std::move(watch));
@@ -1745,9 +1911,9 @@ int RunServer(const ServerOptions &opt_in) {
     auto signer =
         std::make_shared<HmacHandleSigner>(opt.daemon.handle_secret, opt.daemon.handle_ttl_seconds);
     auto rewriter = std::make_shared<SqlRewriter>();
-    auto peers =
-        std::make_shared<PeerFlight>(opt.daemon.peer_secret, opt.daemon.lease.proxy_timeout_ms,
-                                     opt.daemon.lease.proxy_first_message_max_ms);
+    auto peers = std::make_shared<PeerFlight>(
+        opt.daemon.peer_secret, opt.daemon.lease.proxy_timeout_ms,
+        opt.daemon.lease.proxy_first_message_max_ms, opt.daemon.lease.proxy_max_inflight);
     if (nodes) {
         peers->SetNodeDirectory(nodes);
     }

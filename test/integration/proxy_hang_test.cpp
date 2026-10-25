@@ -23,10 +23,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -117,7 +121,7 @@ class HangingDataStream : public FlightDataStream {
 
 class OwnerStub : public FlightServerBase {
   public:
-    enum class Mode { IgnoreCancel, HangAfterSchema };
+    enum class Mode { IgnoreCancel, HangAfterSchema, Fast };
 
     explicit OwnerStub(Mode mode) : mode_(mode) {}
 
@@ -136,6 +140,17 @@ class OwnerStub : public FlightServerBase {
         doget_entered_.store(true, std::memory_order_release);
         if (mode_ == Mode::HangAfterSchema) {
             *stream = std::make_unique<HangingDataStream>(context, &cancelled_);
+            return Status::OK();
+        }
+        if (mode_ == Mode::Fast) {
+            auto schema = ::arrow::schema({::arrow::field("id", ::arrow::int32())});
+            ::arrow::Int32Builder b;
+            ARROW_RETURN_NOT_OK(b.Append(1));
+            std::shared_ptr<::arrow::Array> arr;
+            ARROW_RETURN_NOT_OK(b.Finish(&arr));
+            auto batch = ::arrow::RecordBatch::Make(schema, 1, {arr});
+            ARROW_ASSIGN_OR_RAISE(auto reader, ::arrow::RecordBatchReader::Make({batch}, schema));
+            *stream = std::make_unique<RecordBatchStream>(reader);
             return Status::OK();
         }
         while (!stop_.load(std::memory_order_acquire)) {
@@ -546,6 +561,185 @@ void TestHungPeerDoesNotBlockHealthy() {
     healthy.Stop();
 }
 
+struct ProcSnap {
+    int threads = 0;
+    long rss_kb = 0;
+};
+
+ProcSnap SelfSnap() {
+    ProcSnap s;
+    std::ifstream in("/proc/self/status");
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("Threads:", 0) == 0) {
+            s.threads = std::atoi(line.c_str() + 8);
+        } else if (line.rfind("VmRSS:", 0) == 0) {
+            s.rss_kb = std::atol(line.c_str() + 6);
+        }
+    }
+    return s;
+}
+
+void TestHungDoGetResources() {
+    HangFixture fx;
+    StubOwner owner;
+    owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::IgnoreCancel);
+    owner.Start(fx.daemon_b);
+    constexpr int kN = 32;
+    auto before = SelfSnap();
+    std::vector<std::thread> workers;
+    std::vector<Status> statuses(static_cast<size_t>(kN), Status::OK());
+    std::atomic<int> done{0};
+    workers.reserve(static_cast<size_t>(kN));
+    for (int i = 0; i < kN; i++) {
+        workers.emplace_back([&, i] {
+            FakeCallContext ctx;
+            auto stream_res = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-hang"}, fx.rec.id,
+                                                       fx.rec.key, ctx, 0);
+            statuses[static_cast<size_t>(i)] = stream_res.status();
+            done.fetch_add(1);
+        });
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    auto during = SelfSnap();
+    auto t0 = std::chrono::steady_clock::now();
+    fx.peers_a->Shutdown();
+    for (auto &w : workers) {
+        if (w.joinable()) {
+            w.join();
+        }
+    }
+    auto shutdown_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    auto after = SelfSnap();
+    // N worker threads are the test harness. The in-process owner Flight
+    // server also takes a handler thread per hung DoGet, and gRPC may grow a
+    // small executor pool. A per-stream watcher would add a third set of N.
+    const int extra = during.threads - before.threads - kN;
+    std::cout << "hung_doget_n=" << kN << " threads_before=" << before.threads
+              << " threads_during=" << during.threads << " threads_after=" << after.threads
+              << " threads_extra_over_workers=" << extra << " rss_before_kb=" << before.rss_kb
+              << " rss_during_kb=" << during.rss_kb << " rss_after_kb=" << after.rss_kb
+              << " shutdown_ms=" << shutdown_ms << "\n";
+    Expect(done.load() == kN, "all hung DoGets returned after shutdown");
+    Expect(extra < 2 * kN + 16, "proxy adds no per-stream watcher threads");
+    Expect(after.threads <= during.threads, "thread count does not grow after hung DoGets finish");
+    Expect(after.rss_kb < before.rss_kb + 64 * 1024,
+           "RSS stays within a 64MB band after hung DoGets");
+    Expect(shutdown_ms < 2000, "shutdown of N hung DoGets is bounded");
+    owner.Stop();
+}
+
+void TestProxyBusy() {
+    HangFixture fx;
+    fx.peers_a->set_max_inflight(2);
+    StubOwner owner;
+    owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::IgnoreCancel);
+    auto *stub = owner.server.get();
+    owner.Start(fx.daemon_b);
+    FakeCallContext ctx_a;
+    FakeCallContext ctx_b;
+    std::atomic<bool> a_done{false};
+    std::atomic<bool> b_done{false};
+    std::thread ta([&] {
+        (void)fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-hang"}, fx.rec.id, fx.rec.key,
+                                       ctx_a, 0);
+        a_done.store(true, std::memory_order_release);
+    });
+    std::thread tb([&] {
+        (void)fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-hang"}, fx.rec.id, fx.rec.key,
+                                       ctx_b, 0);
+        b_done.store(true, std::memory_order_release);
+    });
+    Expect(WaitEntered(stub, 4000), "busy-test hung DoGets are in progress");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    FakeCallContext ctx_c;
+    auto t0 = std::chrono::steady_clock::now();
+    auto busy = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-hang"}, fx.rec.id, fx.rec.key,
+                                         ctx_c, 0);
+    auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::cout << "peer_proxy_busy_ms=" << elapsed_ms << "\n";
+    Expect(!busy.ok(), "over-limit DoGet is rejected");
+    Expect(absl::StrContains(busy.status().ToString(), "peer proxy busy"),
+           "over-limit error is peer proxy busy");
+    Expect(elapsed_ms < 200, "busy reject is immediate");
+    fx.peers_a->Shutdown();
+    if (ta.joinable()) {
+        ta.join();
+    }
+    if (tb.joinable()) {
+        tb.join();
+    }
+    owner.Stop();
+}
+
+void TestHealthyDoGetLatency() {
+    HangFixture fx;
+    StubOwner owner;
+    owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::Fast);
+    owner.Start(fx.daemon_b);
+    FakeCallContext ctx;
+    auto warm =
+        fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-hang"}, fx.rec.id, fx.rec.key, ctx, 0);
+    Expect(warm.ok(), "healthy warmup DoGet");
+    if (warm.ok()) {
+        (void)(*warm)->Next();
+    }
+
+    constexpr int kIters = 20;
+    std::vector<double> proxy_ms;
+    proxy_ms.reserve(kIters);
+    for (int i = 0; i < kIters; i++) {
+        auto t0 = std::chrono::steady_clock::now();
+        auto stream_res = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-hang"}, fx.rec.id,
+                                                   fx.rec.key, ctx, 0);
+        if (stream_res.ok()) {
+            (void)(*stream_res)->Next();
+        }
+        proxy_ms.push_back(
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                .count());
+        Expect(stream_res.ok(), "healthy proxied DoGet");
+    }
+
+    auto loc = Location::ForGrpcTcp("127.0.0.1", owner.port);
+    auto cli_res = FlightClient::Connect(*loc);
+    Expect(cli_res.ok(), "baseline FlightClient connects");
+    auto cli = std::shared_ptr<FlightClient>(std::move(cli_res).ValueOrDie());
+    FlightCallOptions opt;
+    opt.headers.emplace_back("authorization", "Bearer " + fx.daemon_a.peer_secret);
+    opt.headers.emplace_back("x-duckbox-sandbox", fx.rec.id);
+    opt.headers.emplace_back("x-duckbox-key", fx.rec.key);
+    opt.timeout = ::arrow::flight::TimeoutDuration{-1};
+    (void)cli->DoGet(opt, Ticket{"proxy-hang"});
+    std::vector<double> baseline_ms;
+    baseline_ms.reserve(kIters);
+    for (int i = 0; i < kIters; i++) {
+        auto t0 = std::chrono::steady_clock::now();
+        auto stream_res = cli->DoGet(opt, Ticket{"proxy-hang"});
+        if (stream_res.ok()) {
+            (void)(*stream_res)->ToTable();
+        }
+        baseline_ms.push_back(
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                .count());
+        Expect(stream_res.ok(), "baseline FlightClient DoGet");
+    }
+    auto mean = [](const std::vector<double> &v) {
+        return std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size());
+    };
+    double proxy_mean = mean(proxy_ms);
+    double base_mean = mean(baseline_ms);
+    std::cout << "healthy_doget_proxy_mean_ms=" << proxy_mean
+              << " healthy_doget_flightclient_mean_ms=" << base_mean << "\n";
+    Expect(proxy_mean < base_mean * 3.0 + 5.0,
+           "cached proxied DoGet is not a large regression vs FlightClient");
+    owner.Stop();
+}
+
 } // namespace
 
 void duckbox::test::RunProxyHangTests() {
@@ -554,4 +748,7 @@ void duckbox::test::RunProxyHangTests() {
     TestCancelAfterSchema();
     TestPublicDoGetFirstMessageBound();
     TestHungPeerDoesNotBlockHealthy();
+    TestHungDoGetResources();
+    TestProxyBusy();
+    TestHealthyDoGetLatency();
 }

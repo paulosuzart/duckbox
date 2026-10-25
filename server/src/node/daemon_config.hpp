@@ -61,7 +61,8 @@ struct LeaseSettings {
     // First-message wait when sandbox query_timeout_ms is 0. DoGet itself has
     // no stream deadline; this only bounds waiting for the owner's schema.
     int64_t proxy_first_message_max_ms = 60000;
-    size_t max_leases = 0; // 0 = unlimited
+    int64_t proxy_max_inflight = 64; // concurrent proxied DoGets; reject with "peer proxy busy"
+    size_t max_leases = 0;           // 0 = unlimited
 };
 
 // Trusted caller → allowed tenant-key globs. Empty list is allow-all only when

@@ -20,6 +20,7 @@
 #include <arrow/record_batch.h>
 #include <arrow/util/cancel.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -211,18 +212,23 @@ void ApplyInternalListenerKeepalive(::arrow::flight::FlightServerOptions &opt);
 // Node-to-node Flight client. Authenticates with the shared peer secret, never the caller.
 class PeerFlight {
 public:
-	explicit PeerFlight(std::string secret, int64_t timeout_ms = 5000, int64_t first_message_max_ms = 60000);
+	explicit PeerFlight(std::string secret, int64_t timeout_ms = 5000, int64_t first_message_max_ms = 60000,
+	                    int64_t max_inflight = 64);
 	void set_timeout_ms(int64_t timeout_ms) {
 		timeout_ms_ = timeout_ms > 0 ? timeout_ms : 5000;
 	}
 	void set_first_message_max_ms(int64_t first_message_max_ms) {
 		first_message_max_ms_ = first_message_max_ms > 0 ? first_message_max_ms : 60000;
 	}
+	void set_max_inflight(int64_t max_inflight) {
+		max_inflight_ = max_inflight > 0 ? max_inflight : 64;
+	}
 	void SetNodeDirectory(std::shared_ptr<cluster::S3NodeDirectory> nodes) {
 		nodes_ = std::move(nodes);
 	}
 	// Close in-flight peer clients so hung DoGets unblock (SIGTERM / tests).
 	void Shutdown();
+	~PeerFlight();
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightInfo>> ForwardGetFlightInfo(
 	    const std::string &url, const ::arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
 	    const std::string &key);
@@ -234,10 +240,11 @@ private:
 	::arrow::flight::FlightClientOptions PeerClientOpts() const;
 	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Dial(const std::string &url);
 	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Client(const std::string &url);
+	::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>> DialTransport(
+	    const std::string &url);
 	::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>> StreamTransport(
 	    const std::string &url);
-	void AbandonStream(std::shared_ptr<::arrow::flight::internal::ClientTransport> transport,
-	                   std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream);
+	void AbandonStream(std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream);
 	::arrow::flight::FlightCallOptions BaseOpt(const std::string &sandbox_id, const std::string &key) const;
 	::arrow::flight::FlightCallOptions CallOpt(const std::string &sandbox_id, const std::string &key) const;
 	::arrow::flight::FlightCallOptions StreamOpt(const std::string &sandbox_id, const std::string &key,
@@ -247,10 +254,13 @@ private:
 	std::string secret_;
 	int64_t timeout_ms_ = 5000;
 	int64_t first_message_max_ms_ = 60000;
+	int64_t max_inflight_ = 64;
 	std::shared_ptr<cluster::S3NodeDirectory> nodes_;
 	std::mutex mu_;
 	std::unordered_map<std::string, std::shared_ptr<::arrow::flight::FlightClient>> clients_;
+	std::unordered_map<std::string, std::shared_ptr<::arrow::flight::internal::ClientTransport>> transports_;
 	std::vector<std::weak_ptr<::arrow::flight::internal::ClientDataStream>> inflight_;
+	std::atomic<int64_t> inflight_count_{0};
 };
 
 class HandshakeAuthHandler : public ::arrow::flight::ServerAuthHandler {
