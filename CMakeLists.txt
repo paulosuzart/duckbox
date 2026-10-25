@@ -559,7 +559,9 @@ duckbox_add_test(duckbox_s3_sts_tests
 
 # Optional libpq oracle for unit secret-redaction tests. Never a production
 # or default-build dependency: the suite prints "SKIP: libpq not found" and
-# passes when headers/library are absent.
+# passes when headers/library are absent. CI sets DUCKBOX_REQUIRE_LIBPQ=ON
+# so a silent SKIP cannot turn the required jobs green.
+option(DUCKBOX_REQUIRE_LIBPQ "Fail configure if libpq is missing (CI unit oracle)" OFF)
 find_package(PostgreSQL QUIET)
 if(NOT PostgreSQL_FOUND)
   find_package(PkgConfig QUIET)
@@ -601,6 +603,9 @@ elseif(DUCKBOX_LIBPQ_FOUND)
   endif()
   target_link_libraries(duckbox_unit_tests PRIVATE ${DUCKBOX_LIBPQ_LIBRARIES})
 else()
+  if(DUCKBOX_REQUIRE_LIBPQ)
+    message(FATAL_ERROR "DUCKBOX_REQUIRE_LIBPQ=ON but libpq was not found")
+  endif()
   message(STATUS "libpq not found; unit redaction oracle will print SKIP: libpq not found")
 endif()
 

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -304,12 +305,47 @@ struct LibpqCase {
     const char *keep;
 };
 
+void ExpectStemGone(const LibpqCase &c, const std::string &got) {
+    const auto at = c.input.find("LIBPQ-ORACLE-PW-");
+    if (at == std::string::npos) {
+        return;
+    }
+    duckbox::test::Expect(got.find(c.input.substr(at, 18)) == std::string::npos,
+                          std::string(c.label) + " (no libpq password) still hides the PW stem");
+    duckbox::test::Expect(got.find(duckbox::lake::kRedactedMarker) != std::string::npos,
+                          std::string(c.label) + " (no libpq password) uses the marker");
+}
+
+void ExpectPasswordFragmentsGone(const LibpqCase &c, const std::string &got,
+                                 const std::string &password) {
+    // Every alphanumeric fragment of the libpq password (len>=2) must vanish.
+    // Catches partial leaks (NL tail after a line-end bound, SPACE after '%').
+    std::string frag;
+    auto flush = [&]() {
+        if (frag.size() >= 2) {
+            duckbox::test::Expect(got.find(frag) == std::string::npos,
+                                  std::string(c.label) + " leaked libpq password fragment '" +
+                                      frag + "'");
+        }
+        frag.clear();
+    };
+    for (char ch : password) {
+        if (std::isalnum(static_cast<unsigned char>(ch))) {
+            frag.push_back(ch);
+        } else {
+            flush();
+        }
+    }
+    flush();
+}
+
 void CheckLibpqCase(const LibpqCase &c, int *ran, int *parsed, int *empty_pw, int *parse_fail) {
     ++*ran;
     auto got = duckbox::lake::RedactSecretText(c.input);
     auto ext = ParseLibpqPassword(c.input);
     if (!ext.parsed) {
         ++*parse_fail;
+        ExpectStemGone(c, got);
         if (c.keep && c.keep[0] != '\0') {
             duckbox::test::Expect(got.find(c.keep) != std::string::npos,
                                   std::string(c.label) + " keeps non-secret '" + c.keep + "'");
@@ -317,8 +353,12 @@ void CheckLibpqCase(const LibpqCase &c, int *ran, int *parsed, int *empty_pw, in
         return;
     }
     ++*parsed;
+    if (!ext.password.empty()) {
+        ExpectPasswordFragmentsGone(c, got, ext.password);
+    }
     if (ext.password.empty()) {
         ++*empty_pw;
+        ExpectStemGone(c, got);
     } else if (c.input.find(ext.password) != std::string::npos) {
         duckbox::test::Expect(got.find(ext.password) == std::string::npos,
                               std::string(c.label) + " leaked libpq password '" + ext.password +
@@ -449,6 +489,22 @@ void RunLibpqRedactionOracle() {
                               "URI raw slash: uses the redaction marker");
         duckbox::test::Expect(got.find("oracle-host") != std::string::npos,
                               "URI raw slash: host stays visible");
+    }
+
+    // libpq 18 rejects a raw space in the URI (parse_fail); 17 extracts the
+    // password. Leak-check the span either way — do not depend on version.
+    {
+        const char *raw_space =
+            "postgresql://oracle_u:LIBPQ-ORACLE-PW-09 SPACE@oracle-host/oracledb";
+        auto got = duckbox::lake::RedactSecretText(raw_space);
+        duckbox::test::Expect(got.find("LIBPQ-ORACLE-PW-09") == std::string::npos,
+                              "URI raw space: stem is redacted regardless of libpq parse");
+        duckbox::test::Expect(got.find("SPACE") == std::string::npos,
+                              "URI raw space: SPACE tail is redacted regardless of libpq parse");
+        duckbox::test::Expect(got.find(duckbox::lake::kRedactedMarker) != std::string::npos,
+                              "URI raw space: uses the redaction marker");
+        duckbox::test::Expect(got.find("oracle-host") != std::string::npos,
+                              "URI raw space: host stays visible");
     }
 
     std::cout << "libpq oracle: RAN " << ran << " cases (parsed=" << parsed
