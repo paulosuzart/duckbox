@@ -225,7 +225,7 @@ int main() {
 
         if (do_rewrite) {
             try {
-                auto rewritten = RewriteUserSql(sql, policy, key);
+                auto rewritten = RewriteUserSql(sql, case_policy, key);
                 if (expect == "deny" && !do_execute) {
                     g_failed++;
                     std::cerr << "FAIL: " << id << " expected rewrite deny of " << sql << "\n";

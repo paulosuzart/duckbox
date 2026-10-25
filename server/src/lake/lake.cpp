@@ -694,9 +694,23 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
     }
     redact_ctx = CollectSecretRedactionContext(catalog, creds.key_id, creds.secret);
 
+    ExecSensitiveOrThrow(con, BuildDuckLakeAttachSql(spec, catalog),
+                         "sandbox: ducklake catalog attach failed: ", kCatalogAttachClientError,
+                         redact_ctx);
+    ExecOrThrow(con, "USE " + QuotedLakeAlias(spec));
+}
+
+std::string QuotedLakeAlias(const SandboxSpec &spec) {
     auto alias = spec.lake.alias.empty() ? "lake" : spec.lake.alias;
+    if (!ValidSqlIdent(alias)) {
+        throw PolicyError("lake.alias is not a valid identifier");
+    }
+    return QuoteSqlIdent(alias);
+}
+
+std::string BuildDuckLakeAttachSql(const SandboxSpec &spec, const std::string &catalog) {
     std::ostringstream attach;
-    attach << "ATTACH '" << EscapeSqlString(catalog) << "' AS " << alias << " (";
+    attach << "ATTACH '" << EscapeSqlString(catalog) << "' AS " << QuotedLakeAlias(spec) << " (";
     bool first = true;
     auto add = [&](const std::string &piece) {
         if (!first) {
@@ -708,14 +722,12 @@ void AttachLakeFromSpec(ddb::Connection &con, const SandboxSpec &spec, const std
     if (!spec.lake.data_path.empty()) {
         add("DATA_PATH '" + EscapeSqlString(spec.lake.data_path) + "'");
     }
-    if (spec.lake.read_only) {
-        add("READ_ONLY");
-    }
+    // kind: ducklake is always read-only (ValidateStatic rejects read_only: false).
+    add("READ_ONLY");
+    // Do not add AUTOMATIC_MIGRATION, DUCKLAKE_VERSION, or STORAGE_VERSION.
+    // DuckDB 2.0's ducklake extension reads DuckLake 1.0 catalogs as-is.
     attach << ")";
-    ExecSensitiveOrThrow(con, attach.str(),
-                         "sandbox: ducklake catalog attach failed: ", kCatalogAttachClientError,
-                         redact_ctx);
-    ExecOrThrow(con, "USE " + alias);
+    return attach.str();
 }
 
 } // namespace lake
