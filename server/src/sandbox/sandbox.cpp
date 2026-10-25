@@ -797,8 +797,15 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeHandleArrow(const std::s
     const int64_t bound_ms = policy_.resources.query_timeout_ms > 0
                                  ? policy_.resources.query_timeout_ms
                                  : daemon_.lease.proxy_first_message_max_ms;
-    if (!mu_.try_lock_for(std::chrono::milliseconds(bound_ms))) {
-        throw UnavailableError("sandbox describe timed out");
+    // try_lock_for does not time out on Apple libc++ (same-thread or not).
+    // Poll try_lock until the config deadline; yield is not a slack constant.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(bound_ms);
+    while (!mu_.try_lock()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw UnavailableError("sandbox describe timed out");
+        }
+        std::this_thread::yield();
     }
     std::lock_guard<std::timed_mutex> hold(mu_, std::adopt_lock);
     WarmupLocked(false);

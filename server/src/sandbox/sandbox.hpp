@@ -115,9 +115,10 @@ class TenantSandbox {
     std::unique_ptr<ddb::Connection> con_;
     std::mutex interrupt_mu_; // Interrupt vs Passivate; not held during Execute
     // Held for the whole user statement (Execute / ExtractPlan / Describe).
-    // DescribeHandleArrow uses try_lock_for (query_timeout_ms, else
+    // DescribeHandleArrow waits until query_timeout_ms (else
     // proxy_first_message_max_ms) so GetFlightInfo cannot wait forever behind
-    // a DoGet stuck in Arrow #31235 send-after-cancel.
+    // a DoGet stuck in Arrow #31235 send-after-cancel. Apple libc++
+    // try_lock_for does not time out; the wait is try_lock until that deadline.
     std::timed_mutex mu_;
     std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
     int64_t last_used_wall_ms_ = 0;
