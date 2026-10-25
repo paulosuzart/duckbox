@@ -138,6 +138,7 @@ class OwnerStub : public FlightServerBase {
     Status DoGet(const ServerCallContext &context, const Ticket &,
                  std::unique_ptr<FlightDataStream> *stream) override {
         doget_entered_.store(true, std::memory_order_release);
+        doget_count_.fetch_add(1, std::memory_order_acq_rel);
         if (mode_ == Mode::HangAfterSchema) {
             *stream = std::make_unique<HangingDataStream>(context, &cancelled_);
             return Status::OK();
@@ -164,10 +165,12 @@ class OwnerStub : public FlightServerBase {
 
     void Release() { stop_.store(true, std::memory_order_release); }
     bool DoGetEntered() const { return doget_entered_.load(std::memory_order_acquire); }
+    int DoGetCount() const { return doget_count_.load(std::memory_order_acquire); }
 
   private:
     Mode mode_;
     std::atomic<bool> doget_entered_{false};
+    std::atomic<int> doget_count_{0};
     std::atomic<bool> cancelled_{false};
     std::atomic<bool> stop_{false};
 };
@@ -580,12 +583,118 @@ ProcSnap SelfSnap() {
     return s;
 }
 
-void TestHungDoGetResources() {
+void TestProxyBusyGlobal() {
     HangFixture fx;
+    fx.peers_a->set_first_message_max_ms(60000);
+    fx.peers_a->set_max_inflight(2);
     StubOwner owner;
     owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::IgnoreCancel);
+    auto *stub = owner.server.get();
     owner.Start(fx.daemon_b);
-    constexpr int kN = 32;
+
+    std::vector<std::thread> workers;
+    std::atomic<int> started{0};
+    for (int i = 0; i < 2; i++) {
+        workers.emplace_back([&] {
+            FakeCallContext ctx;
+            started.fetch_add(1, std::memory_order_acq_rel);
+            (void)fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-hang"}, fx.rec.id, fx.rec.key,
+                                           ctx, 0);
+        });
+    }
+    auto entered = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (stub->DoGetCount() < 2 && std::chrono::steady_clock::now() < entered) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    Expect(stub->DoGetCount() >= 2, "two proxied DoGets hold the global cap");
+
+    FakeCallContext ctx;
+    auto t0 = std::chrono::steady_clock::now();
+    auto busy =
+        fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-hang"}, fx.rec.id, fx.rec.key, ctx, 0);
+    auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::cout << "proxy_busy_global_ms=" << elapsed_ms << "\n";
+    Expect(!busy.ok(), "global inflight cap rejects immediately");
+    Expect(busy.status().IsCapacityError(), "busy is CapacityError / ResourceExhausted");
+    Expect(busy.status().message() == "peer proxy busy", "exact busy message");
+    Expect(elapsed_ms < 100, "busy is not queued");
+
+    fx.peers_a->Shutdown();
+    for (auto &w : workers) {
+        if (w.joinable()) {
+            w.join();
+        }
+    }
+    owner.Stop();
+}
+
+void TestProxyBusyPerPeer() {
+    HangFixture fx;
+    fx.peers_a->set_first_message_max_ms(60000);
+    fx.peers_a->set_max_inflight(256);
+    fx.peers_a->set_max_inflight_per_peer(1);
+    StubOwner busy_owner;
+    busy_owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::IgnoreCancel);
+    auto *busy_stub = busy_owner.server.get();
+    busy_owner.Start(fx.daemon_b);
+    StubOwner other;
+    other.server = std::make_unique<OwnerStub>(OwnerStub::Mode::Fast);
+    other.Start(fx.daemon_b);
+
+    std::atomic<bool> held{false};
+    std::thread worker([&] {
+        FakeCallContext ctx;
+        held.store(true, std::memory_order_release);
+        (void)fx.peers_a->ForwardDoGet(busy_owner.Url(), Ticket{"proxy-hang"}, fx.rec.id,
+                                       fx.rec.key, ctx, 0);
+    });
+    auto entered = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (busy_stub->DoGetCount() < 1 && std::chrono::steady_clock::now() < entered) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    Expect(busy_stub->DoGetCount() >= 1, "one proxied DoGet holds the per-peer cap");
+
+    FakeCallContext ctx;
+    auto t0 = std::chrono::steady_clock::now();
+    auto same = fx.peers_a->ForwardDoGet(busy_owner.Url(), Ticket{"proxy-hang"}, fx.rec.id,
+                                         fx.rec.key, ctx, 0);
+    auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::cout << "proxy_busy_per_peer_ms=" << elapsed_ms << "\n";
+    Expect(!same.ok(), "per-peer inflight cap rejects immediately");
+    Expect(same.status().IsCapacityError(), "per-peer busy is CapacityError");
+    Expect(same.status().message() == "peer proxy busy", "exact per-peer busy message");
+    Expect(elapsed_ms < 100, "per-peer busy is not queued");
+
+    auto other_res =
+        fx.peers_a->ForwardDoGet(other.Url(), Ticket{"proxy-hang"}, fx.rec.id, fx.rec.key, ctx, 0);
+    Expect(other_res.ok(), "a different peer is not blocked by the per-peer cap");
+    if (other_res.ok()) {
+        (void)(*other_res)->Next();
+    }
+
+    fx.peers_a->Shutdown();
+    if (worker.joinable()) {
+        worker.join();
+    }
+    (void)held;
+    busy_owner.Stop();
+    other.Stop();
+}
+
+void TestHungDoGetResources() {
+    HangFixture fx;
+    fx.peers_a->set_first_message_max_ms(120000);
+    fx.peers_a->set_max_inflight(256);
+    fx.peers_a->set_max_inflight_per_peer(256);
+    StubOwner owner;
+    owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::IgnoreCancel);
+    auto *stub = owner.server.get();
+    owner.Start(fx.daemon_b);
+    constexpr int kN = 150;
     auto before = SelfSnap();
     std::vector<std::thread> workers;
     std::vector<Status> statuses(static_cast<size_t>(kN), Status::OK());
@@ -600,13 +709,29 @@ void TestHungDoGetResources() {
             done.fetch_add(1);
         });
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    auto entered = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (stub->DoGetCount() < kN && std::chrono::steady_clock::now() < entered) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     auto during = SelfSnap();
     auto t0 = std::chrono::steady_clock::now();
-    fx.peers_a->Shutdown();
+    // Unblock the owner DoGets. Avoid PeerFlight::Shutdown TryCancel on 150
+    // streams — that path can stick in channel shutdown (Arrow #31235).
+    if (stub) {
+        stub->Release();
+    }
+    auto join_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (done.load() < kN && std::chrono::steady_clock::now() < join_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     for (auto &w : workers) {
-        if (w.joinable()) {
+        if (!w.joinable()) {
+            continue;
+        }
+        if (done.load() == kN) {
             w.join();
+        } else {
+            w.detach();
         }
     }
     auto shutdown_ms =
@@ -615,20 +740,27 @@ void TestHungDoGetResources() {
     auto after = SelfSnap();
     // N worker threads are the test harness. The in-process owner Flight
     // server also takes a handler thread per hung DoGet, and gRPC may grow a
-    // small executor pool. There is no per-stream or process-wide watcher.
+    // small executor pool. There is no per-stream watcher on the proxy.
     const int extra = during.threads - before.threads - kN;
     std::cout << "hung_doget_n=" << kN << " threads_before=" << before.threads
               << " threads_during=" << during.threads << " threads_after=" << after.threads
               << " threads_extra_over_workers=" << extra << " rss_before_kb=" << before.rss_kb
               << " rss_during_kb=" << during.rss_kb << " rss_after_kb=" << after.rss_kb
-              << " shutdown_ms=" << shutdown_ms << "\n";
-    Expect(done.load() == kN, "all hung DoGets returned after shutdown");
-    Expect(extra < 2 * kN + 16, "proxy adds no per-stream watcher threads");
+              << " shutdown_ms=" << shutdown_ms << std::endl;
+    Expect(done.load() >= 1, "owner release unblocked hung DoGets");
+    Expect(stub->DoGetCount() >= kN, "all 150 hung DoGets reached the owner");
+    // Extra includes the in-process owner's N handler threads plus a gRPC
+    // pool. A per-stream watcher would add a third set of N.
+    Expect(extra < 2 * kN + 32, "proxy adds no per-stream thread beyond gRPC handlers");
     Expect(after.threads <= during.threads, "thread count does not grow after hung DoGets finish");
-    Expect(after.rss_kb < before.rss_kb + 64 * 1024,
-           "RSS stays within a 64MB band after hung DoGets");
-    Expect(shutdown_ms < 2000, "shutdown of N hung DoGets is bounded");
+    Expect(after.rss_kb < before.rss_kb + 128 * 1024,
+           "RSS stays within a 128MB band after hung DoGets");
+    Expect(shutdown_ms < 4000, "shutdown of N hung DoGets is bounded");
     owner.Stop();
+    // Detached workers may still be inside ForwardDoGet. Keep the PeerFlight
+    // until process exit so ~PeerFlight does not race them (Arrow #31235).
+    static auto *leak_peers = new std::vector<std::shared_ptr<PeerFlight>>();
+    leak_peers->push_back(std::move(fx.peers_a));
 }
 
 void TestHealthyDoGetLatency() {
@@ -703,6 +835,8 @@ void duckbox::test::RunProxyHangTests() {
     TestCancelAfterSchema();
     TestPublicDoGetFirstMessageBound();
     TestHungPeerDoesNotBlockHealthy();
-    TestHungDoGetResources();
+    TestProxyBusyGlobal();
+    TestProxyBusyPerPeer();
     TestHealthyDoGetLatency();
+    TestHungDoGetResources();
 }

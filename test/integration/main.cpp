@@ -16,7 +16,6 @@ int main() {
     RunPythonClientAuthTests();
     RunClusterTests();
     RunProxyTimeoutTests();
-    RunProxyHangTests();
     RunSignalShutdownTests();
     RunConnectRuntimeTests();
     RunTriggerRuntimeTests();
@@ -29,5 +28,7 @@ int main() {
     RunSecretFlightTests();
     RunTempDirectoryExecTests();
     RunTokenSanitizeTests();
+    // Last: 150 hung DoGets can detach leftover gRPC threads (Arrow #31235).
+    RunProxyHangTests();
     return ReportAndExit("integration");
 }

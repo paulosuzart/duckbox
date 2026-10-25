@@ -58,8 +58,10 @@ struct LeaseSettings {
     int64_t cache_ms = 250;          // short Acquire cache; 0 disables
     int64_t gc_ms = 86'400'000;      // tombstone GC age; 0 disables (default 24h)
     int64_t proxy_timeout_ms = 5000; // peer connect, handshake, GetFlightInfo; added to DoGet deadline
-    // Whole-call proxied DoGet deadline when sandbox query_timeout_ms is 0.
+    // Ceiling for the proxied DoGet whole-call deadline (also used when query_timeout_ms is 0).
     int64_t proxy_first_message_max_ms = 60000;
+    int64_t proxy_max_inflight = 256;          // global concurrent proxied calls
+    int64_t proxy_max_inflight_per_peer = 256; // concurrent proxied calls to one owner URL
     size_t max_leases = 0;           // 0 = unlimited
 };
 

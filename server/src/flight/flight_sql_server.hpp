@@ -20,10 +20,12 @@
 #include <arrow/record_batch.h>
 #include <arrow/util/cancel.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace duckbox {
@@ -207,16 +209,25 @@ int RunNodeDrain(const NodeCliRequest &req);
 // Handshake token is a bearer secret or JWT, never an unsigned spec payload.
 // Allow gRPC keepalive pings on the internal peer listener.
 void ApplyInternalListenerKeepalive(::arrow::flight::FlightServerOptions &opt);
+// Stops the one shared owner-side DuckDB Interrupt poller (daemon shutdown).
+void ShutdownOwnerInterruptWatch();
 
 // Node-to-node Flight client. Authenticates with the shared peer secret, never the caller.
 class PeerFlight {
 public:
-	explicit PeerFlight(std::string secret, int64_t timeout_ms = 5000, int64_t first_message_max_ms = 60000);
+	explicit PeerFlight(std::string secret, int64_t timeout_ms = 5000, int64_t first_message_max_ms = 60000,
+	                    int64_t max_inflight = 256, int64_t max_inflight_per_peer = 256);
 	void set_timeout_ms(int64_t timeout_ms) {
 		timeout_ms_ = timeout_ms > 0 ? timeout_ms : 5000;
 	}
 	void set_first_message_max_ms(int64_t first_message_max_ms) {
 		first_message_max_ms_ = first_message_max_ms > 0 ? first_message_max_ms : 60000;
+	}
+	void set_max_inflight(int64_t max_inflight) {
+		max_inflight_ = max_inflight > 0 ? max_inflight : 256;
+	}
+	void set_max_inflight_per_peer(int64_t max_inflight_per_peer) {
+		max_inflight_per_peer_ = max_inflight_per_peer > 0 ? max_inflight_per_peer : 256;
 	}
 	void SetNodeDirectory(std::shared_ptr<cluster::S3NodeDirectory> nodes) {
 		nodes_ = std::move(nodes);
@@ -245,10 +256,50 @@ private:
 	::arrow::flight::FlightCallOptions StreamOpt(const std::string &sandbox_id, const std::string &key,
 	                                            int64_t bound_ms) const;
 	int64_t FirstMessageBoundMs(int64_t query_timeout_ms) const;
+	class InflightGuard {
+	public:
+		InflightGuard() = default;
+		InflightGuard(std::atomic<int64_t> *global, std::shared_ptr<std::atomic<int64_t>> peer) noexcept
+		    : global_(global), peer_(std::move(peer)) {}
+		InflightGuard(InflightGuard &&o) noexcept : global_(o.global_), peer_(std::move(o.peer_)) {
+			o.global_ = nullptr;
+		}
+		InflightGuard &operator=(InflightGuard &&o) noexcept {
+			if (this != &o) {
+				Release();
+				global_ = o.global_;
+				peer_ = std::move(o.peer_);
+				o.global_ = nullptr;
+			}
+			return *this;
+		}
+		~InflightGuard() { Release(); }
+		InflightGuard(const InflightGuard &) = delete;
+		InflightGuard &operator=(const InflightGuard &) = delete;
+
+	private:
+		void Release() {
+			if (peer_) {
+				peer_->fetch_sub(1, std::memory_order_acq_rel);
+				peer_.reset();
+			}
+			if (global_) {
+				global_->fetch_sub(1, std::memory_order_acq_rel);
+				global_ = nullptr;
+			}
+		}
+		std::atomic<int64_t> *global_ = nullptr;
+		std::shared_ptr<std::atomic<int64_t>> peer_;
+	};
+	::arrow::Result<InflightGuard> AcquireInflight(const std::string &url);
 
 	std::string secret_;
 	int64_t timeout_ms_ = 5000;
 	int64_t first_message_max_ms_ = 60000;
+	int64_t max_inflight_ = 256;
+	int64_t max_inflight_per_peer_ = 256;
+	std::atomic<int64_t> global_inflight_{0};
+	std::unordered_map<std::string, std::shared_ptr<std::atomic<int64_t>>> peer_inflight_;
 	std::shared_ptr<cluster::S3NodeDirectory> nodes_;
 	std::mutex mu_;
 	std::unordered_map<std::string, std::shared_ptr<::arrow::flight::FlightClient>> clients_;

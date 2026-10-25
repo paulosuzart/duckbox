@@ -306,7 +306,7 @@ import os, signal, threading, time
 
 owner = int(os.environ["OWNER_PID"])
 proxy = int(os.environ["PROXY_PID"])
-N = 16
+N = 150
 
 def snap(pid):
     threads, rss = 0, 0
@@ -332,7 +332,7 @@ def hung_get():
 workers = [threading.Thread(target=hung_get, daemon=True) for _ in range(N)]
 for th in workers:
     th.start()
-time.sleep(0.6)
+time.sleep(2.0)
 during = snap(proxy)
 print(
     f"proxy_hung_doget_n={N} threads_before={before[0]} threads_during={during[0]} "

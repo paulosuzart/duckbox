@@ -35,6 +35,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstddef>
 #include <cstdlib>
@@ -354,7 +355,10 @@ Status ProxyStatus(const Status &st, const char *op) {
     }
     const auto &mapped = st.message();
     if (mapped == "peer proxy timed out" || mapped == "peer proxy cancelled" ||
-        mapped == "peer proxy failed") {
+        mapped == "peer proxy failed" || mapped == "peer proxy busy") {
+        return st;
+    }
+    if (st.IsCapacityError()) {
         return st;
     }
     LogUpstream(op, st);
@@ -394,6 +398,7 @@ struct StreamCall {
     std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream;
     const ServerCallContext *ctx = nullptr;
     std::atomic<bool> cancelled{false};
+    std::shared_ptr<void> inflight_hold;
 
     ~StreamCall() {
         if (stream) {
@@ -476,7 +481,112 @@ class ProxiedDoGetStream : public FlightDataStream {
     std::shared_ptr<StreamCall> state_;
 };
 
+// One process-wide poller: is_cancelled() → DuckDB Interrupt for every
+// in-flight owner DoGet. No per-call thread.
+class OwnerInterruptHub {
+  public:
+    OwnerInterruptHub() = default;
+    ~OwnerInterruptHub() { Shutdown(); }
+
+    uint64_t Add(const ServerCallContext *ctx, std::shared_ptr<TenantSandbox> box) {
+        std::lock_guard<std::mutex> hold(mu_);
+        if (stop_.load(std::memory_order_acquire)) {
+            return 0;
+        }
+        StartLocked();
+        const uint64_t id = next_id_++;
+        watches_.push_back(Watch{id, ctx, std::move(box)});
+        return id;
+    }
+
+    void Remove(uint64_t id) {
+        if (id == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> hold(mu_);
+        watches_.erase(std::remove_if(watches_.begin(), watches_.end(),
+                                      [id](const Watch &w) { return w.id == id; }),
+                       watches_.end());
+    }
+
+    void Shutdown() {
+        stop_.store(true, std::memory_order_release);
+        cv_.notify_all();
+        if (th_.joinable()) {
+            th_.join();
+        }
+        std::lock_guard<std::mutex> hold(mu_);
+        watches_.clear();
+        started_ = false;
+        stop_.store(false, std::memory_order_release);
+    }
+
+  private:
+    struct Watch {
+        uint64_t id = 0;
+        const ServerCallContext *ctx = nullptr;
+        std::shared_ptr<TenantSandbox> box;
+    };
+
+    void StartLocked() {
+        if (started_) {
+            return;
+        }
+        started_ = true;
+        th_ = std::thread([this] { Loop(); });
+    }
+
+    void Loop() {
+        while (!stop_.load(std::memory_order_acquire)) {
+            std::vector<std::shared_ptr<TenantSandbox>> to_interrupt;
+            {
+                std::lock_guard<std::mutex> hold(mu_);
+                for (auto &w : watches_) {
+                    if (w.ctx && w.ctx->is_cancelled() && w.box) {
+                        to_interrupt.push_back(w.box);
+                    }
+                }
+            }
+            for (auto &box : to_interrupt) {
+                box->Interrupt();
+            }
+            std::unique_lock<std::mutex> hold(mu_);
+            cv_.wait_for(hold, std::chrono::milliseconds(10),
+                         [this] { return stop_.load(std::memory_order_acquire); });
+        }
+    }
+
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::vector<Watch> watches_;
+    std::atomic<bool> stop_{false};
+    std::thread th_;
+    bool started_ = false;
+    uint64_t next_id_ = 1;
+};
+
+OwnerInterruptHub &OwnerHub() {
+    static OwnerInterruptHub hub;
+    return hub;
+}
+
+class QueryInterruptWatch {
+  public:
+    QueryInterruptWatch(const ServerCallContext &ctx, std::shared_ptr<TenantSandbox> box)
+        : id_(OwnerHub().Add(&ctx, std::move(box))) {}
+    ~QueryInterruptWatch() { OwnerHub().Remove(id_); }
+    QueryInterruptWatch(const QueryInterruptWatch &) = delete;
+    QueryInterruptWatch &operator=(const QueryInterruptWatch &) = delete;
+
+  private:
+    uint64_t id_ = 0;
+};
+
 } // namespace
+
+void ShutdownOwnerInterruptWatch() {
+    OwnerHub().Shutdown();
+}
 
 void ApplyInternalListenerKeepalive(::arrow::flight::FlightServerOptions &opt) {
     opt.builder_hook = [](void *raw) {
@@ -491,10 +601,13 @@ void ApplyInternalListenerKeepalive(::arrow::flight::FlightServerOptions &opt) {
     };
 }
 
-PeerFlight::PeerFlight(std::string secret, int64_t timeout_ms, int64_t first_message_max_ms)
+PeerFlight::PeerFlight(std::string secret, int64_t timeout_ms, int64_t first_message_max_ms,
+                       int64_t max_inflight, int64_t max_inflight_per_peer)
     : secret_(std::move(secret)), timeout_ms_(timeout_ms > 0 ? timeout_ms : 5000),
       first_message_max_ms_(first_message_max_ms > 0 ? first_message_max_ms
-                                                     : kDefaultFirstMessageMaxMs) {}
+                                                     : kDefaultFirstMessageMaxMs),
+      max_inflight_(max_inflight > 0 ? max_inflight : 256),
+      max_inflight_per_peer_(max_inflight_per_peer > 0 ? max_inflight_per_peer : 256) {}
 
 PeerFlight::~PeerFlight() {
     std::lock_guard<std::mutex> hold(mu_);
@@ -551,10 +664,37 @@ PeerFlight::~PeerFlight() {
 }
 
 int64_t PeerFlight::FirstMessageBoundMs(int64_t query_timeout_ms) const {
+    const int64_t ceiling =
+        first_message_max_ms_ > 0 ? first_message_max_ms_ : kDefaultFirstMessageMaxMs;
     if (query_timeout_ms > 0) {
-        return query_timeout_ms + timeout_ms_;
+        const int64_t sum = query_timeout_ms + timeout_ms_;
+        return sum < ceiling ? sum : ceiling;
     }
-    return first_message_max_ms_ > 0 ? first_message_max_ms_ : kDefaultFirstMessageMaxMs;
+    return ceiling;
+}
+
+::arrow::Result<PeerFlight::InflightGuard> PeerFlight::AcquireInflight(const std::string &url) {
+    std::shared_ptr<std::atomic<int64_t>> peer;
+    {
+        std::lock_guard<std::mutex> hold(mu_);
+        auto &slot = peer_inflight_[url];
+        if (!slot) {
+            slot = std::make_shared<std::atomic<int64_t>>(0);
+        }
+        peer = slot;
+    }
+    const int64_t global = global_inflight_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (global > max_inflight_) {
+        global_inflight_.fetch_sub(1, std::memory_order_acq_rel);
+        return Status::CapacityError("peer proxy busy");
+    }
+    const int64_t per_peer = peer->fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (per_peer > max_inflight_per_peer_) {
+        peer->fetch_sub(1, std::memory_order_acq_rel);
+        global_inflight_.fetch_sub(1, std::memory_order_acq_rel);
+        return Status::CapacityError("peer proxy busy");
+    }
+    return InflightGuard(&global_inflight_, std::move(peer));
 }
 
 ::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>>
@@ -681,6 +821,7 @@ void PeerFlight::AbandonStream(
 ::arrow::Result<std::unique_ptr<FlightInfo>>
 PeerFlight::ForwardGetFlightInfo(const std::string &url, const FlightDescriptor &descriptor,
                                  const std::string &sandbox_id, const std::string &key) {
+    ARROW_ASSIGN_OR_RAISE(auto guard, AcquireInflight(url));
     ARROW_ASSIGN_OR_RAISE(auto client, Client(url));
     ARROW_ASSIGN_OR_RAISE(auto info, client->GetFlightInfo(CallOpt(sandbox_id, key), descriptor));
     auto stripped = StripLocations(*info);
@@ -694,6 +835,7 @@ PeerFlight::ForwardGetFlightInfo(const std::string &url, const FlightDescriptor 
 PeerFlight::ForwardDoGet(const std::string &url, const Ticket &ticket,
                          const std::string &sandbox_id, const std::string &key,
                          const ServerCallContext &context, int64_t query_timeout_ms) {
+    ARROW_ASSIGN_OR_RAISE(auto guard, AcquireInflight(url));
     ARROW_ASSIGN_OR_RAISE(auto transport, StreamTransport(url));
     const int64_t bound_ms = FirstMessageBoundMs(query_timeout_ms);
     auto opt = StreamOpt(sandbox_id, key, bound_ms);
@@ -707,6 +849,9 @@ PeerFlight::ForwardDoGet(const std::string &url, const Ticket &ticket,
     state->transport = std::move(transport);
     state->stream = stream;
     state->ctx = &context;
+    state->inflight_hold = std::shared_ptr<void>(new InflightGuard(std::move(guard)), [](void *p) {
+        delete static_cast<InflightGuard *>(p);
+    });
     {
         std::lock_guard<std::mutex> hold(mu_);
         inflight_.erase(
@@ -1052,6 +1197,7 @@ DuckboxFlightSqlServer::DoGetStatement(const ServerCallContext &context,
                 }
             }
         }
+        QueryInterruptWatch watch(context, box);
         auto out = box->ExecuteHandle(h.rewritten_sql, std::move(params));
         return StreamIpc(out.arrow_ipc);
     } catch (const std::exception &e) {
@@ -1665,9 +1811,10 @@ int RunServer(const ServerOptions &opt_in) {
     auto signer =
         std::make_shared<HmacHandleSigner>(opt.daemon.handle_secret, opt.daemon.handle_ttl_seconds);
     auto rewriter = std::make_shared<SqlRewriter>();
-    auto peers =
-        std::make_shared<PeerFlight>(opt.daemon.peer_secret, opt.daemon.lease.proxy_timeout_ms,
-                                     opt.daemon.lease.proxy_first_message_max_ms);
+    auto peers = std::make_shared<PeerFlight>(
+        opt.daemon.peer_secret, opt.daemon.lease.proxy_timeout_ms,
+        opt.daemon.lease.proxy_first_message_max_ms, opt.daemon.lease.proxy_max_inflight,
+        opt.daemon.lease.proxy_max_inflight_per_peer);
     if (nodes) {
         peers->SetNodeDirectory(nodes);
     }
@@ -1787,6 +1934,7 @@ int RunServer(const ServerOptions &opt_in) {
         auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
         (void)internal->Shutdown(&deadline);
         (void)pub->Shutdown(&deadline);
+        ShutdownOwnerInterruptWatch();
     };
     sigset_t waitset;
     sigemptyset(&waitset);

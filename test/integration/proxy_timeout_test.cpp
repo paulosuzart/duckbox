@@ -448,6 +448,113 @@ void TestDeadlineCancelsHungOwner() {
     owner.Stop();
 }
 
+void TestDeadlineCapped() {
+    ProxyFixture fx(500);
+    fx.peers_a->set_first_message_max_ms(800);
+    StubOwner owner;
+    owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::HangBeforeSchema);
+    auto *stub = owner.server.get();
+    owner.Start(fx.daemon_b);
+
+    FakeCallContext ctx;
+    auto t0 = std::chrono::steady_clock::now();
+    auto stream_res = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-timeout"}, fx.rec.id,
+                                               fx.rec.key, ctx, 8000);
+    auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::cout << "deadline_capped_ms=" << elapsed_ms << "\n";
+    Expect(!stream_res.ok(), "ceiling caps query_timeout_ms + proxy_timeout_ms");
+    Expect(absl::StrContains(stream_res.status().ToString(), "peer proxy timed out"),
+           "capped deadline is a fixed timeout error");
+    Expect(elapsed_ms >= 800 && elapsed_ms < 800 + 2500,
+           "whole-call deadline is the 800ms ceiling, not 8000+500");
+    Expect(WaitStub(stub, &OwnerStub::Cancelled, 2000),
+           "gRPC deadline cancels the hung owner DoGet");
+    owner.Stop();
+}
+
+void TestOwnerInterruptOnCancel() {
+    ProxyFixture fx(5000);
+    fx.peers_a->set_first_message_max_ms(60000);
+    auto peers_b = std::make_shared<PeerFlight>(fx.daemon_b.peer_secret, 5000);
+    auto nb = StartDuckboxPair(fx.daemon_b, fx.defs, fx.rt_b, peers_b, fx.signer, fx.rewriter);
+    nb.Start();
+    fx.leases_b->set_flight("grpc://127.0.0.1:" + std::to_string(nb.int_port));
+    auto owned = fx.rt_b->Get(fx.rec);
+    Expect(owned && fx.leases_b->Peek("proxy-timeout-box").owned_locally,
+           "node-b owns the sandbox for interrupt");
+
+    const std::string sql =
+        "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM t WHERE x < 8000000) "
+        "SELECT max(x) FROM t";
+
+    auto loc = Location::ForGrpcTcp("127.0.0.1", nb.pub_port);
+    auto cli_res = FlightClient::Connect(*loc);
+    Expect(cli_res.ok(), "interrupt-test client connects to the owner");
+    auto cli = std::shared_ptr<FlightClient>(std::move(cli_res).ValueOrDie());
+    ::arrow::flight::sql::FlightSqlClient sql_cli(cli);
+    auto info_opt = QueryOpt();
+    auto info_res = sql_cli.Execute(info_opt, sql);
+    Expect(info_res.ok(), "interrupt-test GetFlightInfo");
+    if (!info_res.ok()) {
+        nb.Stop();
+        return;
+    }
+
+    auto doget_opt = QueryOpt();
+    doget_opt.timeout = ::arrow::flight::TimeoutDuration(0.4);
+    auto t0 = std::chrono::steady_clock::now();
+    auto stream_res = cli->DoGet(doget_opt, info_res.ValueOrDie()->endpoints()[0].ticket);
+    auto doget_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::cout << "owner_interrupt_doget_ms=" << doget_ms << "\n";
+    Expect(!stream_res.ok(), "owner DoGet is cancelled before the long query finishes");
+
+    std::atomic<bool> recovered{false};
+    std::thread rec([&] {
+        try {
+            auto box = fx.rt_b->Get(fx.rec);
+            (void)box->Execute("SELECT 1");
+            recovered.store(true, std::memory_order_release);
+        } catch (...) {
+        }
+    });
+    auto rec_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    while (!recovered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < rec_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    auto recover_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::cout << "owner_interrupt_recover_ms=" << recover_ms << "\n";
+    if (rec.joinable()) {
+        if (recovered.load(std::memory_order_acquire)) {
+            rec.join();
+        } else {
+            rec.detach();
+        }
+    }
+    Expect(recovered.load(std::memory_order_acquire),
+           "shared owner poller interrupted DuckDB so the connection is free");
+    duckbox::flight::ShutdownOwnerInterruptWatch();
+    // Cancelled owner DoGet + Flight Shutdown can hang (Arrow #31235).
+    if (nb.intern) {
+        (void)nb.intern.release();
+    }
+    if (nb.pub) {
+        (void)nb.pub.release();
+    }
+    if (nb.pub_th.joinable()) {
+        nb.pub_th.detach();
+    }
+    if (nb.int_th.joinable()) {
+        nb.int_th.detach();
+    }
+}
+
 void TestGetFlightInfoTimeout() {
     ProxyFixture fx(kProxyTimeoutMs);
     StubOwner owner;
@@ -487,7 +594,7 @@ void TestSlowStubStream() {
     auto t0 = std::chrono::steady_clock::now();
     auto stream_res =
         fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-timeout"}, fx.rec.id, fx.rec.key, ctx);
-    Expect(stream_res.ok(), "slow-stub proxied DoGet has no deadline");
+    Expect(stream_res.ok(), "slow-stub proxied DoGet completes under the deadline ceiling");
     if (stream_res.ok()) {
         auto stream = std::move(*stream_res);
         auto schema = stream->GetSchemaPayload();
@@ -505,7 +612,9 @@ void TestSlowStubStream() {
 
 void duckbox::test::RunProxyTimeoutTests() {
     TestDeadlineCancelsHungOwner();
+    TestDeadlineCapped();
     TestGetFlightInfoTimeout();
     TestSlowStubStream();
     TestLongProxiedQuery();
+    TestOwnerInterruptOnCancel();
 }

@@ -337,6 +337,8 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
                                        "proxy_timeout_ms",
                                        "proxy_first_message_max",
                                        "proxy_first_message_max_ms",
+                                       "proxy_max_inflight",
+                                       "proxy_max_inflight_per_peer",
                                        "max_leases"});
         d.lease.endpoint = lease->GetString("endpoint");
         d.lease.endpoint_env = lease->GetString("endpoint_env");
@@ -426,6 +428,16 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
         }
         if (d.lease.proxy_first_message_max_ms <= 0) {
             throw PolicyError("lease.proxy_first_message_max_ms must be > 0");
+        }
+        d.lease.proxy_max_inflight =
+            lease->GetInt("proxy_max_inflight", d.lease.proxy_max_inflight);
+        if (d.lease.proxy_max_inflight <= 0) {
+            throw PolicyError("lease.proxy_max_inflight must be > 0");
+        }
+        d.lease.proxy_max_inflight_per_peer =
+            lease->GetInt("proxy_max_inflight_per_peer", d.lease.proxy_max_inflight_per_peer);
+        if (d.lease.proxy_max_inflight_per_peer <= 0) {
+            throw PolicyError("lease.proxy_max_inflight_per_peer must be > 0");
         }
     }
     if (root.Get("lake") || root.Get("tables") || root.Get("policy") || root.Get("spec")) {
