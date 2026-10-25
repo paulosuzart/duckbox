@@ -805,6 +805,47 @@ void duckbox::test::RunSandboxExecTests() {
                    "same guess on two sandboxes is byte-identical");
         }
     }
+    {
+        // DescribeHandleArrow must not wait forever on mu_ (Warmup used
+        // lock_guard; GetFlightInfo hung behind a DoGet holding the lock).
+        const int64_t query_bound_ms = 200;
+        auto d = TestDaemon();
+        auto pol = TestPolicy();
+        pol.resources.query_timeout_ms = query_bound_ms;
+        TenantSandbox box(d, pol, key_a, spec_dir);
+        box.Warmup(false);
+        DescribeLockHold hold(box);
+        auto t0 = std::chrono::steady_clock::now();
+        ExpectThrowExact([&] { (void)box.DescribeHandleArrow("SELECT 1"); },
+                         "sandbox describe timed out",
+                         "DescribeHandleArrow lock timeout is a fixed error");
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        Expect(elapsed_ms >= query_bound_ms && elapsed_ms < query_bound_ms + 2000,
+               "DescribeHandleArrow lock wait is query_timeout_ms");
+    }
+    {
+        const int64_t ceiling_ms = 250;
+        auto d = TestDaemon();
+        d.lease.proxy_first_message_max_ms = ceiling_ms;
+        auto pol = TestPolicy();
+        pol.resources.query_timeout_ms = 0;
+        TenantSandbox box(d, pol, key_a, spec_dir);
+        box.Warmup(false);
+        DescribeLockHold hold(box);
+        auto t0 = std::chrono::steady_clock::now();
+        ExpectThrowExact([&] { (void)box.DescribeHandleArrow("SELECT 1"); },
+                         "sandbox describe timed out",
+                         "DescribeHandleArrow lock timeout uses first-message ceiling when "
+                         "query_timeout_ms is 0");
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        Expect(elapsed_ms >= ceiling_ms && elapsed_ms < ceiling_ms + 2000,
+               "DescribeHandleArrow lock wait is proxy_first_message_max_ms when query_timeout_ms "
+               "is 0");
+    }
 #ifdef DUCKBOX_BIN_PATH
     {
         auto cmd = std::string("nm -C '") + DUCKBOX_BIN_PATH +

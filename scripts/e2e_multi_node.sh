@@ -484,8 +484,9 @@ try:
 except OSError:
     pass
 PY
-# Always continue C in the shell: a SIGSTOPped owner makes later GetFlightInfo
-# block in Dial/Connect with no client timeout and burns the 8-minute step.
+# Always continue C in the shell so later steps (S3 pause) are not talking
+# to a still-frozen owner. The freeze case below uses a 60s client timeout
+# and asserts the proxy itself returned within the documented bound.
 kill -CONT "$PID_C" 2>/dev/null || true
 kill -TERM "$PID_A" 2>/dev/null || true
 wait "$PID_A" 2>/dev/null || true
@@ -496,10 +497,11 @@ PID_A=$!
 wait_port 4747
 wait_port 5747
 
-# Owner freeze longer than lease TTL (5s). GetFlightInfo is bounded by
-# proxy_timeout_ms (5s); DoGet by query_timeout_ms + proxy_timeout_ms (8+5=13s).
-# Either a timeout or a post-takeover success is fine — an unbounded wait is not.
-# Client FlightCallOptions.timeout is a safety net; the server must return first.
+# Owner freeze longer than lease TTL (5s). The client timeout is 60s — well
+# above the documented proxy bounds — so a pass cannot be the client giving
+# up first. GetFlightInfo must return within proxy_timeout_ms (5s);
+# DoGet within query_timeout_ms + proxy_timeout_ms (8+5=13s). Timeout or
+# post-takeover success are both fine; an unbounded proxy wait is not.
 export OWNER_PID="$PID_C"
 "$PY" - <<PY
 $(py_flight_sql)
@@ -508,19 +510,41 @@ import os, signal, time
 owner = int(os.environ["OWNER_PID"])
 # Documented bounds (cluster YAML defaults): proxy_timeout_ms=5000,
 # query_timeout_ms=8000, first-message ceiling=60s.
+CLIENT_TIMEOUT_S = 60.0
 GETINFO_BOUND_S = 5.0
 DOGET_BOUND_S = 13.0
+ASSERT_SLACK_S = 2.0  # assertion tolerance only; not a client timeout
 client = flight.FlightClient("grpc://127.0.0.1:4747")
+
+
+def is_client_timeout(exc):
+    # Only the Flight client deadline. "peer proxy timed out" is an IO error
+    # the proxy returned within its own bound.
+    timed = getattr(flight, "FlightTimedOutError", ())
+    return isinstance(exc, timed) or type(exc).__name__ == "FlightTimedOutError"
+
+
+def assert_proxy_bound(elapsed, bound, label, client_timeout):
+    if client_timeout:
+        raise SystemExit(
+            f"{label}: client timeout fired after {elapsed:.3f}s; "
+            f"proxy did not return within {bound}s"
+        )
+    if elapsed > bound + ASSERT_SLACK_S:
+        raise SystemExit(
+            f"{label}: proxy returned in {elapsed:.3f}s; "
+            f"want <= {bound}+{ASSERT_SLACK_S}s"
+        )
+
 
 t0 = time.time()
 try:
-    info, options = statement_info(client, timeout=GETINFO_BOUND_S + 2)
+    info, options = statement_info(client, timeout=CLIENT_TIMEOUT_S)
     print("GetFlightInfo before freeze ok elapsed", round(time.time() - t0, 3), flush=True)
 except Exception as e:  # noqa: BLE001
     elapsed = time.time() - t0
     print("GetFlightInfo before freeze failed", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 3), flush=True)
-    if elapsed > GETINFO_BOUND_S + 2.5:
-        raise SystemExit(f"GetFlightInfo before freeze hung: {elapsed}")
+    assert_proxy_bound(elapsed, GETINFO_BOUND_S, "GetFlightInfo before freeze", is_client_timeout(e))
     raise
 
 ticket = info.endpoints[0].ticket
@@ -528,24 +552,26 @@ os.kill(owner, signal.SIGSTOP)
 
 t1 = time.time()
 try:
-    info2, _ = statement_info(client, timeout=GETINFO_BOUND_S + 2)
-    print("GetFlightInfo during freeze ok (takeover) elapsed", round(time.time() - t1, 3), flush=True)
+    info2, _ = statement_info(client, timeout=CLIENT_TIMEOUT_S)
+    elapsed = time.time() - t1
+    print("GetFlightInfo during freeze ok (takeover) elapsed", round(elapsed, 3), flush=True)
+    assert_proxy_bound(elapsed, GETINFO_BOUND_S, "GetFlightInfo during freeze", False)
 except Exception as e:  # noqa: BLE001
     elapsed = time.time() - t1
     print("GetFlightInfo during freeze failed", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 3), flush=True)
-    if elapsed > GETINFO_BOUND_S + 2.5:
-        raise SystemExit(f"GetFlightInfo during freeze hung: {elapsed}")
+    assert_proxy_bound(elapsed, GETINFO_BOUND_S, "GetFlightInfo during freeze", is_client_timeout(e))
 
 t2 = time.time()
 try:
-    doget_opts = call_opts(timeout=DOGET_BOUND_S + 2)
+    doget_opts = call_opts(timeout=CLIENT_TIMEOUT_S)
     list(client.do_get(ticket, doget_opts))
-    print("DoGet during freeze ok elapsed", round(time.time() - t2, 3), flush=True)
+    elapsed = time.time() - t2
+    print("DoGet during freeze ok elapsed", round(elapsed, 3), flush=True)
+    assert_proxy_bound(elapsed, DOGET_BOUND_S, "DoGet during freeze", False)
 except Exception as e:  # noqa: BLE001
     elapsed = time.time() - t2
     print("DoGet during freeze failed", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 3), flush=True)
-    if elapsed > DOGET_BOUND_S + 2.5:
-        raise SystemExit(f"DoGet during freeze hung: {elapsed}")
+    assert_proxy_bound(elapsed, DOGET_BOUND_S, "DoGet during freeze", is_client_timeout(e))
 PY
 kill -CONT "$PID_C" 2>/dev/null || true
 

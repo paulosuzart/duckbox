@@ -93,9 +93,15 @@ class TenantSandbox {
 
   private:
     QueryOutput RunTimed(const std::string &sql, std::vector<ddb::Value> params);
+    // Caller holds mu_. DescribeHandleArrow uses this after try_lock_for so
+    // GetFlightInfo cannot block forever in Warmup's lock_guard.
+    void WarmupLocked(bool validate_lake);
     // ROLLBACK so a rewrite / binder / timeout failure cannot leave DuckLake's
     // catalog transaction aborted (next query would be a cheap DoS).
     void RecoverAfterFailure();
+#ifdef DUCKBOX_TESTING
+    friend class DescribeLockHold;
+#endif
 
     node::DaemonConfig daemon_;
     config::Policy policy_;
@@ -109,7 +115,8 @@ class TenantSandbox {
     std::unique_ptr<ddb::Connection> con_;
     std::mutex interrupt_mu_; // Interrupt vs Passivate; not held during Execute
     // Held for the whole user statement (Execute / ExtractPlan / Describe).
-    // timed so GetFlightInfo (DescribeHandleArrow) cannot wait forever behind
+    // DescribeHandleArrow uses try_lock_for (query_timeout_ms, else
+    // proxy_first_message_max_ms) so GetFlightInfo cannot wait forever behind
     // a DoGet stuck in Arrow #31235 send-after-cancel.
     std::timed_mutex mu_;
     std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
@@ -150,6 +157,19 @@ class WarmupHardeningReadError {
 };
 
 #ifdef DUCKBOX_TESTING
+// Test seam (compiled only with DUCKBOX_TESTING). Holds TenantSandbox::mu_
+// so DescribeHandleArrow's try_lock_for path can be exercised.
+class DescribeLockHold {
+  public:
+    explicit DescribeLockHold(TenantSandbox &box);
+    ~DescribeLockHold();
+    DescribeLockHold(const DescribeLockHold &) = delete;
+    DescribeLockHold &operator=(const DescribeLockHold &) = delete;
+
+  private:
+    TenantSandbox *box_ = nullptr;
+};
+
 // Test seam (compiled only with DUCKBOX_TESTING). While alive, RunTimed /
 // Describe / ExtractPlan pretends DuckDB returned this error (process-wide
 // so a Flight worker thread sees it). The text is classified by

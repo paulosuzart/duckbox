@@ -325,11 +325,44 @@ void AddPeerKeepalive(::arrow::flight::FlightClientOptions &opt) {
                                      kPeerKeepalivePermitWithoutCalls);
 }
 
+using Deadline = std::chrono::steady_clock::time_point;
+
+Deadline DeadlineAfterMs(int64_t ms) {
+    const int64_t bound = ms > 0 ? ms : 0;
+    return std::chrono::steady_clock::now() + std::chrono::milliseconds(bound);
+}
+
+bool DeadlineReached(Deadline deadline) {
+    return std::chrono::steady_clock::now() >= deadline;
+}
+
+::arrow::flight::TimeoutDuration RemainingTimeout(Deadline deadline) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+        return ::arrow::flight::TimeoutDuration(0);
+    }
+    return ::arrow::flight::TimeoutDuration(std::chrono::duration<double>(deadline - now).count());
+}
+
+// Arrow maps gRPC DEADLINE_EXCEEDED to FlightStatusCode::TimedOut. That is the
+// only structured timeout code Flight exposes (there is no DeadlineExceeded).
 bool IsPeerTimeout(const Status &st) {
     if (auto detail = ::arrow::flight::FlightStatusDetail::UnwrapStatus(st)) {
         return detail->code() == ::arrow::flight::FlightStatusCode::TimedOut;
     }
     return false;
+}
+
+// Timed out only when the call failed AND (structured TimedOut OR now >= the
+// per-call deadline). No elapsed≈timeout comparison and no slack constant.
+Status AsProxyTimeoutIfDue(const Status &st, Deadline deadline) {
+    if (st.ok()) {
+        return st;
+    }
+    if (IsPeerTimeout(st) || DeadlineReached(deadline)) {
+        return Status::IOError("peer proxy timed out");
+    }
+    return st;
 }
 
 bool IsPeerCancelled(const Status &st) {
@@ -640,31 +673,31 @@ PeerFlight::~PeerFlight() {
 }
 
 ::arrow::flight::FlightCallOptions PeerFlight::CallOpt(const std::string &sandbox_id,
-                                                       const std::string &key) const {
+                                                       const std::string &key,
+                                                       Deadline deadline) const {
     auto opt = BaseOpt(sandbox_id, key);
-    opt.timeout = ::arrow::flight::TimeoutDuration(static_cast<double>(timeout_ms_) / 1000.0);
+    opt.timeout = RemainingTimeout(deadline);
     return opt;
 }
 
 ::arrow::flight::FlightCallOptions PeerFlight::StreamOpt(const std::string &sandbox_id,
                                                          const std::string &key,
-                                                         int64_t bound_ms) const {
+                                                         Deadline deadline) const {
     auto opt = BaseOpt(sandbox_id, key);
-    // Whole-call deadline. The owner materializes the result before sending
-    // schema, so this bounds the first-message wait with no helper thread.
-    // FlightClient::DoGet ignores stop_token (Arrow 26).
-    const int64_t ms = bound_ms > 0 ? bound_ms : kDefaultFirstMessageMaxMs;
-    opt.timeout = ::arrow::flight::TimeoutDuration(static_cast<double>(ms) / 1000.0);
+    // Remaining time on the per-call deadline. The owner materializes the
+    // result before sending schema, so this bounds the first-message wait
+    // with no helper thread. FlightClient::DoGet ignores stop_token (Arrow 26).
+    opt.timeout = RemainingTimeout(deadline);
     return opt;
 }
 
 ::arrow::flight::FlightClientOptions PeerFlight::PeerClientOpts() const {
     auto opt = ::arrow::flight::FlightClientOptions::Defaults();
     AddPeerKeepalive(opt);
-    // gRPC MIN_CONNECT_TIMEOUT defaults to 20s and is independent of the RPC
-    // deadline. Cap reconnect so a SIGSTOP'd / half-open peer cannot sit in
-    // CONNECTING longer than proxy_timeout_ms.
-    const int connect_ms = static_cast<int>(timeout_ms_ > 0 ? timeout_ms_ : 5000);
+    // Peer channel only (not ApplyInternalListenerKeepalive). Cap reconnect
+    // so a SIGSTOP'd / half-open peer cannot sit in CONNECTING longer than
+    // proxy_timeout_ms (gRPC MIN_CONNECT_TIMEOUT defaults to 20s).
+    const int connect_ms = static_cast<int>(timeout_ms_);
     opt.generic_options.emplace_back(GRPC_ARG_MIN_RECONNECT_BACKOFF_MS, connect_ms);
     opt.generic_options.emplace_back(GRPC_ARG_MAX_RECONNECT_BACKOFF_MS, connect_ms);
     opt.generic_options.emplace_back(GRPC_ARG_INITIAL_RECONNECT_BACKOFF_MS, connect_ms);
@@ -706,7 +739,7 @@ int64_t PeerFlight::FirstMessageBoundMs(int64_t query_timeout_ms) const {
 }
 
 ::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>>
-PeerFlight::Dial(const std::string &url) {
+PeerFlight::Dial(const std::string &url, Deadline deadline) {
     if (secret_.empty()) {
         return Status::Invalid("peer proxy requires auth.peer_secret_ref");
     }
@@ -716,30 +749,27 @@ PeerFlight::Dial(const std::string &url) {
     if (nodes_ && !nodes_->IsKnownFlight(url)) {
         return Status::Invalid("peer proxy target is not a registered node");
     }
+    if (DeadlineReached(deadline)) {
+        return Status::IOError("peer proxy timed out");
+    }
     ARROW_ASSIGN_OR_RAISE(auto loc, ParseFlightLocation(url));
     ARROW_ASSIGN_OR_RAISE(auto raw, ::arrow::flight::FlightClient::Connect(loc, PeerClientOpts()));
     std::shared_ptr<::arrow::flight::FlightClient> client(std::move(raw));
     auto auth = std::make_unique<PeerClientAuth>(secret_);
     ::arrow::flight::FlightCallOptions auth_opt;
-    auth_opt.timeout = ::arrow::flight::TimeoutDuration(static_cast<double>(timeout_ms_) / 1000.0);
-    const auto t0 = std::chrono::steady_clock::now();
+    auth_opt.timeout = RemainingTimeout(deadline);
     auto st = client->Authenticate(auth_opt, std::move(auth));
-    const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-            .count();
     if (!st.ok()) {
         // Handshake Write/Read can surface Deadline Exceeded as Internal
-        // ("Could not finish writing") when the peer is SIGSTOP'd.
-        if (IsPeerTimeout(st) || elapsed_ms + 100 >= timeout_ms_) {
-            return Status::IOError("peer proxy timed out");
-        }
-        return st;
+        // ("Could not finish writing") when the peer is SIGSTOP'd. Classify
+        // as timed out only if now >= deadline or the status is TimedOut.
+        return AsProxyTimeoutIfDue(st, deadline);
     }
     return client;
 }
 
 ::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>>
-PeerFlight::Client(const std::string &url) {
+PeerFlight::Client(const std::string &url, Deadline deadline) {
     {
         std::lock_guard<std::mutex> hold(mu_);
         auto it = clients_.find(url);
@@ -749,7 +779,7 @@ PeerFlight::Client(const std::string &url) {
     }
     // Dial (connect + Authenticate) is outside the cache lock so a frozen
     // peer cannot stall proxy calls to other owners.
-    ARROW_ASSIGN_OR_RAISE(auto client, Dial(url));
+    ARROW_ASSIGN_OR_RAISE(auto client, Dial(url, deadline));
     std::lock_guard<std::mutex> hold(mu_);
     auto it = clients_.find(url);
     if (it != clients_.end()) {
@@ -763,7 +793,7 @@ PeerFlight::Client(const std::string &url) {
 }
 
 ::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>>
-PeerFlight::DialTransport(const std::string &url) {
+PeerFlight::DialTransport(const std::string &url, Deadline deadline) {
     if (secret_.empty()) {
         return Status::Invalid("peer proxy requires auth.peer_secret_ref");
     }
@@ -772,6 +802,9 @@ PeerFlight::DialTransport(const std::string &url) {
     }
     if (nodes_ && !nodes_->IsKnownFlight(url)) {
         return Status::Invalid("peer proxy target is not a registered node");
+    }
+    if (DeadlineReached(deadline)) {
+        return Status::IOError("peer proxy timed out");
     }
     ARROW_ASSIGN_OR_RAISE(auto loc, ParseFlightLocation(url));
     // Registers the gRPC transport factory (Connect itself is lazy).
@@ -783,23 +816,16 @@ PeerFlight::DialTransport(const std::string &url) {
     ARROW_RETURN_NOT_OK(transport->Init(PeerClientOpts(), loc, uri));
     auto auth = std::make_unique<PeerClientAuth>(secret_);
     ::arrow::flight::FlightCallOptions auth_opt;
-    auth_opt.timeout = ::arrow::flight::TimeoutDuration(static_cast<double>(timeout_ms_) / 1000.0);
-    const auto t0 = std::chrono::steady_clock::now();
+    auth_opt.timeout = RemainingTimeout(deadline);
     auto st = transport->Authenticate(auth_opt, std::move(auth));
-    const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-            .count();
     if (!st.ok()) {
-        if (IsPeerTimeout(st) || elapsed_ms + 100 >= timeout_ms_) {
-            return Status::IOError("peer proxy timed out");
-        }
-        return st;
+        return AsProxyTimeoutIfDue(st, deadline);
     }
     return transport;
 }
 
 ::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>>
-PeerFlight::StreamTransport(const std::string &url) {
+PeerFlight::StreamTransport(const std::string &url, Deadline deadline) {
     {
         std::lock_guard<std::mutex> hold(mu_);
         auto it = transports_.find(url);
@@ -807,7 +833,7 @@ PeerFlight::StreamTransport(const std::string &url) {
             return it->second;
         }
     }
-    ARROW_ASSIGN_OR_RAISE(auto transport, DialTransport(url));
+    ARROW_ASSIGN_OR_RAISE(auto transport, DialTransport(url, deadline));
     std::lock_guard<std::mutex> hold(mu_);
     auto it = transports_.find(url);
     if (it != transports_.end()) {
@@ -851,10 +877,17 @@ void PeerFlight::AbandonStream(
 ::arrow::Result<std::unique_ptr<FlightInfo>>
 PeerFlight::ForwardGetFlightInfo(const std::string &url, const FlightDescriptor &descriptor,
                                  const std::string &sandbox_id, const std::string &key) {
+    const auto deadline = DeadlineAfterMs(timeout_ms_);
     ARROW_ASSIGN_OR_RAISE(auto guard, AcquireInflight(url));
-    ARROW_ASSIGN_OR_RAISE(auto client, Client(url));
-    ARROW_ASSIGN_OR_RAISE(auto info, client->GetFlightInfo(CallOpt(sandbox_id, key), descriptor));
-    auto stripped = StripLocations(*info);
+    ARROW_ASSIGN_OR_RAISE(auto client, Client(url, deadline));
+    if (DeadlineReached(deadline)) {
+        return Status::IOError("peer proxy timed out");
+    }
+    auto info = client->GetFlightInfo(CallOpt(sandbox_id, key, deadline), descriptor);
+    if (!info.ok()) {
+        return AsProxyTimeoutIfDue(info.status(), deadline);
+    }
+    auto stripped = StripLocations(**info);
     if (!stripped) {
         return Status::Invalid("proxy failed to rewrite Flight endpoint locations");
     }
@@ -865,14 +898,18 @@ PeerFlight::ForwardGetFlightInfo(const std::string &url, const FlightDescriptor 
 PeerFlight::ForwardDoGet(const std::string &url, const Ticket &ticket,
                          const std::string &sandbox_id, const std::string &key,
                          const ServerCallContext &context, int64_t query_timeout_ms) {
-    ARROW_ASSIGN_OR_RAISE(auto guard, AcquireInflight(url));
-    ARROW_ASSIGN_OR_RAISE(auto transport, StreamTransport(url));
     const int64_t bound_ms = FirstMessageBoundMs(query_timeout_ms);
-    auto opt = StreamOpt(sandbox_id, key, bound_ms);
+    const auto deadline = DeadlineAfterMs(bound_ms);
+    ARROW_ASSIGN_OR_RAISE(auto guard, AcquireInflight(url));
+    ARROW_ASSIGN_OR_RAISE(auto transport, StreamTransport(url, deadline));
+    if (DeadlineReached(deadline)) {
+        return Status::IOError("peer proxy timed out");
+    }
+    auto opt = StreamOpt(sandbox_id, key, deadline);
     std::unique_ptr<::arrow::flight::internal::ClientDataStream> raw;
     auto start = transport->DoGet(opt, ticket, &raw);
     if (!start.ok()) {
-        return ProxyStatus(start, "do_get");
+        return ProxyStatus(AsProxyTimeoutIfDue(start, deadline), "do_get");
     }
     std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream(std::move(raw));
     auto state = std::make_shared<StreamCall>();
@@ -897,7 +934,7 @@ PeerFlight::ForwardDoGet(const std::string &url, const Ticket &ticket,
     auto opened =
         ::arrow::ipc::RecordBatchStreamReader::Open(std::move(msg_reader), opt.read_options);
     if (!opened.ok()) {
-        auto mapped = ProxyStatus(opened.status(), "do_get");
+        auto mapped = ProxyStatus(AsProxyTimeoutIfDue(opened.status(), deadline), "do_get");
         AbandonStream(std::move(stream));
         state->stream.reset();
         return mapped;
