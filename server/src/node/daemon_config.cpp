@@ -339,6 +339,8 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
                                        "proxy_first_message_max_ms",
                                        "proxy_max_inflight",
                                        "proxy_max_inflight_per_peer",
+                                       "shutdown_watchdog",
+                                       "shutdown_watchdog_ms",
                                        "max_leases"});
         d.lease.endpoint = lease->GetString("endpoint");
         d.lease.endpoint_env = lease->GetString("endpoint_env");
@@ -438,6 +440,19 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
             lease->GetInt("proxy_max_inflight_per_peer", d.lease.proxy_max_inflight_per_peer);
         if (d.lease.proxy_max_inflight_per_peer <= 0) {
             throw PolicyError("lease.proxy_max_inflight_per_peer must be > 0");
+        }
+        d.lease.shutdown_watchdog_ms =
+            lease->GetInt("shutdown_watchdog_ms", d.lease.shutdown_watchdog_ms);
+        auto sw_raw = lease->GetString("shutdown_watchdog");
+        if (!sw_raw.empty()) {
+            int64_t ms = 0;
+            if (!ParseDurationMs(sw_raw, &ms) || ms <= 0) {
+                throw PolicyError("lease.shutdown_watchdog: expected duration like 8s");
+            }
+            d.lease.shutdown_watchdog_ms = ms;
+        }
+        if (d.lease.shutdown_watchdog_ms <= 0) {
+            throw PolicyError("lease.shutdown_watchdog_ms must be > 0");
         }
     }
     if (root.Get("lake") || root.Get("tables") || root.Get("policy") || root.Get("spec")) {

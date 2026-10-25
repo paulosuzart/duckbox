@@ -62,6 +62,9 @@ struct LeaseSettings {
     int64_t proxy_first_message_max_ms = 60000;
     int64_t proxy_max_inflight = 256;          // global concurrent proxied calls
     int64_t proxy_max_inflight_per_peer = 256; // concurrent proxied calls to one owner URL
+    // After SIGTERM, _Exit if graceful shutdown (Drain + Flight Shutdown) exceeds this.
+    // Default 8s = Drain(2s) + Flight Shutdown(2s) + slack. Must be > 0.
+    int64_t shutdown_watchdog_ms = 8000;
     size_t max_leases = 0;           // 0 = unlimited
 };
 

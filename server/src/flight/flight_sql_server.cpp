@@ -1513,7 +1513,8 @@ DuckboxFlightSqlServer::SandboxActionTypes(ListenerPlane plane) {
     static const std::vector<::arrow::flight::ActionType> k_internal = {
         {"DrainNode", "Operator-only: stop taking new leases, release owned sandboxes, deregister "
                       "this node. YAML: timeout_ms."},
-        {"NodeStatus", "Operator-only: node id, serving, draining, published lease expiry."},
+        {"NodeStatus",
+         "Operator-only: node id, serving, draining, proxy_inflight, published lease expiry."},
     };
     return plane == ListenerPlane::Internal ? k_internal : k_public;
 }
@@ -1693,6 +1694,7 @@ DuckboxFlightSqlServer::SandboxActionTypes(ListenerPlane plane) {
             j["serving"] = runtime_ ? runtime_->Serving() : true;
             j["fenced"] = runtime_ && runtime_->fenced();
             j["draining"] = runtime_ && runtime_->Leases() && runtime_->Leases()->draining();
+            j["proxy_inflight"] = peers_ ? peers_->inflight() : 0;
             return ResultJson(j.dump(), result);
         }
         if (action.type == "DrainNode") {
@@ -1909,11 +1911,51 @@ int RunServer(const ServerOptions &opt_in) {
     auto signals = std::make_shared<std::atomic<int>>(0);
     auto shutting_down = std::make_shared<std::atomic<bool>>(false);
     auto servers_gone = std::make_shared<std::atomic<bool>>(false);
+    struct ShutdownWatchdog {
+        std::atomic<bool> cancel{false};
+        std::thread th;
+        int64_t delay_ms = 0;
+        void Arm(int64_t ms) {
+            if (th.joinable()) {
+                return;
+            }
+            cancel.store(false, std::memory_order_release);
+            delay_ms = ms > 0 ? ms : 8000;
+            th = std::thread([this] {
+                const auto deadline =
+                    std::chrono::steady_clock::now() + std::chrono::milliseconds(delay_ms);
+                while (!cancel.load(std::memory_order_acquire) &&
+                       std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                if (cancel.load(std::memory_order_acquire)) {
+                    return;
+                }
+                Json w;
+                w["event"] = "signal_shutdown_watchdog";
+                w["delay_ms"] = delay_ms;
+                std::clog << w.dump() << "\n";
+                std::_Exit(0);
+            });
+        }
+        void Disarm() {
+            cancel.store(true, std::memory_order_release);
+            if (th.joinable()) {
+                th.join();
+            }
+        }
+        ~ShutdownWatchdog() { Disarm(); }
+    };
+    auto watchdog = std::make_shared<ShutdownWatchdog>();
+    const int64_t watchdog_ms = opt.daemon.lease.shutdown_watchdog_ms;
     auto graceful = [&]() {
         if (shutting_down->exchange(true)) {
             return;
         }
         running.store(false);
+        // Joinable hang-breaker for Arrow #31235. Armed here so a stuck Drain
+        // or Flight Shutdown cannot hold the process past shutdown_watchdog_ms.
+        watchdog->Arm(watchdog_ms);
         if (peers) {
             peers->Shutdown();
         }
@@ -1935,6 +1977,7 @@ int RunServer(const ServerOptions &opt_in) {
         (void)internal->Shutdown(&deadline);
         (void)pub->Shutdown(&deadline);
         ShutdownOwnerInterruptWatch();
+        watchdog->Disarm();
     };
     sigset_t waitset;
     sigemptyset(&waitset);
@@ -1959,15 +2002,6 @@ int RunServer(const ServerOptions &opt_in) {
             ev["event"] = "signal_shutdown";
             ev["signal"] = sig;
             std::clog << ev.dump() << "\n";
-            // Arrow Flight Shutdown can ignore its deadline when a gRPC call is
-            // mid-cancel (Arrow #31235). Force a prompt exit after SIGTERM.
-            std::thread([] {
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-                Json w;
-                w["event"] = "signal_shutdown_watchdog";
-                std::clog << w.dump() << "\n";
-                std::_Exit(0);
-            }).detach();
             graceful();
         }
     });

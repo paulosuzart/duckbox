@@ -232,6 +232,7 @@ public:
 	void SetNodeDirectory(std::shared_ptr<cluster::S3NodeDirectory> nodes) {
 		nodes_ = std::move(nodes);
 	}
+	int64_t inflight() const { return global_inflight_.load(std::memory_order_acquire); }
 	// Close in-flight peer clients so hung DoGets unblock (SIGTERM / tests).
 	void Shutdown();
 	~PeerFlight();
