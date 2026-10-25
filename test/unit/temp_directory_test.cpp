@@ -250,6 +250,17 @@ void duckbox::test::RunTempDirectoryTests() {
         Expect(fs::is_directory(parent), "unwritable non-empty parent is not removed");
         fs::permissions(parent, fs::perms::owner_all, fs::perm_options::replace);
         fs::remove_all(parent);
+
+        inst = CreateSandboxTempDirectory(root.string(), "rmdir-deny", 1);
+        parent = root / "rmdir-deny";
+        fs::remove_all(inst);
+        auto saved = fs::status(root).permissions();
+        fs::permissions(root, fs::perms::owner_read | fs::perms::owner_exec,
+                        fs::perm_options::replace);
+        RemoveSandboxTempDirectory(inst, root.string());
+        fs::permissions(root, saved, fs::perm_options::replace);
+        Expect(fs::is_directory(parent), "empty parent is left when rmdir is denied");
+        fs::remove_all(parent);
     }
 
     Expect(SameTempDirectory("", ""), "empty paths compare equal");
