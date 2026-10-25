@@ -9,6 +9,7 @@
 #include "metrics/metrics.hpp"
 #include "rewriter/rewriter.hpp"
 #include "rewriter/validator.hpp"
+#include "sandbox/temp_directory.hpp"
 
 #include "absl/strings/ascii.h"
 
@@ -194,6 +195,10 @@ void TenantSandbox::Passivate(const char *reason) {
     bool was_warm = static_cast<bool>(db_);
     con_.reset();
     db_.reset();
+    if (!managed_temp_directory_.empty()) {
+        RemoveSandboxTempDirectory(managed_temp_directory_);
+        managed_temp_directory_.clear();
+    }
     if (was_warm) {
         Metrics().IncPassivation(reason ? reason : "shutdown");
     }
@@ -235,12 +240,53 @@ void TenantSandbox::Warmup(bool validate_lake) {
             }
         }
         {
+            // Operator temp_directory must be SET while enable_external_access
+            // is still true. DuckDB refuses later changes. Specs cannot set this
+            // path; only the daemon base plus this instance's id@version does.
+            auto temp_dir =
+                CreateSandboxTempDirectory(daemon_.temp_directory, sandbox_id_, version_);
+            if (!temp_dir.empty()) {
+                managed_temp_directory_ = temp_dir;
+                ExecHardeningOrThrow(*con_,
+                                     "SET temp_directory='" + EscapeSqlString(temp_dir) + "'");
+                std::string read_sql = "SELECT current_setting('temp_directory')";
+                if (!g_hardening_read_error_setting.empty() &&
+                    g_hardening_read_error_setting == "temp_directory") {
+                    read_sql = "SELECT current_setting('__duckbox_no_such_setting__')";
+                }
+                auto got = con_->Query(read_sql);
+                if (!got || got->HasError()) {
+                    std::string why = (got && got->HasError()) ? got->GetError() : "no result";
+                    throw Error("sandbox hardening failed: current_setting('temp_directory'): " +
+                                why);
+                }
+                got->Complete();
+                std::string text;
+                if (auto chunk = got->Fetch()) {
+                    if (chunk->size() > 0) {
+                        text = chunk->GetValue(0, 0).ToString();
+                    }
+                }
+                if (!g_hardening_mismatch_setting.empty() &&
+                    g_hardening_mismatch_setting == "temp_directory") {
+                    text = "[max_memory]";
+                }
+                if (text.empty() || !SameTempDirectory(text, temp_dir)) {
+                    throw Error("sandbox hardening failed: current_setting('temp_directory') is '" +
+                                text + "', expected '" + temp_dir + "'");
+                }
+            }
             // SET must happen while enable_external_access is still true; after
             // disable it is a silent no-op (DuckDB keeps the previous empty list).
-            // Derived from lake.data_path, path-like attachments, and extra_paths
-            // (never parsed from initSQL). Inlined read_parquet in an authorized
-            // view needs these after disable.
+            // Derived from lake.data_path, path-like attachments, extra_paths,
+            // and the per-sandbox temp directory (never parsed from initSQL).
             auto paths = DeclaredAllowedPaths(policy_);
+            if (!managed_temp_directory_.empty()) {
+                auto canon = CanonicalAllowedPrefix(managed_temp_directory_);
+                if (std::find(paths.begin(), paths.end(), canon) == paths.end()) {
+                    paths.push_back(std::move(canon));
+                }
+            }
             if (!paths.empty()) {
                 std::ostringstream list;
                 list << '[';
@@ -359,6 +405,10 @@ void TenantSandbox::Warmup(bool validate_lake) {
         RecoverAfterFailure();
         con_.reset();
         db_.reset();
+        if (!managed_temp_directory_.empty()) {
+            RemoveSandboxTempDirectory(managed_temp_directory_);
+            managed_temp_directory_.clear();
+        }
         throw;
     }
 }

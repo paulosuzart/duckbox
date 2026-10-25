@@ -30,5 +30,6 @@ int main() {
     RunTableFunction20Tests();
     RunMacroCatalog20Tests();
     RunLakeAttachSecretTests();
+    RunTempDirectoryTests();
     return ReportAndExit("unit");
 }
