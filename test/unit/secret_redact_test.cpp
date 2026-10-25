@@ -558,10 +558,11 @@ void duckbox::test::RunSecretRedactPatternTests() {
         refimpl::ExpectNeverWeaker(in, RedactSecretText(in), "differential");
     }
 
-    // Scaling: 128 KB vs 2 MB (linear ≈16x). Median of 5 only at 2 MB; one run
-    // at 128 KB. Ratio < 64. Times RedactSecretText and HasCredentialLeak.
-    const size_t kSmall = static_cast<size_t>(128) << 10;
-    const size_t kBig = static_cast<size_t>(2) << 20;
+    // Scaling: 256 KB vs 4 MB (linear ≈16x, quadratic ≈256x). Median of 5 only
+    // at 4 MB; one run at 256 KB. Ratio < 64. Times RedactSecretText and
+    // HasCredentialLeak.
+    const size_t kSmall = static_cast<size_t>(256) << 10;
+    const size_t kBig = static_cast<size_t>(4) << 20;
     constexpr int kRuns = 5;
     constexpr double kScaleLimit = 64.0;
     auto scale_t0 = std::chrono::steady_clock::now();
@@ -589,9 +590,9 @@ void duckbox::test::RunSecretRedactPatternTests() {
         verify(big, big_out);
         double denom = std::max(static_cast<double>(small_t.count()), 1.0);
         double ratio = static_cast<double>(med_b.count()) / denom;
-        std::clog << "secret_redact scale " << label << " median 2MB/128KB = " << ratio
-                  << " (128KB " << small_t.count() << "ns, 2MB " << med_b.count() << "ns)\n";
-        Expect(ratio < kScaleLimit, std::string(label) + " median 2MB/128KB ratio " +
+        std::clog << "secret_redact scale " << label << " median 4MB/256KB = " << ratio
+                  << " (256KB " << small_t.count() << "ns, 4MB " << med_b.count() << "ns)\n";
+        Expect(ratio < kScaleLimit, std::string(label) + " median 4MB/256KB ratio " +
                                         std::to_string(ratio) + " exceeds 64");
     };
 
@@ -690,6 +691,14 @@ void duckbox::test::RunSecretRedactPatternTests() {
             Expect(!HasCredentialLeak(in), std::string(msg) + " (HasCredentialLeak)");
         };
     };
+    auto make_uri_slash = [](size_t n) {
+        std::string s;
+        s.reserve(n + 32);
+        while (s.size() < n) {
+            s += "postgresql://u:pa/ss@h ";
+        }
+        return s;
+    };
     auto make_colon_slash = [](size_t n) {
         std::string s;
         s.reserve(n + 8);
@@ -706,6 +715,15 @@ void duckbox::test::RunSecretRedactPatternTests() {
         }
         return s;
     };
+    expect_scales(
+        make_uri_slash,
+        [](const std::string &, const std::string &out) {
+            Expect(out.find("pa/ss") == std::string::npos,
+                   "repeated URI password with / is redacted");
+            Expect(out.find(kRedactedMarker) != std::string::npos,
+                   "repeated URI password with / uses the marker");
+        },
+        "repeated URI password with /");
     expect_scales(make_colon_slash, no_userinfo("repeated :// without @ is unchanged"),
                   "repeated ://");
     expect_scales(make_pgsqlx, no_userinfo("repeated pgsqlx:// without @ is unchanged"),
