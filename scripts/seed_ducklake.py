@@ -18,6 +18,10 @@ DEALS = [
     (22, 3, "bravo deal", 500, False),
     (22, 4, "bravo two", 50, False),
 ]
+# DuckLake inlines small inserts in the catalog. More than 1000 extra rows
+# (or DATA_INLINING_ROW_LIMIT 0) forces Parquet on S3 so duckbox reads files
+# written by the seed engine. Tenant 99 is invisible to the e2e rewriter checks.
+FILLER = [(99, 1000 + i, f"filler {i}", i, False) for i in range(1100)]
 
 
 def wait_s3(endpoint: str, key: str, secret: str) -> None:
@@ -60,6 +64,34 @@ def ensure_bucket(endpoint: str, key: str, secret: str, bucket: str) -> None:
         print(f"bucket {bucket} already exists")
 
 
+def list_parquet(endpoint: str, key: str, secret: str, bucket: str) -> list[str]:
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=key,
+        aws_secret_access_key=secret,
+        region_name="us-east-1",
+        config=Config(s3={"addressing_style": "path"}),
+    )
+    found: list[str] = []
+    token = None
+    while True:
+        kwargs = {"Bucket": bucket, "Prefix": "data/"}
+        if token:
+            kwargs["ContinuationToken"] = token
+        resp = client.list_objects_v2(**kwargs)
+        for obj in resp.get("Contents") or []:
+            name = obj.get("Key") or ""
+            if name.endswith(".parquet"):
+                found.append(name)
+        if not resp.get("IsTruncated"):
+            break
+        token = resp.get("NextContinuationToken")
+        if not token:
+            break
+    return found
+
+
 def seed(args: argparse.Namespace) -> None:
     wait_s3(args.s3_endpoint, args.s3_key, args.s3_secret)
     ensure_bucket(args.s3_endpoint, args.s3_key, args.s3_secret, args.bucket)
@@ -68,6 +100,7 @@ def seed(args: argparse.Namespace) -> None:
     host = args.s3_endpoint.replace("http://", "").replace("https://", "")
     use_ssl = args.s3_endpoint.startswith("https://")
     con = duckdb.connect()
+    print(f"seed duckdb_version={duckdb.__version__}")
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute("INSTALL postgres; LOAD postgres;")
     con.execute("INSTALL ducklake; LOAD ducklake;")
@@ -90,7 +123,18 @@ def seed(args: argparse.Namespace) -> None:
         f"port={args.pg_port} user={args.pg_user} password={args.pg_password}"
     )
     data_path = f"s3://{args.bucket}/data/"
-    con.execute(f"ATTACH '{catalog}' AS lake (DATA_PATH '{data_path}')")
+    try:
+        con.execute("SET ducklake_default_data_inlining_row_limit = 0")
+    except Exception as exc:  # noqa: BLE001
+        print(f"ducklake_default_data_inlining_row_limit unsettable: {exc}")
+    try:
+        con.execute(
+            f"ATTACH '{catalog}' AS lake (DATA_PATH '{data_path}', DATA_INLINING_ROW_LIMIT 0)"
+        )
+        print("attached with DATA_INLINING_ROW_LIMIT 0")
+    except Exception as exc:  # noqa: BLE001
+        print(f"DATA_INLINING_ROW_LIMIT not usable ({exc}); attaching without it")
+        con.execute(f"ATTACH '{catalog}' AS lake (DATA_PATH '{data_path}')")
     con.execute("USE lake")
     con.execute(
         """
@@ -106,10 +150,29 @@ def seed(args: argparse.Namespace) -> None:
     count = con.execute("SELECT count(*) FROM deals").fetchone()[0]
     if count == 0:
         con.executemany("INSERT INTO deals VALUES (?, ?, ?, ?, ?)", DEALS)
-        print(f"inserted {len(DEALS)} deals rows")
+        con.executemany("INSERT INTO deals VALUES (?, ?, ?, ?, ?)", FILLER)
+        print(f"inserted {len(DEALS)} tenant deals and {len(FILLER)} filler rows")
     else:
         print(f"deals already has {count} rows; leaving as-is")
-    print(con.execute("SELECT tenant_id, id, title, amount, _deleted FROM deals ORDER BY id").fetchall())
+    print(
+        con.execute(
+            "SELECT tenant_id, id, title, amount, _deleted FROM deals "
+            "WHERE tenant_id IN (21, 22) ORDER BY id"
+        ).fetchall()
+    )
+    try:
+        snaps = con.execute("SELECT * FROM ducklake_snapshots('lake') LIMIT 3").fetchall()
+        print(f"ducklake_snapshots={snaps}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"ducklake_snapshots unavailable: {exc}")
+    parquet = list_parquet(args.s3_endpoint, args.s3_key, args.s3_secret, args.bucket)
+    if not parquet:
+        raise SystemExit(
+            "seed wrote no Parquet under s3://{}/data/ (still inlined in the catalog)".format(
+                args.bucket
+            )
+        )
+    print(f"parquet_objects={len(parquet)} first={parquet[0]}")
 
 
 def main() -> None:

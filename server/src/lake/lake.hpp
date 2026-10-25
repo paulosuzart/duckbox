@@ -66,6 +66,13 @@ void ConstrainLakeAgainstDaemon(
     const node::DaemonConfig &daemon); // lake_allow; common::PolicyError
 // Resolved catalog DSN for attach. Never log the value.
 std::string ResolveLakeCatalog(const config::SandboxSpec &spec, const s3::SecretResolver &secrets);
+// DuckLake ATTACH SQL. DATA_PATH and READ_ONLY only — no AUTOMATIC_MIGRATION,
+// DUCKLAKE_VERSION, or STORAGE_VERSION. Existing 1.0 catalogs stay unmigrated;
+// duckbox is DuckDB 2.0-only and does not rewrite storage for older engines.
+// kind: ducklake specs must be read_only (ValidateStatic rejects false);
+// the emitted SQL always includes READ_ONLY.
+std::string QuotedLakeAlias(const config::SandboxSpec &spec);
+std::string BuildDuckLakeAttachSql(const config::SandboxSpec &spec, const std::string &catalog);
 // LOAD then INSTALL-on-miss. Does not disable external access (sandbox does after attach).
 void AttachLakeFromSpec(ddb::Connection &con, const config::SandboxSpec &spec,
                         const std::string &spec_dir, const s3::SecretResolver &secrets,

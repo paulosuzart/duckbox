@@ -481,6 +481,10 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/agent_mode_deny_test.cpp
   test/unit/table_function_20_test.cpp
   test/unit/macro_catalog_20_test.cpp
+  test/unit/lambda_new_syntax_test.cpp
+  test/unit/lambda_old_syntax_test.cpp
+  test/unit/storage_format_test.cpp
+  test/unit/ducklake_attach_sql_test.cpp
   test/unit/lake_attach_test.cpp
   test/unit/temp_directory_test.cpp
   test/unit/token_sanitize_test.cpp)
@@ -510,6 +514,9 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/quack_runtime_test.cpp
   test/integration/extension_capi_runtime_test.cpp
   test/integration/agent_mode_runtime_test.cpp
+  test/integration/lambda_new_syntax_runtime_test.cpp
+  test/integration/lambda_old_syntax_runtime_test.cpp
+  test/integration/storage_format_runtime_test.cpp
   test/integration/secret_flight_test.cpp
   test/integration/temp_directory_test.cpp
   test/integration/token_sanitize_test.cpp)
