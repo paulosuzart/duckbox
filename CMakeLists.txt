@@ -327,6 +327,8 @@ if(DUCKBOX_COVERAGE AND NOT MSVC)
   target_link_options(duckbox_core_testing PUBLIC --coverage)
   target_link_libraries(duckbox_core PUBLIC gcov)
   target_link_libraries(duckbox_core_testing PUBLIC gcov)
+  # Tests that link duckbox_core_testing can skip megabyte-scale timing.
+  target_compile_definitions(duckbox_core_testing PUBLIC DUCKBOX_COVERAGE)
 endif()
 
 function(duckbox_link_core_deps target)

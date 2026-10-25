@@ -558,9 +558,11 @@ void duckbox::test::RunSecretRedactPatternTests() {
         refimpl::ExpectNeverWeaker(in, RedactSecretText(in), "differential");
     }
 
+#ifndef DUCKBOX_COVERAGE
     // Scaling: 256 KB vs 4 MB (linear ≈16x, quadratic ≈256x). Median of 5 only
     // at 4 MB; one run at 256 KB. Ratio < 64. Times RedactSecretText and
-    // HasCredentialLeak.
+    // HasCredentialLeak. Compiled out of the coverage build: gcov 32-bit
+    // counters overflow, and timing under -O0 instrumentation is not meaningful.
     const size_t kSmall = static_cast<size_t>(256) << 10;
     const size_t kBig = static_cast<size_t>(4) << 20;
     constexpr int kRuns = 5;
@@ -735,4 +737,5 @@ void duckbox::test::RunSecretRedactPatternTests() {
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scale_t0)
             .count();
     std::clog << "secret_redact scale block " << scale_ms << " ms\n";
+#endif
 }
