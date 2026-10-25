@@ -59,12 +59,6 @@ bool IsWs(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-bool IsPatternUnquotedValueEnd(char c) {
-    // Pattern pass only: '"' and ':' stop the value so diagnostic text
-    // after a DSN or JSON fragment is not swallowed.
-    return IsWs(c) || c == ';' || c == ',' || c == ')' || c == '&' || c == '"' || c == ':';
-}
-
 void ReplaceAllExact(std::string &s, const std::string &needle, const char *repl) {
     if (needle.empty()) {
         return;
@@ -110,16 +104,10 @@ size_t QuotedValueEnd(const std::string &s, size_t vs) {
     return ve;
 }
 
-// Pattern pass: stop at '"' / ':' so leftover diagnostics stay visible.
-size_t PatternUnquotedValueEnd(const std::string &s, size_t vs) {
-    size_t ve = vs;
-    while (ve < s.size() && !IsPatternUnquotedValueEnd(s[ve])) {
-        ve++;
-    }
-    return ve;
-}
-
-// libpq: an unquoted value ends only at unescaped whitespace; '\' escapes.
+// libpq conninfo scanner for DSN fragments inside free-form operator text.
+// Hand-rolled because libpq is not in-tree and PQconninfoParse cannot locate
+// a keyword/value pair in an arbitrary error string. Whitespace terminates
+// an unquoted value unless the preceding character is '\'.
 size_t LibpqUnquotedValueEnd(const std::string &s, size_t vs) {
     size_t ve = vs;
     while (ve < s.size()) {
@@ -149,12 +137,27 @@ std::string LibpqUnescape(const std::string &raw) {
 }
 
 void RedactKeyedValue(std::string &s, const std::string &key, bool allow_colon) {
+    std::string out;
+    size_t copy_from = 0;
     size_t i = 0;
+    bool any = false;
     while (i < s.size()) {
-        if (CiEq(s, i, key) && (i == 0 || !IsIdentChar(s[i - 1]))) {
-            size_t after = i + key.size();
-            if (after < s.size() && after > 0 && (s[after] == '"' || s[after] == '\'') && i > 0 &&
-                s[i - 1] == s[after]) {
+        if (CiEq(s, i, key)) {
+            // Conservative key variants: any identifier that contains the key
+            // is treated as a secret key, including mypassword=, passwordhash=,
+            // token_count=, tokenizer=, secretary_name=, key_identifier=, and
+            // passwordless_login=. Prefer over-redacting operator logs.
+            size_t left = i;
+            while (left > 0 && IsIdentChar(s[left - 1])) {
+                left--;
+            }
+            size_t idend = i + key.size();
+            while (idend < s.size() && IsIdentChar(s[idend])) {
+                idend++;
+            }
+            size_t after = idend;
+            if (after < s.size() && left > 0 && (s[after] == '"' || s[after] == '\'') &&
+                s[left - 1] == s[after]) {
                 after++;
             }
             size_t sep = after;
@@ -167,28 +170,48 @@ void RedactKeyedValue(std::string &s, const std::string &key, bool allow_colon) 
             } else if (allow_colon && sep < s.size() && s[sep] == ':') {
                 ok_sep = true;
             }
-            if (ok_sep) {
-                size_t vs = sep + 1;
-                while (vs < s.size() && IsWs(s[vs])) {
-                    vs++;
-                }
-                size_t ve = vs;
-                if (ve < s.size() && (s[ve] == '\'' || s[ve] == '"')) {
-                    ve = QuotedValueEnd(s, ve);
-                } else {
-                    ve = PatternUnquotedValueEnd(s, ve);
-                }
-                s.replace(vs, ve - vs, kRedactedMarker);
-                i = vs + 10;
+            if (!ok_sep) {
+                i = idend;
                 continue;
             }
+            // After keyword= / keyword:, libpq takes the next unquoted token
+            // through unescaped whitespace. password= keepme=yes and
+            // password=Zm9vYmFy= are values (keepme=yes / Zm9vYmFy=), not an
+            // empty field plus a neighbour. '=' and ':' do not terminate.
+            size_t vs = sep + 1;
+            while (vs < s.size() && IsWs(s[vs])) {
+                vs++;
+            }
+            size_t ve = vs;
+            if (ve < s.size() && (s[ve] == '\'' || s[ve] == '"')) {
+                ve = QuotedValueEnd(s, ve);
+            } else {
+                ve = LibpqUnquotedValueEnd(s, ve);
+            }
+            if (!any) {
+                out.reserve(s.size());
+                any = true;
+            }
+            out.append(s, copy_from, vs - copy_from);
+            out.append(kRedactedMarker);
+            copy_from = ve;
+            i = ve;
+            continue;
         }
         i++;
     }
+    if (!any) {
+        return;
+    }
+    out.append(s, copy_from, s.size() - copy_from);
+    s = std::move(out);
 }
 
 void RedactSqlQuoted(std::string &s, const std::string &keyword) {
+    std::string out;
+    size_t copy_from = 0;
     size_t i = 0;
+    bool any = false;
     while (i < s.size()) {
         if (CiEq(s, i, keyword) && (i == 0 || !IsIdentChar(s[i - 1]))) {
             size_t j = i + keyword.size();
@@ -212,35 +235,92 @@ void RedactSqlQuoted(std::string &s, const std::string &keyword) {
                     }
                     ve++;
                 }
-                s.replace(vs, ve - vs, kRedactedMarker);
-                i = vs + 10;
+                if (!any) {
+                    out.reserve(s.size());
+                    any = true;
+                }
+                out.append(s, copy_from, vs - copy_from);
+                out.append(kRedactedMarker);
+                copy_from = ve;
+                i = ve;
                 continue;
             }
         }
         i++;
     }
+    if (!any) {
+        return;
+    }
+    out.append(s, copy_from, s.size() - copy_from);
+    s = std::move(out);
 }
 
 void RedactPostgresUriUserinfo(std::string &s) {
     const char *schemes[] = {"postgresql://", "postgres://"};
     for (const char *scheme : schemes) {
+        std::string out;
+        size_t copy_from = 0;
         size_t i = 0;
+        bool any = false;
+        const size_t slen = std::char_traits<char>::length(scheme);
+        // Two forward-only pointers to EOS: libpq keeps space, tab, '/',
+        // '\n', and '\r' inside a URI password. Never rescan. No '@'
+        // remaining: redact after the scheme to EOL (DuckDB LINE 1: cut)
+        // and keep scanning later lines.
+        size_t at_ptr = 0;
+        size_t colon_ptr = 0;
+        bool at_init = false;
+        bool colon_init = false;
         while (i < s.size()) {
             if (CiEq(s, i, scheme)) {
-                size_t user = i + std::char_traits<char>::length(scheme);
-                size_t at = s.find('@', user);
-                if (at == std::string::npos) {
-                    i++;
+                size_t user = i + slen;
+                if (!at_init || at_ptr < user) {
+                    at_ptr = user;
+                    at_init = true;
+                    while (at_ptr < s.size() && s[at_ptr] != '@') {
+                        at_ptr++;
+                    }
+                }
+                if (at_ptr >= s.size()) {
+                    size_t eol = user;
+                    while (eol < s.size() && s[eol] != '\n' && s[eol] != '\r') {
+                        eol++;
+                    }
+                    if (!any) {
+                        out.reserve(s.size());
+                        any = true;
+                    }
+                    out.append(s, copy_from, user - copy_from);
+                    out.append(kRedactedMarker);
+                    copy_from = eol;
+                    i = (eol > i) ? eol : i + 1;
                     continue;
                 }
-                size_t colon = s.find(':', user);
-                if (colon != std::string::npos && colon < at) {
-                    s.replace(colon + 1, at - (colon + 1), kRedactedMarker);
-                    i = colon + 1 + 10;
-                    continue;
+                size_t at = at_ptr;
+                if (!colon_init || colon_ptr < user) {
+                    colon_ptr = user;
+                    colon_init = true;
+                    while (colon_ptr < s.size() && s[colon_ptr] != ':') {
+                        colon_ptr++;
+                    }
                 }
+                if (colon_ptr < at) {
+                    if (!any) {
+                        out.reserve(s.size());
+                        any = true;
+                    }
+                    out.append(s, copy_from, (colon_ptr + 1) - copy_from);
+                    out.append(kRedactedMarker);
+                    copy_from = at;
+                }
+                i = at;
+                continue;
             }
             i++;
+        }
+        if (any) {
+            out.append(s, copy_from, s.size() - copy_from);
+            s = std::move(out);
         }
     }
 }
@@ -443,14 +523,60 @@ bool LooksLikeConfiguredDsn(const std::string &v) {
 }
 
 bool HasUriUserinfo(const std::string &text) {
-    size_t sep = 0;
-    while ((sep = text.find("://", sep)) != std::string::npos) {
-        size_t start = sep + 3;
-        size_t at = text.find('@', start);
-        if (at != std::string::npos && text.find(':', start) < at) {
-            return true;
+    size_t i = 0;
+    while (i < text.size()) {
+        if (i + 2 < text.size() && text[i] == ':' && text[i + 1] == '/' && text[i + 2] == '/') {
+            size_t colon = std::string::npos;
+            size_t at = std::string::npos;
+            size_t p = i + 3;
+            while (p < text.size()) {
+                if (text[p] == '@') {
+                    at = p;
+                    break;
+                }
+                if (text[p] == ':' && colon == std::string::npos) {
+                    colon = p;
+                }
+                p++;
+            }
+            if (at != std::string::npos && colon != std::string::npos && colon < at) {
+                return true;
+            }
+            if (at == std::string::npos) {
+                return false;
+            }
+            i = at + 1;
+            continue;
         }
-        sep += 3;
+        i++;
+    }
+    return false;
+}
+
+// postgres/postgresql scheme with no '@' before EOL or EOS: a truncated
+// LINE 1: excerpt (or a host-only URI). Over-detecting a host is OK.
+bool HasPostgresUriWithoutAt(const std::string &text) {
+    const char *schemes[] = {"postgresql://", "postgres://"};
+    for (const char *scheme : schemes) {
+        const size_t slen = std::char_traits<char>::length(scheme);
+        size_t i = 0;
+        while (i < text.size()) {
+            if (CiEq(text, i, scheme)) {
+                size_t p = i + slen;
+                while (p < text.size() && text[p] != '\n' && text[p] != '\r') {
+                    if (text[p] == '@') {
+                        break;
+                    }
+                    p++;
+                }
+                if (p >= text.size() || text[p] == '\n' || text[p] == '\r') {
+                    return true;
+                }
+                i = p + 1;
+                continue;
+            }
+            i++;
+        }
     }
     return false;
 }
@@ -473,6 +599,9 @@ bool HasCredentialLeak(const std::string &text, const SecretRedactionContext &ct
         return true;
     }
     if (HasUriUserinfo(text)) {
+        return true;
+    }
+    if (HasPostgresUriWithoutAt(text)) {
         return true;
     }
     for (const auto &v : ctx.exact_values) {

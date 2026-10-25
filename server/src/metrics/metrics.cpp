@@ -540,64 +540,6 @@ void SetMetrics(std::shared_ptr<IMetrics> m) {
     g_metrics = m ? std::move(m) : std::make_shared<NoopMetrics>();
 }
 
-std::string RedactSecretsForAudit(const std::string &sql) {
-    std::string s = sql;
-    auto redact_quoted_after = [&](const std::string &kw) {
-        std::string lower = absl::AsciiStrToLower(s);
-        std::string k = kw;
-        size_t pos = 0;
-        while ((pos = lower.find(k, pos)) != std::string::npos) {
-            size_t i = pos + k.size();
-            while (i < s.size() && (s[i] == ' ' || s[i] == '=' || s[i] == ':' || s[i] == '\t')) {
-                i++;
-            }
-            if (i >= s.size()) {
-                break;
-            }
-            char q = s[i];
-            size_t start = i;
-            size_t end = i;
-            if (q == '\'' || q == '"') {
-                end = i + 1;
-                while (end < s.size() && s[end] != q) {
-                    end++;
-                }
-                if (end < s.size()) {
-                    end++;
-                }
-            } else {
-                while (end < s.size() && s[end] != ' ' && s[end] != ',' && s[end] != ')' &&
-                       s[end] != '\n' && s[end] != ';') {
-                    end++;
-                }
-            }
-            s.replace(start, end - start, "***");
-            lower.replace(start, end - start, "***");
-            pos = start + 3;
-        }
-    };
-    redact_quoted_after("password");
-    redact_quoted_after("secret");
-    redact_quoted_after("key_id");
-    redact_quoted_after("access_key");
-    redact_quoted_after("secret_key");
-    size_t uri = 0;
-    while ((uri = s.find("://", uri)) != std::string::npos) {
-        auto at = s.find('@', uri + 3);
-        auto slash = s.find('/', uri + 3);
-        if (at != std::string::npos && (slash == std::string::npos || at < slash)) {
-            auto colon = s.find(':', uri + 3);
-            if (colon != std::string::npos && colon < at) {
-                s.replace(uri + 3, at - (uri + 3), "***:***");
-                uri = uri + 3 + 7;
-                continue;
-            }
-        }
-        uri += 3;
-    }
-    return s;
-}
-
 void WriteSandboxAudit(const char *action, const std::string &id, const std::string &key) {
     Json j;
     j["event"] = "sandbox";

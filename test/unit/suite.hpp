@@ -34,6 +34,7 @@ void RunLambdaOldSyntaxTests();
 void RunStorageFormatTests();
 void RunDuckLakeAttachSqlTests();
 void RunLakeAttachSecretTests();
+void RunSecretRedactPatternTests();
 void RunTempDirectoryTests();
 void RunTokenSanitizeTests();
 
