@@ -680,12 +680,24 @@ PeerFlight::Dial(const std::string &url) {
 
 ::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>>
 PeerFlight::Client(const std::string &url) {
+    {
+        std::lock_guard<std::mutex> hold(mu_);
+        auto it = clients_.find(url);
+        if (it != clients_.end()) {
+            return it->second;
+        }
+    }
+    // Dial (connect + Authenticate) is outside the cache lock so a frozen
+    // peer cannot stall proxy calls to other owners.
+    ARROW_ASSIGN_OR_RAISE(auto client, Dial(url));
     std::lock_guard<std::mutex> hold(mu_);
     auto it = clients_.find(url);
     if (it != clients_.end()) {
+        if (client) {
+            (void)client->Close();
+        }
         return it->second;
     }
-    ARROW_ASSIGN_OR_RAISE(auto client, Dial(url));
     clients_[url] = client;
     return client;
 }

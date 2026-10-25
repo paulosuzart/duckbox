@@ -157,15 +157,45 @@ class OwnerStub : public FlightServerBase {
     std::atomic<bool> stop_{false};
 };
 
+class HangAuthHandler : public ::arrow::flight::ServerAuthHandler {
+  public:
+    ::arrow::Status Authenticate(const ServerCallContext &, ::arrow::flight::ServerAuthSender *,
+                                 ::arrow::flight::ServerAuthReader *) override {
+        entered_.store(true, std::memory_order_release);
+        while (!stop_.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return Status::Cancelled("hung handshake");
+    }
+
+    ::arrow::Status IsValid(const ServerCallContext &, const std::string &,
+                            std::string *peer_identity) override {
+        *peer_identity = "peer";
+        return Status::OK();
+    }
+
+    void Release() { stop_.store(true, std::memory_order_release); }
+    bool Entered() const { return entered_.load(std::memory_order_acquire); }
+
+  private:
+    std::atomic<bool> entered_{false};
+    std::atomic<bool> stop_{false};
+};
+
 struct StubOwner {
     std::unique_ptr<OwnerStub> server;
+    std::shared_ptr<::arrow::flight::ServerAuthHandler> auth_handler;
     std::thread th;
     int port = 0;
 
     void Start(const DaemonConfig &cfg) {
         auto loc = Location::ForGrpcTcp("127.0.0.1", 0);
         FlightServerOptions opt(*loc);
-        opt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
+        if (auth_handler) {
+            opt.auth_handler = auth_handler;
+        } else {
+            opt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
+        }
         duckbox::flight::ApplyInternalListenerKeepalive(opt);
         Expect(server->Init(opt).ok(), "hang stub owner init");
         port = server->port();
@@ -470,6 +500,52 @@ void TestPublicDoGetFirstMessageBound() {
     owner.Stop();
 }
 
+void TestHungPeerDoesNotBlockHealthy() {
+    HangFixture fx;
+    auto hang_auth = std::make_shared<HangAuthHandler>();
+    StubOwner frozen;
+    frozen.server = std::make_unique<OwnerStub>(OwnerStub::Mode::IgnoreCancel);
+    frozen.auth_handler = hang_auth;
+    frozen.Start(fx.daemon_b);
+
+    StubOwner healthy;
+    healthy.server = std::make_unique<OwnerStub>(OwnerStub::Mode::HangAfterSchema);
+    healthy.Start(fx.daemon_b);
+
+    auto desc = FlightDescriptor::Command("proxy-hang");
+    std::atomic<bool> hung_done{false};
+    std::thread hung([&] {
+        (void)fx.peers_a->ForwardGetFlightInfo(frozen.Url(), desc, fx.rec.id, fx.rec.key);
+        hung_done.store(true, std::memory_order_release);
+    });
+    auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!hang_auth->Entered() && std::chrono::steady_clock::now() < entered_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    Expect(hang_auth->Entered(), "frozen peer handshake is in progress");
+
+    auto t0 = std::chrono::steady_clock::now();
+    auto info = fx.peers_a->ForwardGetFlightInfo(healthy.Url(), desc, fx.rec.id, fx.rec.key);
+    auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::cout << "healthy_peer_during_frozen_connect_ms=" << elapsed_ms << "\n";
+    Expect(info.ok(), "healthy peer GetFlightInfo succeeds while another handshake is hung");
+    Expect(elapsed_ms < 400, "a frozen peer connect does not block a healthy peer");
+
+    hang_auth->Release();
+    auto join_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!hung_done.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < join_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (hung.joinable()) {
+        hung.detach();
+    }
+    frozen.Stop();
+    healthy.Stop();
+}
+
 } // namespace
 
 void duckbox::test::RunProxyHangTests() {
@@ -477,4 +553,5 @@ void duckbox::test::RunProxyHangTests() {
     TestShutdownHungDoGet();
     TestCancelAfterSchema();
     TestPublicDoGetFirstMessageBound();
+    TestHungPeerDoesNotBlockHealthy();
 }
