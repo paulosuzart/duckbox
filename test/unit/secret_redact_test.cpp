@@ -3,6 +3,7 @@
 
 #include "lake/lake.hpp"
 
+#include <chrono>
 #include <string>
 
 namespace {
@@ -60,7 +61,7 @@ void duckbox::test::RunSecretRedactPatternTests() {
            "quoted escaped-space password tail is redacted");
 
     auto q_esc_quote = RedactSecretText("password='FA\\'KE-quoted'");
-    Expect(q_esc_quote.find("FA") == std::string::npos ||
+    Expect(q_esc_quote.find("FA") == std::string::npos &&
                q_esc_quote.find("KE-quoted") == std::string::npos,
            "quoted value follows libpq \\' escape");
     Expect(q_esc_quote.find(kRedactedMarker) != std::string::npos,
@@ -149,4 +150,103 @@ void duckbox::test::RunSecretRedactPatternTests() {
     Expect(combined.find("uri-secret-1") == std::string::npos,
            "combined string redacts the URI password");
     Expect(combined.find("127.0.0.1") != std::string::npos, "combined string keeps the URI host");
+
+    // Empty libpq value: whitespace after '=' then the next keyword=value field.
+    auto empty_next = RedactSecretText("password= keepme=yes");
+    Expect(empty_next.find("keepme=yes") != std::string::npos,
+           "empty password= does not swallow the next field");
+    Expect(empty_next.find(kRedactedMarker) == std::string::npos,
+           "empty password= before keepme= is not a secret value");
+    auto empty_next_ws = RedactSecretText("password= keepme =yes");
+    Expect(empty_next_ws.find("keepme =yes") != std::string::npos,
+           "empty password= does not swallow a spaced next field");
+    auto empty_secret_next = RedactSecretText("password= secret=next-secret-9");
+    Expect(empty_secret_next.find("next-secret-9") == std::string::npos,
+           "empty password= still redacts the following secret=");
+    Expect(empty_secret_next.find("password=") != std::string::npos, "empty password= key remains");
+    auto empty_colon_next = RedactSecretText("password= host:pg");
+    Expect(empty_colon_next.find("host:pg") != std::string::npos,
+           "empty password= does not swallow a following key: field");
+    auto empty_eos = RedactSecretText("password=");
+    Expect(empty_eos.find("password=") != std::string::npos, "password= at end of string is kept");
+
+    // Intended over-redaction: any identifier containing a known key.
+    auto token_count = RedactSecretText("token_count=over-redact-token-1");
+    ExpectNoSecret(token_count, "over-redact-token-1", "token_count= is over-redacted");
+    auto tokenizer = RedactSecretText("tokenizer=over-redact-token-2");
+    ExpectNoSecret(tokenizer, "over-redact-token-2", "tokenizer= is over-redacted");
+    auto secretary = RedactSecretText("secretary_name=over-redact-secret-3");
+    ExpectNoSecret(secretary, "over-redact-secret-3", "secretary_name= is over-redacted");
+    auto key_ident = RedactSecretText("key_identifier=over-redact-keyid-4");
+    ExpectNoSecret(key_ident, "over-redact-keyid-4", "key_identifier= is over-redacted");
+    auto pw_less = RedactSecretText("passwordless_login=over-redact-pw-5");
+    ExpectNoSecret(pw_less, "over-redact-pw-5", "passwordless_login= is over-redacted");
+
+    // Libpq unquoted / quoted value rules (exhaustive via the pattern pass).
+    auto unquoted_eos = RedactSecretText("password=end-secret-value");
+    ExpectNoSecret(unquoted_eos, "end-secret-value", "unquoted value at end of string is redacted");
+    auto trail_bs = RedactSecretText("password=end-secret-bs\\");
+    ExpectNoSecret(trail_bs, "end-secret-bs", "trailing backslash stays inside the unquoted value");
+    auto esc_quote_unq = RedactSecretText("password=a\\\"b-secret");
+    ExpectNoSecret(esc_quote_unq, "b-secret", "escaped quote is inside an unquoted value");
+    auto esc_bs_space = RedactSecretText("password=a\\\\ b-secret");
+    Expect(esc_bs_space.find("a\\\\") == std::string::npos,
+           "escaped backslash then unescaped space ends the value");
+    Expect(esc_bs_space.find("b-secret") != std::string::npos,
+           "text after escaped-backslash plus space is the next field");
+    auto q_esc_bs = RedactSecretText("password='foo\\\\bar-secret'");
+    ExpectNoSecret(q_esc_bs, "bar-secret", "quoted value keeps an escaped backslash");
+    auto q_empty = RedactSecretText("password='' host=pg");
+    Expect(q_empty.find("host=pg") != std::string::npos,
+           "empty quoted password leaves later fields");
+    auto pairs = RedactSecretText("sslpassword=ssl-secret-1 password=pw-secret-2 pwd=pwd-secret-3");
+    Expect(pairs.find("ssl-secret-1") == std::string::npos &&
+               pairs.find("pw-secret-2") == std::string::npos &&
+               pairs.find("pwd-secret-3") == std::string::npos,
+           "multiple key=value pairs are each redacted");
+
+    // Linear scan: ~1 MB of key-shaped text without separators must stay fast.
+    const size_t kBig = static_cast<size_t>(1) << 20;
+    auto expect_linear = [](const std::string &input, const char *msg) {
+        auto t0 = std::chrono::steady_clock::now();
+        auto out = RedactSecretText(input);
+        auto elapsed = std::chrono::steady_clock::now() - t0;
+        Expect(elapsed < std::chrono::seconds(1), msg);
+        return out;
+    };
+
+    std::string repeated;
+    repeated.reserve(kBig + 8);
+    while (repeated.size() < kBig) {
+        repeated += "password";
+    }
+    auto repeated_out = expect_linear(repeated, "1MB repeated password finishes in < 1s");
+    Expect(repeated_out == repeated, "repeated password without '=' is unchanged");
+
+    std::string spaced;
+    spaced.reserve(kBig + 16);
+    while (spaced.size() < kBig) {
+        spaced += "password ";
+    }
+    auto spaced_out = expect_linear(spaced, "1MB spaced password finishes in < 1s");
+    Expect(spaced_out == spaced, "spaced password without '=' is unchanged");
+
+    std::string mixed;
+    mixed.reserve(kBig + 64);
+    const char *mixed_word =
+        "password token_count tokenizer secretary_name key_identifier passwordless_login ";
+    while (mixed.size() < kBig) {
+        mixed += mixed_word;
+    }
+    auto mixed_out = expect_linear(mixed, "1MB mixed key-identifiers finish in < 1s");
+    Expect(mixed_out == mixed, "mixed key-identifiers without separators are unchanged");
+
+    std::string cast_lit = "SELECT CAST('";
+    cast_lit.reserve(kBig + 32);
+    while (cast_lit.size() < kBig) {
+        cast_lit += "password";
+    }
+    cast_lit += "' AS INTEGER)";
+    auto cast_out = expect_linear(cast_lit, "1MB CAST password literal finishes in < 1s");
+    Expect(cast_out == cast_lit, "CAST password literal without '=' is unchanged");
 }

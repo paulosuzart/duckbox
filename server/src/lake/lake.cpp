@@ -104,7 +104,10 @@ size_t QuotedValueEnd(const std::string &s, size_t vs) {
     return ve;
 }
 
-// libpq: an unquoted value ends only at unescaped whitespace; '\' escapes.
+// libpq conninfo scanner for DSN fragments inside free-form operator text.
+// Hand-rolled because libpq is not in-tree and PQconninfoParse cannot locate
+// a keyword/value pair in an arbitrary error string. Whitespace terminates
+// an unquoted value unless the preceding character is '\'.
 size_t LibpqUnquotedValueEnd(const std::string &s, size_t vs) {
     size_t ve = vs;
     while (ve < s.size()) {
@@ -133,20 +136,40 @@ std::string LibpqUnescape(const std::string &raw) {
     return out;
 }
 
+// True when `vs` starts another conninfo field (`ident=` / `ident:`). After
+// `keyword=` libpq treats a following field as an empty value, not as the
+// value text — so `password= keepme=yes` must not swallow `keepme=yes`.
+bool NextIsKeyedField(const std::string &s, size_t vs) {
+    if (vs >= s.size() || !IsIdentChar(s[vs])) {
+        return false;
+    }
+    size_t j = vs;
+    while (j < s.size() && IsIdentChar(s[j])) {
+        j++;
+    }
+    while (j < s.size() && IsWs(s[j])) {
+        j++;
+    }
+    return j < s.size() && (s[j] == '=' || s[j] == ':');
+}
+
 void RedactKeyedValue(std::string &s, const std::string &key, bool allow_colon) {
     size_t i = 0;
     while (i < s.size()) {
         if (CiEq(s, i, key)) {
             // Conservative key variants: any identifier that contains the key
-            // (mypassword=, passwordhash=), optionally quote-wrapped.
+            // is treated as a secret key, including mypassword=, passwordhash=,
+            // token_count=, tokenizer=, secretary_name=, key_identifier=, and
+            // passwordless_login=. Prefer over-redacting operator logs.
             size_t left = i;
             while (left > 0 && IsIdentChar(s[left - 1])) {
                 left--;
             }
-            size_t after = i + key.size();
-            while (after < s.size() && IsIdentChar(s[after])) {
-                after++;
+            size_t idend = i + key.size();
+            while (idend < s.size() && IsIdentChar(s[idend])) {
+                idend++;
             }
+            size_t after = idend;
             if (after < s.size() && left > 0 && (s[after] == '"' || s[after] == '\'') &&
                 s[left - 1] == s[after]) {
                 after++;
@@ -161,21 +184,27 @@ void RedactKeyedValue(std::string &s, const std::string &key, bool allow_colon) 
             } else if (allow_colon && sep < s.size() && s[sep] == ':') {
                 ok_sep = true;
             }
-            if (ok_sep) {
-                size_t vs = sep + 1;
-                while (vs < s.size() && IsWs(s[vs])) {
-                    vs++;
-                }
-                size_t ve = vs;
-                if (ve < s.size() && (s[ve] == '\'' || s[ve] == '"')) {
-                    ve = QuotedValueEnd(s, ve);
-                } else {
-                    ve = LibpqUnquotedValueEnd(s, ve);
-                }
-                s.replace(vs, ve - vs, kRedactedMarker);
-                i = vs + 10;
+            if (!ok_sep) {
+                i = idend;
                 continue;
             }
+            size_t vs = sep + 1;
+            while (vs < s.size() && IsWs(s[vs])) {
+                vs++;
+            }
+            if (NextIsKeyedField(s, vs)) {
+                i = vs;
+                continue;
+            }
+            size_t ve = vs;
+            if (ve < s.size() && (s[ve] == '\'' || s[ve] == '"')) {
+                ve = QuotedValueEnd(s, ve);
+            } else {
+                ve = LibpqUnquotedValueEnd(s, ve);
+            }
+            s.replace(vs, ve - vs, kRedactedMarker);
+            i = vs + 10;
+            continue;
         }
         i++;
     }
