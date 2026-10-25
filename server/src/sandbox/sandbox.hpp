@@ -41,6 +41,52 @@ struct QueryOutput {
     int64_t row_count = 0;
 };
 
+// BasicLockable with a deadline. Apple libc++ timed_mutex / try_lock
+// loops do not return, and wait_until(steady_clock) is unreliable
+// there. wait_for(remaining) uses a relative timeout.
+class SandboxMutex {
+  public:
+    void lock() {
+        std::unique_lock<std::mutex> g(mu_);
+        cv_.wait(g, [this] { return !held_; });
+        held_ = true;
+    }
+    bool try_lock() {
+        std::unique_lock<std::mutex> g(mu_);
+        if (held_) {
+            return false;
+        }
+        held_ = true;
+        return true;
+    }
+    bool try_lock_until(std::chrono::steady_clock::time_point deadline) {
+        std::unique_lock<std::mutex> g(mu_);
+        while (held_) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                return false;
+            }
+            if (cv_.wait_for(g, deadline - now) == std::cv_status::timeout && held_) {
+                return false;
+            }
+        }
+        held_ = true;
+        return true;
+    }
+    void unlock() {
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            held_ = false;
+        }
+        cv_.notify_one();
+    }
+
+  private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool held_{false};
+};
+
 // One warm DuckDB for id@version. Execute / ExecuteRewritten / ExecuteHandle /
 // ExtractPlan / DescribeRewritten take mu_ for the whole statement so Flight
 // DoGet and Execute on the same instance cannot interleave.
@@ -93,9 +139,15 @@ class TenantSandbox {
 
   private:
     QueryOutput RunTimed(const std::string &sql, std::vector<ddb::Value> params);
+    // Caller holds mu_. DescribeHandleArrow uses this after a deadline-bounded
+    // try_lock_until so GetFlightInfo cannot block forever in Warmup's lock_guard.
+    void WarmupLocked(bool validate_lake);
     // ROLLBACK so a rewrite / binder / timeout failure cannot leave DuckLake's
     // catalog transaction aborted (next query would be a cheap DoS).
     void RecoverAfterFailure();
+#ifdef DUCKBOX_TESTING
+    friend class DescribeLockHold;
+#endif
 
     node::DaemonConfig daemon_;
     config::Policy policy_;
@@ -108,7 +160,13 @@ class TenantSandbox {
     std::unique_ptr<ddb::DuckDB> db_;
     std::unique_ptr<ddb::Connection> con_;
     std::mutex interrupt_mu_; // Interrupt vs Passivate; not held during Execute
-    std::mutex mu_; // held for the whole user statement (Execute / ExtractPlan / Describe)
+    // Held for the whole user statement (Execute / ExtractPlan / Describe).
+    // DescribeHandleArrow waits until query_timeout_ms (else
+    // proxy_first_message_max_ms) so GetFlightInfo cannot wait forever behind
+    // a DoGet stuck in Arrow #31235 send-after-cancel. Apple libc++
+    // timed_mutex / try_lock loops do not return; the wait is
+    // SandboxMutex::try_lock_until (condition_variable) until that deadline.
+    SandboxMutex mu_;
     std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
     int64_t last_used_wall_ms_ = 0;
     int warmup_count_ = 0;
@@ -147,6 +205,19 @@ class WarmupHardeningReadError {
 };
 
 #ifdef DUCKBOX_TESTING
+// Test seam (compiled only with DUCKBOX_TESTING). Holds TenantSandbox::mu_
+// so DescribeHandleArrow's bounded try_lock path can be exercised.
+class DescribeLockHold {
+  public:
+    explicit DescribeLockHold(TenantSandbox &box);
+    ~DescribeLockHold();
+    DescribeLockHold(const DescribeLockHold &) = delete;
+    DescribeLockHold &operator=(const DescribeLockHold &) = delete;
+
+  private:
+    TenantSandbox *box_ = nullptr;
+};
+
 // Test seam (compiled only with DUCKBOX_TESTING). While alive, RunTimed /
 // Describe / ExtractPlan pretends DuckDB returned this error (process-wide
 // so a Flight worker thread sees it). The text is classified by

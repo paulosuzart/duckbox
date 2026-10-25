@@ -7,7 +7,9 @@ export DUCKBOX_HANDLE_SECRET="${DUCKBOX_HANDLE_SECRET:-duckbox-dev-secret}"
 export PATH="${HOME}/.local/bin:${PATH}"
 
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Debug -DDUCKBOX_COVERAGE=ON -DCMAKE_CXX_COMPILER="${CXX:-g++}"
-cmake --build "$BUILD" --parallel --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests duckbox_schema_tests duckbox_s3_credentials_tests duckbox_s3_secret_guardrail_tests duckbox_s3_sts_tests
+# Unbounded --parallel OOMs/cancels the coverage runner while compiling the
+# instrumented integration suite. Two jobs is enough and stays under RAM.
+cmake --build "$BUILD" --parallel "${COVERAGE_JOBS:-2}" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests duckbox_schema_tests duckbox_s3_credentials_tests duckbox_s3_secret_guardrail_tests duckbox_s3_sts_tests
 export DUCKBOX_BIN="$BUILD/duckbox"
 if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
   python3 -m venv "$ROOT/.venv"

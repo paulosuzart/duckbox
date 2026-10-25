@@ -126,6 +126,17 @@ WarmupHardeningReadError::~WarmupHardeningReadError() {
 }
 
 #ifdef DUCKBOX_TESTING
+DescribeLockHold::DescribeLockHold(TenantSandbox &box) : box_(&box) {
+    box_->mu_.lock();
+}
+
+DescribeLockHold::~DescribeLockHold() {
+    if (box_) {
+        box_->mu_.unlock();
+        box_ = nullptr;
+    }
+}
+
 QueryErrorInjection::QueryErrorInjection(std::string duckdb_error) {
     std::lock_guard<std::mutex> lk(g_query_error_mu);
     g_query_error_inject = std::move(duckdb_error);
@@ -190,7 +201,7 @@ TenantSandbox::~TenantSandbox() {
 }
 
 void TenantSandbox::Passivate(const char *reason) {
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     std::lock_guard<std::mutex> interrupt(interrupt_mu_);
     bool was_warm = static_cast<bool>(db_);
     con_.reset();
@@ -212,7 +223,11 @@ void TenantSandbox::Interrupt() {
 }
 
 void TenantSandbox::Warmup(bool validate_lake) {
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
+    WarmupLocked(validate_lake);
+}
+
+void TenantSandbox::WarmupLocked(bool validate_lake) {
     if (db_) {
         Touch();
         return;
@@ -542,7 +557,7 @@ QueryOutput TenantSandbox::Execute(const std::string &sql) {
     auto t0 = std::chrono::steady_clock::now();
     try {
         Warmup(false);
-        std::lock_guard<std::mutex> hold(mu_);
+        std::lock_guard<SandboxMutex> hold(mu_);
         Touch();
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto out = RunTimed(rewritten, {});
@@ -566,7 +581,7 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql,
     auto t0 = std::chrono::steady_clock::now();
     try {
         Warmup(false);
-        std::lock_guard<std::mutex> hold(mu_);
+        std::lock_guard<SandboxMutex> hold(mu_);
         Touch();
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto out = RunTimed(rewritten, std::move(params));
@@ -589,7 +604,7 @@ QueryOutput TenantSandbox::ExecuteHandle(const std::string &sql, std::vector<ddb
     auto t0 = std::chrono::steady_clock::now();
     try {
         Warmup(false);
-        std::lock_guard<std::mutex> hold(mu_);
+        std::lock_guard<SandboxMutex> hold(mu_);
         Touch();
         auto out = RunTimed(sql, std::move(params));
         FinishQuery(policy_, key_, cold,
@@ -644,14 +659,14 @@ std::string StripOrderByLimitForExtract(const std::string &sql) {
 
 QueryOutput TenantSandbox::ExecuteUnrewritten(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     Touch();
     return RunTimed(sql, {});
 }
 
 ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();
@@ -693,7 +708,7 @@ ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::stri
 
 std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();
@@ -732,7 +747,7 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
 
 std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();
@@ -775,8 +790,20 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std
 }
 
 std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeHandleArrow(const std::string &sql) {
-    Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    // Same ceiling as proxied DoGet when query_timeout_ms is 0
+    // (lease.proxy_first_message_max_ms). GetFlightInfo used to call Warmup()
+    // first — Warmup's lock_guard (this file, Warmup) waited unbounded if a
+    // DoGet held mu_ (Arrow #31235). try_lock_until first, then WarmupLocked.
+    const int64_t bound_ms = policy_.resources.query_timeout_ms > 0
+                                 ? policy_.resources.query_timeout_ms
+                                 : daemon_.lease.proxy_first_message_max_ms;
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(bound_ms);
+    if (!mu_.try_lock_until(deadline)) {
+        throw UnavailableError("sandbox describe timed out");
+    }
+    std::lock_guard<SandboxMutex> hold(mu_, std::adopt_lock);
+    WarmupLocked(false);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();

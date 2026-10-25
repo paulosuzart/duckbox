@@ -327,6 +327,8 @@ if(DUCKBOX_COVERAGE AND NOT MSVC)
   target_link_options(duckbox_core_testing PUBLIC --coverage)
   target_link_libraries(duckbox_core PUBLIC gcov)
   target_link_libraries(duckbox_core_testing PUBLIC gcov)
+  # Tests that link duckbox_core_testing can skip megabyte-scale timing.
+  target_compile_definitions(duckbox_core_testing PUBLIC DUCKBOX_COVERAGE)
 endif()
 
 function(duckbox_link_core_deps target)
@@ -338,6 +340,14 @@ function(duckbox_link_core_deps target)
     OpenSSL::SSL
     OpenSSL::Crypto
     yaml-cpp)
+  if(NOT TARGET gRPC::grpc++)
+    find_package(gRPC CONFIG QUIET)
+  endif()
+  if(TARGET gRPC::grpc++)
+    target_link_libraries(${target} PUBLIC gRPC::grpc++)
+  else()
+    target_link_libraries(${target} PUBLIC grpc++)
+  endif()
   if(TARGET aws-cpp-sdk-s3)
     find_package(aws-cpp-sdk-core CONFIG QUIET)
     if(TARGET aws-cpp-sdk-core)
@@ -486,6 +496,7 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/storage_format_test.cpp
   test/unit/ducklake_attach_sql_test.cpp
   test/unit/lake_attach_test.cpp
+  test/unit/secret_redact_test.cpp
   test/unit/temp_directory_test.cpp
   test/unit/token_sanitize_test.cpp)
 
@@ -508,6 +519,8 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/cli_auth_test.cpp
   test/integration/python_client_auth_test.cpp
   test/integration/cluster_test.cpp
+  test/integration/proxy_timeout_test.cpp
+  test/integration/proxy_hang_test.cpp
   test/integration/signal_shutdown_test.cpp
   test/integration/connect_runtime_test.cpp
   test/integration/trigger_runtime_test.cpp

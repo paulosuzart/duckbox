@@ -14,14 +14,20 @@
 #include "sandbox/sandbox_registry.hpp"
 
 #include <arrow/flight/client.h>
-#include <arrow/flight/sql/server.h>
 #include <arrow/flight/server.h>
+#include <arrow/flight/sql/server.h>
+#include <arrow/flight/transport.h>
 #include <arrow/record_batch.h>
+#include <arrow/util/cancel.h>
 
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace duckbox {
 namespace flight {
@@ -125,7 +131,7 @@ private:
 	    const std::string &key, const std::string &token, const std::shared_ptr<::arrow::Schema> &schema);
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> MaybeProxyDoGet(
 	    const common::RedirectError &re, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
-	    const std::string &key);
+	    const std::string &key, const ::arrow::flight::ServerCallContext &context, int64_t query_timeout_ms);
 
 	node::DaemonConfig daemon_;
 	std::shared_ptr<sandbox::SandboxRegistry> defs_;
@@ -202,33 +208,109 @@ int RunNodeDrain(const NodeCliRequest &req);
 ::arrow::Result<::arrow::flight::Location> ParseFlightLocation(const std::string &url);
 
 // Handshake token is a bearer secret or JWT, never an unsigned spec payload.
+// Allow gRPC keepalive pings on the internal peer listener.
+void ApplyInternalListenerKeepalive(::arrow::flight::FlightServerOptions &opt);
+// Stops the one shared owner-side DuckDB Interrupt poller (daemon shutdown).
+void ShutdownOwnerInterruptWatch();
+
 // Node-to-node Flight client. Authenticates with the shared peer secret, never the caller.
 class PeerFlight {
 public:
-	explicit PeerFlight(std::string secret, int64_t timeout_ms = 5000);
+	explicit PeerFlight(std::string secret, int64_t timeout_ms = 5000, int64_t first_message_max_ms = 60000,
+	                    int64_t max_inflight = 256, int64_t max_inflight_per_peer = 256);
 	void set_timeout_ms(int64_t timeout_ms) {
 		timeout_ms_ = timeout_ms > 0 ? timeout_ms : 5000;
+	}
+	void set_first_message_max_ms(int64_t first_message_max_ms) {
+		first_message_max_ms_ = first_message_max_ms > 0 ? first_message_max_ms : 60000;
+	}
+	void set_max_inflight(int64_t max_inflight) {
+		max_inflight_ = max_inflight > 0 ? max_inflight : 256;
+	}
+	void set_max_inflight_per_peer(int64_t max_inflight_per_peer) {
+		max_inflight_per_peer_ = max_inflight_per_peer > 0 ? max_inflight_per_peer : 256;
 	}
 	void SetNodeDirectory(std::shared_ptr<cluster::S3NodeDirectory> nodes) {
 		nodes_ = std::move(nodes);
 	}
+	int64_t inflight() const { return global_inflight_.load(std::memory_order_acquire); }
+	// Close in-flight peer clients so hung DoGets unblock (SIGTERM / tests).
+	void Shutdown();
+	~PeerFlight();
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightInfo>> ForwardGetFlightInfo(
 	    const std::string &url, const ::arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
 	    const std::string &key);
-	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> ForwardDoGet(const std::string &url,
-	                                                                            const ::arrow::flight::Ticket &ticket,
-	                                                                            const std::string &sandbox_id,
-	                                                                            const std::string &key);
+	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> ForwardDoGet(
+	    const std::string &url, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
+	    const std::string &key, const ::arrow::flight::ServerCallContext &context, int64_t query_timeout_ms = 0);
 
 private:
-	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Client(const std::string &url);
-	::arrow::flight::FlightCallOptions CallOpt(const std::string &sandbox_id, const std::string &key) const;
+	using Deadline = std::chrono::steady_clock::time_point;
+	::arrow::flight::FlightClientOptions PeerClientOpts() const;
+	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Dial(const std::string &url,
+	                                                                    Deadline deadline);
+	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Client(const std::string &url,
+	                                                                      Deadline deadline);
+	::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>> DialTransport(
+	    const std::string &url, Deadline deadline);
+	::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>> StreamTransport(
+	    const std::string &url, Deadline deadline);
+	void AbandonStream(std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream);
+	::arrow::flight::FlightCallOptions BaseOpt(const std::string &sandbox_id, const std::string &key) const;
+	::arrow::flight::FlightCallOptions CallOpt(const std::string &sandbox_id, const std::string &key,
+	                                           Deadline deadline) const;
+	::arrow::flight::FlightCallOptions StreamOpt(const std::string &sandbox_id, const std::string &key,
+	                                            Deadline deadline) const;
+	int64_t FirstMessageBoundMs(int64_t query_timeout_ms) const;
+	class InflightGuard {
+	public:
+		InflightGuard() = default;
+		InflightGuard(std::atomic<int64_t> *global, std::shared_ptr<std::atomic<int64_t>> peer) noexcept
+		    : global_(global), peer_(std::move(peer)) {}
+		InflightGuard(InflightGuard &&o) noexcept : global_(o.global_), peer_(std::move(o.peer_)) {
+			o.global_ = nullptr;
+		}
+		InflightGuard &operator=(InflightGuard &&o) noexcept {
+			if (this != &o) {
+				Release();
+				global_ = o.global_;
+				peer_ = std::move(o.peer_);
+				o.global_ = nullptr;
+			}
+			return *this;
+		}
+		~InflightGuard() { Release(); }
+		InflightGuard(const InflightGuard &) = delete;
+		InflightGuard &operator=(const InflightGuard &) = delete;
+
+	private:
+		void Release() {
+			if (peer_) {
+				peer_->fetch_sub(1, std::memory_order_acq_rel);
+				peer_.reset();
+			}
+			if (global_) {
+				global_->fetch_sub(1, std::memory_order_acq_rel);
+				global_ = nullptr;
+			}
+		}
+		std::atomic<int64_t> *global_ = nullptr;
+		std::shared_ptr<std::atomic<int64_t>> peer_;
+	};
+	::arrow::Result<InflightGuard> AcquireInflight(const std::string &url);
 
 	std::string secret_;
 	int64_t timeout_ms_ = 5000;
+	int64_t first_message_max_ms_ = 60000;
+	int64_t max_inflight_ = 256;
+	int64_t max_inflight_per_peer_ = 256;
+	std::atomic<int64_t> global_inflight_{0};
+	std::unordered_map<std::string, std::shared_ptr<std::atomic<int64_t>>> peer_inflight_;
 	std::shared_ptr<cluster::S3NodeDirectory> nodes_;
 	std::mutex mu_;
 	std::unordered_map<std::string, std::shared_ptr<::arrow::flight::FlightClient>> clients_;
+	std::unordered_map<std::string, std::shared_ptr<::arrow::flight::internal::ClientTransport>> transports_;
+	std::vector<std::weak_ptr<::arrow::flight::internal::ClientDataStream>> inflight_;
 };
 
 class HandshakeAuthHandler : public ::arrow::flight::ServerAuthHandler {

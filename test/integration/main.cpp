@@ -1,8 +1,11 @@
 #include "check.hpp"
 #include "suite.hpp"
 
+#include <iostream>
+
 int main() {
     using namespace duckbox::test;
+    std::cerr << "integration suite sandbox_exec\n" << std::flush;
     RunSandboxExecTests();
     RunCteExecTests();
     RunCteFlightTests();
@@ -15,6 +18,9 @@ int main() {
     RunCliAuthTests();
     RunPythonClientAuthTests();
     RunClusterTests();
+    std::cerr << "integration suite proxy_timeout\n" << std::flush;
+    RunProxyTimeoutTests();
+    std::cerr << "integration suite after_proxy_timeout\n" << std::flush;
     RunSignalShutdownTests();
     RunConnectRuntimeTests();
     RunTriggerRuntimeTests();
@@ -27,5 +33,8 @@ int main() {
     RunSecretFlightTests();
     RunTempDirectoryExecTests();
     RunTokenSanitizeTests();
+    std::cerr << "integration suite proxy_hang\n" << std::flush;
+    // Last: 150 hung DoGets can detach leftover gRPC threads (Arrow #31235).
+    RunProxyHangTests();
     return ReportAndExit("integration");
 }

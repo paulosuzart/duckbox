@@ -42,7 +42,19 @@ SecretRedactionContext CollectSecretRedactionContextFromSpec(const config::Sandb
 std::string EscapeSqlString(const std::string &s); // single-quote doubling for SQL literals
 std::string ResolvePath(const std::string &base_dir, const std::string &path);
 // Operator-log redaction: configured secret values, then password=/URI/JSON/SQL.
-// Never apply this to tenant-visible error text.
+// Pattern values follow libpq conninfo rules (whitespace terminates unless
+// backslash-escaped; quoted values with escapes). '=' and ':' inside an
+// unquoted value (base64 padding, key=value lookalikes) do not end it —
+// password= keepme=yes redacts keepme=yes. URI scan (postgresql:// /
+// postgres://): two forward-only pointers find '@' and ':' to EOS.
+// Space, tab, '/', '\n', and '\r' stay inside the password (libpq).
+// If '@' is found, the password is redacted and the scan continues at
+// '@'. If no '@' remains anywhere, everything after the scheme is
+// redacted to the end of the line (DuckDB "LINE 1:" excerpts cut at
+// ~60 characters inside a password) and scanning continues on later
+// lines. Over-redacting a host in an operator log is acceptable. Key
+// names that contain a known secret key are matched (prefer
+// over-redacting). Never apply this to tenant-visible error text.
 std::string RedactSecretText(const std::string &text);
 std::string RedactSecretText(const std::string &text, const SecretRedactionContext &ctx);
 

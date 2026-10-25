@@ -129,16 +129,36 @@ void duckbox::test::RunSignalShutdownTests() {
 		       "--init-sql unknown option is reported");
 	}
 
-	int base = 18000 + static_cast<int>(::getpid() % 400) * 4;
-	int pub_a = base;
-	int int_a = base + 1;
-	int pub_b = base + 2;
-	int int_b = base + 3;
-
-	pid_t a = StartNode("127.0.0.1:" + std::to_string(pub_a), "127.0.0.1:" + std::to_string(int_a));
-	pid_t b = StartNode("127.0.0.1:" + std::to_string(pub_b), "127.0.0.1:" + std::to_string(int_b));
+	pid_t a = 0;
+	pid_t b = 0;
+	bool listening = false;
+	for (int attempt = 0; attempt < 5 && !listening; attempt++) {
+		const int base =
+		    18000 + static_cast<int>((::getpid() + attempt * 17) % 400) * 4;
+		const int pub_a = base;
+		const int int_a = base + 1;
+		const int pub_b = base + 2;
+		const int int_b = base + 3;
+		ForceKill(a);
+		ForceKill(b);
+		a = StartNode("127.0.0.1:" + std::to_string(pub_a),
+		              "127.0.0.1:" + std::to_string(int_a));
+		b = StartNode("127.0.0.1:" + std::to_string(pub_b),
+		              "127.0.0.1:" + std::to_string(int_b));
+		if (a <= 0 || b <= 0) {
+			continue;
+		}
+		listening = WaitPort(pub_a, 8000) && WaitPort(int_a, 2000) &&
+		            WaitPort(pub_b, 8000) && WaitPort(int_b, 2000);
+		if (!listening) {
+			ForceKill(a);
+			ForceKill(b);
+			a = 0;
+			b = 0;
+		}
+	}
 	Expect(a > 0 && b > 0, "two nodes fork");
-	if (!WaitPort(pub_a, 8000) || !WaitPort(int_a, 2000) || !WaitPort(pub_b, 8000) || !WaitPort(int_b, 2000)) {
+	if (!listening) {
 		ForceKill(a);
 		ForceKill(b);
 		Expect(false, "both nodes listen on public and internal ports");
