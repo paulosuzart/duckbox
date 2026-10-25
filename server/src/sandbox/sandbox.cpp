@@ -1,3 +1,8 @@
+#if defined(__APPLE__)
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE 1
+#endif
+#endif
 #include "sandbox/sandbox.hpp"
 #include "arrow/arrow_ipc.hpp"
 #include "arrow/arrow_types.hpp"
@@ -24,6 +29,12 @@
 #include <pthread.h>
 #include <sstream>
 #include <thread>
+
+#if defined(__APPLE__)
+// macOS has the symbol (10.12+) but headers hide it under feature tests.
+extern "C" int pthread_mutex_timedlock(pthread_mutex_t *mutex,
+                                       const struct timespec *abstime);
+#endif
 
 namespace duckbox {
 namespace sandbox {
