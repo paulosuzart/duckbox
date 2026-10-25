@@ -136,25 +136,11 @@ std::string LibpqUnescape(const std::string &raw) {
     return out;
 }
 
-// True when `vs` starts another conninfo field (`ident=` / `ident:`). After
-// `keyword=` libpq treats a following field as an empty value, not as the
-// value text — so `password= keepme=yes` must not swallow `keepme=yes`.
-bool NextIsKeyedField(const std::string &s, size_t vs) {
-    if (vs >= s.size() || !IsIdentChar(s[vs])) {
-        return false;
-    }
-    size_t j = vs;
-    while (j < s.size() && IsIdentChar(s[j])) {
-        j++;
-    }
-    while (j < s.size() && IsWs(s[j])) {
-        j++;
-    }
-    return j < s.size() && (s[j] == '=' || s[j] == ':');
-}
-
 void RedactKeyedValue(std::string &s, const std::string &key, bool allow_colon) {
+    std::string out;
+    size_t copy_from = 0;
     size_t i = 0;
+    bool any = false;
     while (i < s.size()) {
         if (CiEq(s, i, key)) {
             // Conservative key variants: any identifier that contains the key
@@ -188,13 +174,13 @@ void RedactKeyedValue(std::string &s, const std::string &key, bool allow_colon) 
                 i = idend;
                 continue;
             }
+            // After keyword= / keyword:, libpq takes the next unquoted token
+            // through unescaped whitespace. password= keepme=yes and
+            // password=Zm9vYmFy= are values (keepme=yes / Zm9vYmFy=), not an
+            // empty field plus a neighbour. '=' and ':' do not terminate.
             size_t vs = sep + 1;
             while (vs < s.size() && IsWs(s[vs])) {
                 vs++;
-            }
-            if (NextIsKeyedField(s, vs)) {
-                i = vs;
-                continue;
             }
             size_t ve = vs;
             if (ve < s.size() && (s[ve] == '\'' || s[ve] == '"')) {
@@ -202,16 +188,30 @@ void RedactKeyedValue(std::string &s, const std::string &key, bool allow_colon) 
             } else {
                 ve = LibpqUnquotedValueEnd(s, ve);
             }
-            s.replace(vs, ve - vs, kRedactedMarker);
-            i = vs + 10;
+            if (!any) {
+                out.reserve(s.size());
+                any = true;
+            }
+            out.append(s, copy_from, vs - copy_from);
+            out.append(kRedactedMarker);
+            copy_from = ve;
+            i = ve;
             continue;
         }
         i++;
     }
+    if (!any) {
+        return;
+    }
+    out.append(s, copy_from, s.size() - copy_from);
+    s = std::move(out);
 }
 
 void RedactSqlQuoted(std::string &s, const std::string &keyword) {
+    std::string out;
+    size_t copy_from = 0;
     size_t i = 0;
+    bool any = false;
     while (i < s.size()) {
         if (CiEq(s, i, keyword) && (i == 0 || !IsIdentChar(s[i - 1]))) {
             size_t j = i + keyword.size();
@@ -235,35 +235,77 @@ void RedactSqlQuoted(std::string &s, const std::string &keyword) {
                     }
                     ve++;
                 }
-                s.replace(vs, ve - vs, kRedactedMarker);
-                i = vs + 10;
+                if (!any) {
+                    out.reserve(s.size());
+                    any = true;
+                }
+                out.append(s, copy_from, vs - copy_from);
+                out.append(kRedactedMarker);
+                copy_from = ve;
+                i = ve;
                 continue;
             }
         }
         i++;
     }
+    if (!any) {
+        return;
+    }
+    out.append(s, copy_from, s.size() - copy_from);
+    s = std::move(out);
 }
 
 void RedactPostgresUriUserinfo(std::string &s) {
     const char *schemes[] = {"postgresql://", "postgres://"};
     for (const char *scheme : schemes) {
+        std::string out;
+        size_t copy_from = 0;
         size_t i = 0;
+        bool any = false;
         while (i < s.size()) {
             if (CiEq(s, i, scheme)) {
                 size_t user = i + std::char_traits<char>::length(scheme);
-                size_t at = s.find('@', user);
+                // Userinfo ends at '/', whitespace, or EOS — do not find('@')
+                // / find(':') through the rest of a long operator string.
+                size_t token_end = user;
+                while (token_end < s.size() && !IsWs(s[token_end]) && s[token_end] != '/') {
+                    token_end++;
+                }
+                size_t at = std::string::npos;
+                for (size_t p = user; p < token_end; p++) {
+                    if (s[p] == '@') {
+                        at = p;
+                        break;
+                    }
+                }
                 if (at == std::string::npos) {
                     i++;
                     continue;
                 }
-                size_t colon = s.find(':', user);
+                size_t colon = std::string::npos;
+                for (size_t p = user; p < at; p++) {
+                    if (s[p] == ':') {
+                        colon = p;
+                        break;
+                    }
+                }
                 if (colon != std::string::npos && colon < at) {
-                    s.replace(colon + 1, at - (colon + 1), kRedactedMarker);
-                    i = colon + 1 + 10;
+                    if (!any) {
+                        out.reserve(s.size());
+                        any = true;
+                    }
+                    out.append(s, copy_from, (colon + 1) - copy_from);
+                    out.append(kRedactedMarker);
+                    copy_from = at;
+                    i = at;
                     continue;
                 }
             }
             i++;
+        }
+        if (any) {
+            out.append(s, copy_from, s.size() - copy_from);
+            s = std::move(out);
         }
     }
 }

@@ -3,8 +3,12 @@
 
 #include "lake/lake.hpp"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <iostream>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -151,24 +155,50 @@ void duckbox::test::RunSecretRedactPatternTests() {
            "combined string redacts the URI password");
     Expect(combined.find("127.0.0.1") != std::string::npos, "combined string keeps the URI host");
 
-    // Empty libpq value: whitespace after '=' then the next keyword=value field.
+    // libpq: after password=, the value runs to the next unescaped whitespace.
+    // password= keepme=yes is password=`keepme=yes`, not an empty password.
     auto empty_next = RedactSecretText("password= keepme=yes");
-    Expect(empty_next.find("keepme=yes") != std::string::npos,
-           "empty password= does not swallow the next field");
-    Expect(empty_next.find(kRedactedMarker) == std::string::npos,
-           "empty password= before keepme= is not a secret value");
+    ExpectNoSecret(empty_next, "keepme=yes", "password= keepme=yes redacts keepme=yes");
+    Expect(empty_next == std::string("password= ") + kRedactedMarker,
+           "password= keepme=yes is replaced in full");
     auto empty_next_ws = RedactSecretText("password= keepme =yes");
-    Expect(empty_next_ws.find("keepme =yes") != std::string::npos,
-           "empty password= does not swallow a spaced next field");
+    ExpectNoSecret(empty_next_ws, "keepme", "password= keepme =yes redacts keepme");
+    Expect(empty_next_ws.find(" =yes") != std::string::npos,
+           "unescaped space still ends the value after keepme");
     auto empty_secret_next = RedactSecretText("password= secret=next-secret-9");
-    Expect(empty_secret_next.find("next-secret-9") == std::string::npos,
-           "empty password= still redacts the following secret=");
-    Expect(empty_secret_next.find("password=") != std::string::npos, "empty password= key remains");
+    ExpectNoSecret(empty_secret_next, "next-secret-9",
+                   "password= secret=next-secret-9 redacts the whole value");
+    Expect(empty_secret_next.find("password=") != std::string::npos, "password= key remains");
     auto empty_colon_next = RedactSecretText("password= host:pg");
-    Expect(empty_colon_next.find("host:pg") != std::string::npos,
-           "empty password= does not swallow a following key: field");
+    ExpectNoSecret(empty_colon_next, "host:pg", "password= host:pg redacts host:pg");
     auto empty_eos = RedactSecretText("password=");
     Expect(empty_eos.find("password=") != std::string::npos, "password= at end of string is kept");
+
+    // Base64 '=' padding and ':' stay inside the unquoted value (libpq).
+    auto b64 = RedactSecretText("password=Zm9vYmFy=");
+    ExpectNoSecret(b64, "Zm9vYmFy=", "base64 password with = padding is redacted");
+    Expect(b64 == std::string("password=") + kRedactedMarker,
+           "base64 padding is not treated as a following field");
+    auto b64_std = RedactSecretText("password=QUJDREVGRw==");
+    ExpectNoSecret(b64_std, "QUJDREVGRw==", "standard base64 password with == padding is redacted");
+    auto b64_token = RedactSecretText("token=c2VjcmV0dG9rZW4=");
+    ExpectNoSecret(b64_token, "c2VjcmV0dG9rZW4=", "base64 token with = padding is redacted");
+    auto colon_val = RedactSecretText("password=hunter2:rest");
+    ExpectNoSecret(colon_val, "hunter2:rest", "password value containing : is redacted");
+    Expect(colon_val.find("hunter2") == std::string::npos &&
+               colon_val.find("rest") == std::string::npos,
+           "neither side of : in a password value leaks");
+    auto colon_xy = RedactSecretText("password: x: y");
+    ExpectNoSecret(colon_xy, "x:", "password: x: y redacts x:");
+    Expect(colon_xy == std::string("password: ") + kRedactedMarker + " y",
+           "password: x: y keeps the following field after unescaped space");
+    auto e2e_dsn = RedactSecretText(
+        "SELECT CAST('dbname=lake host=pg password=Zm9vYmFyLEAK= sslmode=disable' AS INTEGER)");
+    ExpectNoSecret(e2e_dsn, "Zm9vYmFyLEAK=", "e2e CAST DSN redacts base64 password with padding");
+    Expect(e2e_dsn.find("LEAK") == std::string::npos,
+           "e2e CAST DSN does not leak the password tail");
+    Expect(e2e_dsn.find("sslmode=disable") != std::string::npos, "e2e CAST DSN keeps sslmode");
+    Expect(e2e_dsn.find("dbname=lake") != std::string::npos, "e2e CAST DSN keeps dbname");
 
     // Intended over-redaction: any identifier containing a known key.
     auto token_count = RedactSecretText("token_count=over-redact-token-1");
@@ -205,50 +235,131 @@ void duckbox::test::RunSecretRedactPatternTests() {
                pairs.find("pwd-secret-3") == std::string::npos,
            "multiple key=value pairs are each redacted");
 
-    // Linear scan: ~1 MB of key-shaped text without separators must stay fast.
-    // Bound is 60s so -O0 --coverage CI runners still pass; O(n^2) on 1MB does not.
-    const size_t kBig = static_cast<size_t>(1) << 20;
-    const auto kLinearBound = std::chrono::seconds(60);
-    auto expect_linear = [&](const std::string &input, const char *msg) {
-        auto t0 = std::chrono::steady_clock::now();
-        auto out = RedactSecretText(input);
-        auto elapsed = std::chrono::steady_clock::now() - t0;
-        Expect(elapsed < kLinearBound, msg);
-        return out;
+    // Scaling: median of 5 runs at 256 KB and 4 MB (linear ≈16x, quadratic ≈256x).
+    // Ratio < 64 leaves slack for shared CI noise. No absolute ceiling: 4 MB at
+    // -O0 --coverage is a few seconds and a fixed bound would flake.
+    const size_t kSmall = static_cast<size_t>(256) << 10;
+    const size_t kBig = static_cast<size_t>(4) << 20;
+    constexpr int kRuns = 5;
+    constexpr double kScaleLimit = 64.0;
+
+    auto median_ns = [](std::array<std::chrono::nanoseconds, kRuns> samples) {
+        std::sort(samples.begin(), samples.end());
+        return samples[kRuns / 2];
+    };
+    auto time_median = [&](const std::string &input) {
+        std::array<std::chrono::nanoseconds, kRuns> samples{};
+        std::string out;
+        for (int r = 0; r < kRuns; r++) {
+            auto t0 = std::chrono::steady_clock::now();
+            out = RedactSecretText(input);
+            samples[r] = std::chrono::steady_clock::now() - t0;
+        }
+        return std::make_pair(std::move(out), median_ns(samples));
+    };
+    auto expect_scales = [&](auto make, auto verify, const char *label) {
+        auto small = make(kSmall);
+        auto big = make(kBig);
+        auto [small_out, med_s] = time_median(small);
+        auto [big_out, med_b] = time_median(big);
+        verify(small, small_out);
+        verify(big, big_out);
+        double denom = std::max(static_cast<double>(med_s.count()), 1.0);
+        double ratio = static_cast<double>(med_b.count()) / denom;
+        std::clog << "secret_redact scale " << label << " median 4MB/256KB = " << ratio
+                  << " (256KB " << med_s.count() << "ns, 4MB " << med_b.count() << "ns)\n";
+        Expect(ratio < kScaleLimit, std::string(label) + " median 4MB/256KB ratio " +
+                                        std::to_string(ratio) + " exceeds 64");
     };
 
-    std::string repeated;
-    repeated.reserve(kBig + 8);
-    while (repeated.size() < kBig) {
-        repeated += "password";
-    }
-    auto repeated_out = expect_linear(repeated, "1MB repeated password finishes in < 60s");
-    Expect(repeated_out == repeated, "repeated password without '=' is unchanged");
+    auto make_repeated = [](size_t n) {
+        std::string s;
+        s.reserve(n + 8);
+        while (s.size() < n) {
+            s += "password";
+        }
+        return s;
+    };
+    auto make_spaced = [](size_t n) {
+        std::string s;
+        s.reserve(n + 16);
+        while (s.size() < n) {
+            s += "password ";
+        }
+        return s;
+    };
+    auto make_mixed = [](size_t n) {
+        std::string s;
+        s.reserve(n + 64);
+        const char *word =
+            "password token_count tokenizer secretary_name key_identifier passwordless_login ";
+        while (s.size() < n) {
+            s += word;
+        }
+        return s;
+    };
+    auto make_cast = [](size_t n) {
+        std::string s = "SELECT CAST('";
+        s.reserve(n + 32);
+        while (s.size() < n) {
+            s += "password";
+        }
+        s += "' AS INTEGER)";
+        return s;
+    };
 
-    std::string spaced;
-    spaced.reserve(kBig + 16);
-    while (spaced.size() < kBig) {
-        spaced += "password ";
-    }
-    auto spaced_out = expect_linear(spaced, "1MB spaced password finishes in < 60s");
-    Expect(spaced_out == spaced, "spaced password without '=' is unchanged");
+    auto unchanged = [](const char *msg) {
+        return [msg](const std::string &in, const std::string &out) { Expect(out == in, msg); };
+    };
+    expect_scales(make_repeated, unchanged("repeated password without '=' is unchanged"),
+                  "repeated password");
+    expect_scales(make_spaced, unchanged("spaced password without '=' is unchanged"),
+                  "spaced password");
+    expect_scales(make_mixed, unchanged("mixed key-identifiers without separators are unchanged"),
+                  "mixed key-identifiers");
+    expect_scales(make_cast, unchanged("CAST password literal without '=' is unchanged"),
+                  "CAST password literal");
 
-    std::string mixed;
-    mixed.reserve(kBig + 64);
-    const char *mixed_word =
-        "password token_count tokenizer secretary_name key_identifier passwordless_login ";
-    while (mixed.size() < kBig) {
-        mixed += mixed_word;
-    }
-    auto mixed_out = expect_linear(mixed, "1MB mixed key-identifiers finish in < 60s");
-    Expect(mixed_out == mixed, "mixed key-identifiers without separators are unchanged");
-
-    std::string cast_lit = "SELECT CAST('";
-    cast_lit.reserve(kBig + 32);
-    while (cast_lit.size() < kBig) {
-        cast_lit += "password";
-    }
-    cast_lit += "' AS INTEGER)";
-    auto cast_out = expect_linear(cast_lit, "1MB CAST password literal finishes in < 60s");
-    Expect(cast_out == cast_lit, "CAST password literal without '=' is unchanged");
+    auto make_pw_eq = [](size_t n) {
+        std::string s;
+        s.reserve(n + 16);
+        while (s.size() < n) {
+            s += "password=x ";
+        }
+        return s;
+    };
+    auto make_sql_secret = [](size_t n) {
+        std::string s;
+        s.reserve(n + 16);
+        while (s.size() < n) {
+            s += "SECRET 'x' ";
+        }
+        return s;
+    };
+    auto make_uri = [](size_t n) {
+        std::string s;
+        s.reserve(n + 16);
+        while (s.size() < n) {
+            s += "postgresql://";
+        }
+        return s;
+    };
+    expect_scales(
+        make_pw_eq,
+        [](const std::string &, const std::string &out) {
+            Expect(out.find("password=x") == std::string::npos, "repeated password=x is redacted");
+            Expect(out.find(kRedactedMarker) != std::string::npos,
+                   "repeated password=x uses the marker");
+        },
+        "repeated password=x");
+    expect_scales(
+        make_sql_secret,
+        [](const std::string &, const std::string &out) {
+            Expect(out.find("SECRET 'x'") == std::string::npos, "repeated SECRET 'x' is redacted");
+            Expect(out.find(kRedactedMarker) != std::string::npos,
+                   "repeated SECRET 'x' uses the marker");
+        },
+        "repeated SECRET 'x'");
+    expect_scales(make_uri, unchanged("repeated postgresql:// without @ is unchanged"),
+                  "repeated postgresql://");
 }

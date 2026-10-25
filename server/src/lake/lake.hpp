@@ -43,8 +43,10 @@ std::string EscapeSqlString(const std::string &s); // single-quote doubling for 
 std::string ResolvePath(const std::string &base_dir, const std::string &path);
 // Operator-log redaction: configured secret values, then password=/URI/JSON/SQL.
 // Pattern values follow libpq conninfo rules (whitespace terminates unless
-// backslash-escaped; quoted values with escapes). Key names that contain a
-// known secret key are matched (prefer over-redacting). Never apply this to
+// backslash-escaped; quoted values with escapes). '=' and ':' inside an
+// unquoted value (base64 padding, key=value lookalikes) do not end it —
+// password= keepme=yes redacts keepme=yes. Key names that contain a known
+// secret key are matched (prefer over-redacting). Never apply this to
 // tenant-visible error text.
 std::string RedactSecretText(const std::string &text);
 std::string RedactSecretText(const std::string &text, const SecretRedactionContext &ctx);
