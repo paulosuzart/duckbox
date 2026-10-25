@@ -73,6 +73,10 @@ void duckbox::test::RunTokenSanitizeTests() {
     Expect(ResolveBearerToken("ok-token\n") == "ok-token",
            "trailing newline from a file is trimmed");
     Expect(ResolveBearerToken("\r\nok-token\r\n") == "ok-token", "surrounding CRLF is trimmed");
+    Expect(ResolveBearerToken("!ok-token~") == "!ok-token~",
+           "bang and tilde (0x21/0x7E) are accepted");
+    Expect(ResolveBearerToken("\v\fok-token\f\v") == "ok-token",
+           "surrounding vertical tab and form feed are trimmed");
 
     token_env.Set("  env-token  ");
     Expect(ResolveBearerToken("") == "env-token", "DUCKBOX_TOKEN surrounding spaces are trimmed");
@@ -122,4 +126,16 @@ void duckbox::test::RunTokenSanitizeTests() {
     huge[3] = 'K';
     huge[4] = '\xFF';
     ExpectRejects(huge, "LEAK", "100 KiB token fails without echoing");
+
+    std::string huge_ascii(100 * 1024, 'A');
+    huge_ascii.replace(0, 13, "LEAKLONGASCII");
+    try {
+        Expect(ResolveBearerToken(huge_ascii) == huge_ascii,
+               "100 KiB visible-ASCII token is accepted by ResolveBearerToken");
+    } catch (const std::exception &e) {
+        std::string w = e.what();
+        Expect(w.find("LEAKLONGASCII") == std::string::npos,
+               "100 KiB visible-ASCII error must not echo the token");
+        Expect(false, std::string("100 KiB visible-ASCII token should be accepted, got: ") + w);
+    }
 }

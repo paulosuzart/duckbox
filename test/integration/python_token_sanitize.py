@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "examples" / "python"))
 from duckbox_client import (  # noqa: E402
     TokenError,
     create_sandbox,
+    format_error,
     query,
     resolve_token,
 )
@@ -66,6 +67,10 @@ def test_resolve_token() -> None:
         _fail("trailing newline must be trimmed")
     if resolve_token("\r\nok-token\r\n") != "ok-token":
         _fail("surrounding CRLF must be trimmed")
+    if resolve_token("!ok-token~") != "!ok-token~":
+        _fail("bang and tilde (0x21/0x7E) must be accepted")
+    if resolve_token("\v\fok-token\f\v") != "ok-token":
+        _fail("surrounding vertical tab and form feed must be trimmed")
 
     os.environ["DUCKBOX_TOKEN"] = "  env-token  "
     try:
@@ -94,6 +99,12 @@ def test_resolve_token() -> None:
     _expect_reject("\u00a0LEAKTOK", "LEAKTOK", "leading NBSP is not trimmed")
     _expect_reject("LEAK\tTOK", "LEAK", "tab inside the token")
     _expect_reject("A" * (100 * 1024 - 1) + "\u00e9", "AAAA", "100 KiB token fails without echoing")
+
+    long_ascii = "LEAKLONGASCII" + "A" * (100 * 1024 - 13)
+    got = resolve_token(long_ascii)
+    if got != long_ascii:
+        _fail("100 KiB visible-ASCII token must be accepted by resolve_token")
+    print("ok 100 KiB visible-ASCII token is accepted")
 
     os.environ["DUCKBOX_TOKEN"] = "LEAKTOK\u00e9X"
     try:
@@ -129,6 +140,30 @@ def test_query_wrapper(url: str, token: str, spec: str) -> None:
     if ids != [1]:
         _fail("query() wrapper did not see the tenant row")
     print("ok duckbox_client.query() wrapper")
+
+    long_ascii = "LEAKLONGASCII" + "A" * (100 * 1024 - 13)
+    try:
+        create_sandbox(
+            sandbox="py-long-ascii",
+            key="tenant_21:user_sergio",
+            spec=spec,
+            url=url,
+            caller="analyst-svc",
+            token=long_ascii,
+        )
+    except Exception as exc:  # noqa: BLE001
+        text = format_error(exc)
+        raw = str(exc)
+        _expect_no_token(text, ["LEAKLONGASCII"], "long ASCII create_sandbox")
+        _expect_no_token(raw, ["LEAKLONGASCII"], "long ASCII create_sandbox")
+        low = (text + " " + raw).lower()
+        if "invalid bearer token" in low:
+            _fail("100 KiB visible-ASCII token was rejected as invalid")
+        if "metadata size exceeds limit" in low or "unauthenticated" in low or "unauth" in low:
+            print("ok 100 KiB visible-ASCII token failed cleanly")
+            return
+        _fail(f"100 KiB visible-ASCII token raised an unexpected error: {text}")
+    print("ok 100 KiB visible-ASCII token was accepted end to end")
 
 
 def main() -> int:
