@@ -7,8 +7,10 @@
 #include <array>
 #include <chrono>
 #include <iostream>
+#include <random>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -18,6 +20,254 @@ void ExpectNoSecret(const std::string &redacted, const std::string &secret,
     duckbox::test::Expect(redacted.find(duckbox::lake::kRedactedMarker) != std::string::npos,
                           msg + " (marker)");
 }
+
+// In-place reference for the pattern path (libpq values, URI userinfo through
+// '/' until whitespace). Used only to assert production is never weaker.
+namespace refimpl {
+
+bool IsIdent(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+bool IsWs(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+bool CiEq(const std::string &s, size_t pos, const char *pat) {
+    size_t n = std::char_traits<char>::length(pat);
+    if (pos > s.size() || s.size() - pos < n) {
+        return false;
+    }
+    for (size_t k = 0; k < n; k++) {
+        char a = s[pos + k];
+        char b = pat[k];
+        if (a >= 'A' && a <= 'Z') {
+            a = static_cast<char>(a - 'A' + 'a');
+        }
+        if (b >= 'A' && b <= 'Z') {
+            b = static_cast<char>(b - 'A' + 'a');
+        }
+        if (a != b) {
+            return false;
+        }
+    }
+    return true;
+}
+
+size_t QuotedEnd(const std::string &s, size_t vs) {
+    if (vs >= s.size()) {
+        return vs;
+    }
+    char q = s[vs];
+    size_t ve = vs + 1;
+    while (ve < s.size()) {
+        if (s[ve] == '\\' && ve + 1 < s.size()) {
+            ve += 2;
+            continue;
+        }
+        if (s[ve] == q && ve + 1 < s.size() && s[ve + 1] == q) {
+            ve += 2;
+            continue;
+        }
+        if (s[ve] == q) {
+            return ve + 1;
+        }
+        ve++;
+    }
+    return ve;
+}
+
+size_t UnquotedEnd(const std::string &s, size_t vs) {
+    size_t ve = vs;
+    while (ve < s.size()) {
+        if (s[ve] == '\\' && ve + 1 < s.size()) {
+            ve += 2;
+            continue;
+        }
+        if (IsWs(s[ve])) {
+            break;
+        }
+        ve++;
+    }
+    return ve;
+}
+
+void ReplaceRec(std::string &s, size_t vs, size_t ve, std::vector<std::string> &secrets) {
+    if (ve > vs) {
+        secrets.push_back(s.substr(vs, ve - vs));
+    }
+    s.replace(vs, ve - vs, duckbox::lake::kRedactedMarker);
+}
+
+void RedactKeyed(std::string &s, const char *key, bool allow_colon,
+                 std::vector<std::string> &secrets) {
+    const size_t klen = std::char_traits<char>::length(key);
+    size_t i = 0;
+    while (i < s.size()) {
+        if (CiEq(s, i, key)) {
+            size_t left = i;
+            while (left > 0 && IsIdent(s[left - 1])) {
+                left--;
+            }
+            size_t idend = i + klen;
+            while (idend < s.size() && IsIdent(s[idend])) {
+                idend++;
+            }
+            size_t after = idend;
+            if (after < s.size() && left > 0 && (s[after] == '"' || s[after] == '\'') &&
+                s[left - 1] == s[after]) {
+                after++;
+            }
+            size_t sep = after;
+            while (sep < s.size() && IsWs(s[sep])) {
+                sep++;
+            }
+            bool ok = sep < s.size() && (s[sep] == '=' || (allow_colon && s[sep] == ':'));
+            if (!ok) {
+                i = idend;
+                continue;
+            }
+            size_t vs = sep + 1;
+            while (vs < s.size() && IsWs(s[vs])) {
+                vs++;
+            }
+            size_t ve = vs;
+            if (ve < s.size() && (s[ve] == '\'' || s[ve] == '"')) {
+                ve = QuotedEnd(s, ve);
+            } else {
+                ve = UnquotedEnd(s, ve);
+            }
+            ReplaceRec(s, vs, ve, secrets);
+            i = vs + 10;
+            continue;
+        }
+        i++;
+    }
+}
+
+void RedactSql(std::string &s, const char *keyword, std::vector<std::string> &secrets) {
+    const size_t klen = std::char_traits<char>::length(keyword);
+    size_t i = 0;
+    while (i < s.size()) {
+        if (CiEq(s, i, keyword) && (i == 0 || !IsIdent(s[i - 1]))) {
+            size_t j = i + klen;
+            while (j < s.size() && (IsWs(s[j]) || s[j] == '=')) {
+                j++;
+            }
+            if (j < s.size() && s[j] == '\'') {
+                size_t vs = j + 1;
+                size_t ve = vs;
+                while (ve < s.size()) {
+                    if (s[ve] == '\\' && ve + 1 < s.size()) {
+                        ve += 2;
+                        continue;
+                    }
+                    if (s[ve] == '\'' && ve + 1 < s.size() && s[ve + 1] == '\'') {
+                        ve += 2;
+                        continue;
+                    }
+                    if (s[ve] == '\'') {
+                        break;
+                    }
+                    ve++;
+                }
+                ReplaceRec(s, vs, ve, secrets);
+                i = vs + 10;
+                continue;
+            }
+        }
+        i++;
+    }
+}
+
+void RedactUri(std::string &s, std::vector<std::string> &secrets) {
+    const char *schemes[] = {"postgresql://", "postgres://"};
+    for (const char *scheme : schemes) {
+        size_t i = 0;
+        while (i < s.size()) {
+            if (CiEq(s, i, scheme)) {
+                size_t user = i + std::char_traits<char>::length(scheme);
+                size_t token_end = user;
+                while (token_end < s.size() && !IsWs(s[token_end])) {
+                    token_end++;
+                }
+                size_t at = std::string::npos;
+                for (size_t p = user; p < token_end; p++) {
+                    if (s[p] == '@') {
+                        at = p;
+                        break;
+                    }
+                }
+                if (at == std::string::npos) {
+                    i++;
+                    continue;
+                }
+                size_t colon = std::string::npos;
+                for (size_t p = user; p < at; p++) {
+                    if (s[p] == ':') {
+                        colon = p;
+                        break;
+                    }
+                }
+                if (colon != std::string::npos && colon < at) {
+                    ReplaceRec(s, colon + 1, at, secrets);
+                    i = colon + 1 + 10;
+                    continue;
+                }
+            }
+            i++;
+        }
+    }
+}
+
+std::pair<std::string, std::vector<std::string>> Redact(const std::string &text) {
+    std::string s = text;
+    std::vector<std::string> secrets;
+    const char *colon_keys[] = {"aws_secret_access_key",
+                                "aws_access_key_id",
+                                "aws_session_token",
+                                "secret_access_key",
+                                "session_token",
+                                "sslpassword",
+                                "pgpassword",
+                                "passfile",
+                                "password",
+                                "secret"};
+    const char *eq_only[] = {"access_key", "key_id", "token", "pwd"};
+    const char *sql_keys[] = {"SESSION_TOKEN", "KEY_ID",   "SECRET",
+                              "sslpassword",   "password", "secret"};
+    for (const char *k : colon_keys) {
+        RedactKeyed(s, k, true, secrets);
+    }
+    for (const char *k : eq_only) {
+        RedactKeyed(s, k, false, secrets);
+    }
+    for (const char *k : sql_keys) {
+        RedactSql(s, k, secrets);
+    }
+    RedactUri(s, secrets);
+    return {std::move(s), std::move(secrets)};
+}
+
+void ExpectNeverWeaker(const std::string &input, const std::string &got, const char *label) {
+    auto [ref, secrets] = Redact(input);
+    for (const auto &secret : secrets) {
+        if (secret.empty()) {
+            continue;
+        }
+        // Still visible in the reference (another occurrence, or a key).
+        if (ref.find(secret) != std::string::npos) {
+            continue;
+        }
+        if (std::string(duckbox::lake::kRedactedMarker).find(secret) != std::string::npos) {
+            continue;
+        }
+        duckbox::test::Expect(got.find(secret) == std::string::npos,
+                              std::string(label) + " leaked reference secret: " + secret);
+    }
+}
+
+} // namespace refimpl
 
 } // namespace
 
@@ -144,6 +394,27 @@ void duckbox::test::RunSecretRedactPatternTests() {
                std::string::npos,
            "URI without a password is left intact");
 
+    // '/' is inside userinfo (standard base64). Must not stop the '@' search.
+    auto uri_slash = RedactSecretText("postgresql://u:paLEAK6/ssLEAK6@h/db");
+    ExpectNoSecret(uri_slash, "paLEAK6/ssLEAK6", "URI password containing / is redacted");
+    Expect(uri_slash.find("LEAK") == std::string::npos, "URI password with / does not leak a tail");
+    Expect(uri_slash.find("h/db") != std::string::npos, "URI host after / password stays visible");
+    auto uri_slash_cast =
+        RedactSecretText("SELECT CAST('Zz postgresql://u:paLEAK6/ssLEAK6@h/db' AS INTEGER)");
+    ExpectNoSecret(uri_slash_cast, "paLEAK6/ssLEAK6", "CAST DSN URI password with / is redacted");
+    Expect(uri_slash_cast.find("LEAK") == std::string::npos, "CAST DSN URI with / does not leak");
+    auto uri_b64 = RedactSecretText("postgresql://u:YWI/jZGVm+Zw==@h/db");
+    ExpectNoSecret(uri_b64, "YWI/jZGVm+Zw==", "URI base64 password with / is redacted");
+    Expect(HasCredentialLeak("postgresql://u:paLEAK6/ssLEAK6@h/db"),
+           "HasCredentialLeak sees userinfo when password contains /");
+    Expect(!HasCredentialLeak("postgresql://postgresql://"),
+           "HasCredentialLeak is false for postgresql:// without @");
+    Expect(!HasCredentialLeak("://://://"), "HasCredentialLeak is false for :// without @");
+    Expect(!HasCredentialLeak("http://user@host"),
+           "://user@ without a password colon is not userinfo");
+    Expect(HasCredentialLeak("http://user@host postgresql://u:p@h"),
+           "HasUriUserinfo continues after ://user@ to a later userinfo");
+
     // Combined pattern-only string: escaped space, prefixed key, URI.
     auto combined = RedactSecretText("password=FAKE\\ 37 mypassword=other-secret-8 "
                                      "postgresql://u:uri-secret-1@127.0.0.1/lake");
@@ -235,40 +506,92 @@ void duckbox::test::RunSecretRedactPatternTests() {
                pairs.find("pwd-secret-3") == std::string::npos,
            "multiple key=value pairs are each redacted");
 
-    // Scaling: median of 5 runs at 256 KB and 4 MB (linear ≈16x, quadratic ≈256x).
-    // Ratio < 64 leaves slack for shared CI noise. No absolute ceiling: 4 MB at
-    // -O0 --coverage is a few seconds and a fixed bound would flake.
-    const size_t kSmall = static_cast<size_t>(256) << 10;
-    const size_t kBig = static_cast<size_t>(4) << 20;
+    // Differential: production must not be weaker than the in-place reference.
+    std::vector<std::string> diff_inputs = {
+        "password=FAKE\\ 37",
+        "password= keepme=yes",
+        "password=Zm9vYmFy=",
+        "token=c2VjcmV0dG9rZW4=",
+        "password=hunter2:rest",
+        "password: x: y",
+        "SELECT CAST('dbname=lake host=pg password=Zm9vYmFyLEAK= sslmode=disable' AS INTEGER)",
+        "postgresql://u:uri-secret-99@127.0.0.1:5432/lake",
+        "postgresql://u:paLEAK6/ssLEAK6@h/db",
+        "SELECT CAST('Zz postgresql://u:paLEAK6/ssLEAK6@h/db' AS INTEGER)",
+        "postgresql://u:YWI/jZGVm+Zw==@h/db",
+        "postgres://duckbox:short-secret@pg/lake",
+        "postgresql://duckbox@127.0.0.1/lake",
+        "SECRET 'quoted-secret-1'",
+        "mypassword=prefixed-secret-9",
+        "password=x SECRET 'y' postgresql://u:z@h/db",
+    };
+    std::mt19937 rng(85);
+    const char *frags[] = {
+        "password=",
+        "secret=",
+        "token=",
+        "password=Zm9vYmFy=",
+        "password= keepme=yes ",
+        "postgresql://u:p@h/db ",
+        "postgresql://u:pa/ss@h/db ",
+        "postgresql://u:YWI/jZGVm+Zw==@h/db ",
+        "postgres://u:x@h ",
+        "SECRET 'abc' ",
+        "://",
+        "pgsqlx://",
+        "host=pg ",
+        "dbname=lake ",
+        "password: x: y ",
+        "aaaa",
+        "////",
+        "@@@@",
+    };
+    for (int n = 0; n < 160; n++) {
+        std::string s;
+        int parts = 1 + static_cast<int>(rng() % 8);
+        for (int p = 0; p < parts; p++) {
+            s += frags[rng() % (sizeof(frags) / sizeof(frags[0]))];
+        }
+        diff_inputs.push_back(std::move(s));
+    }
+    for (const auto &in : diff_inputs) {
+        refimpl::ExpectNeverWeaker(in, RedactSecretText(in), "differential");
+    }
+
+    // Scaling: 128 KB vs 2 MB (linear ≈16x). Median of 5 only at 2 MB; one run
+    // at 128 KB. Ratio < 64. Times RedactSecretText and HasCredentialLeak.
+    const size_t kSmall = static_cast<size_t>(128) << 10;
+    const size_t kBig = static_cast<size_t>(2) << 20;
     constexpr int kRuns = 5;
     constexpr double kScaleLimit = 64.0;
+    auto scale_t0 = std::chrono::steady_clock::now();
 
-    auto median_ns = [](std::array<std::chrono::nanoseconds, kRuns> samples) {
-        std::sort(samples.begin(), samples.end());
-        return samples[kRuns / 2];
-    };
-    auto time_median = [&](const std::string &input) {
-        std::array<std::chrono::nanoseconds, kRuns> samples{};
-        std::string out;
-        for (int r = 0; r < kRuns; r++) {
-            auto t0 = std::chrono::steady_clock::now();
-            out = RedactSecretText(input);
-            samples[r] = std::chrono::steady_clock::now() - t0;
-        }
-        return std::make_pair(std::move(out), median_ns(samples));
+    auto time_once = [&](const std::string &input) {
+        auto t0 = std::chrono::steady_clock::now();
+        auto out = RedactSecretText(input);
+        (void)HasCredentialLeak(input);
+        return std::make_pair(std::move(out), std::chrono::steady_clock::now() - t0);
     };
     auto expect_scales = [&](auto make, auto verify, const char *label) {
         auto small = make(kSmall);
         auto big = make(kBig);
-        auto [small_out, med_s] = time_median(small);
-        auto [big_out, med_b] = time_median(big);
+        auto [small_out, small_t] = time_once(small);
+        std::array<std::chrono::nanoseconds, kRuns> samples{};
+        std::string big_out;
+        for (int r = 0; r < kRuns; r++) {
+            auto [o, t] = time_once(big);
+            big_out = std::move(o);
+            samples[r] = t;
+        }
+        std::sort(samples.begin(), samples.end());
+        auto med_b = samples[kRuns / 2];
         verify(small, small_out);
         verify(big, big_out);
-        double denom = std::max(static_cast<double>(med_s.count()), 1.0);
+        double denom = std::max(static_cast<double>(small_t.count()), 1.0);
         double ratio = static_cast<double>(med_b.count()) / denom;
-        std::clog << "secret_redact scale " << label << " median 4MB/256KB = " << ratio
-                  << " (256KB " << med_s.count() << "ns, 4MB " << med_b.count() << "ns)\n";
-        Expect(ratio < kScaleLimit, std::string(label) + " median 4MB/256KB ratio " +
+        std::clog << "secret_redact scale " << label << " median 2MB/128KB = " << ratio
+                  << " (128KB " << small_t.count() << "ns, 2MB " << med_b.count() << "ns)\n";
+        Expect(ratio < kScaleLimit, std::string(label) + " median 2MB/128KB ratio " +
                                         std::to_string(ratio) + " exceeds 64");
     };
 
@@ -360,6 +683,38 @@ void duckbox::test::RunSecretRedactPatternTests() {
                    "repeated SECRET 'x' uses the marker");
         },
         "repeated SECRET 'x'");
-    expect_scales(make_uri, unchanged("repeated postgresql:// without @ is unchanged"),
-                  "repeated postgresql://");
+
+    auto no_userinfo = [](const char *msg) {
+        return [msg](const std::string &in, const std::string &out) {
+            Expect(out == in, msg);
+            Expect(!HasCredentialLeak(in), std::string(msg) + " (HasCredentialLeak)");
+        };
+    };
+    auto make_colon_slash = [](size_t n) {
+        std::string s;
+        s.reserve(n + 8);
+        while (s.size() < n) {
+            s += "://";
+        }
+        return s;
+    };
+    auto make_pgsqlx = [](size_t n) {
+        std::string s;
+        s.reserve(n + 16);
+        while (s.size() < n) {
+            s += "pgsqlx://";
+        }
+        return s;
+    };
+    expect_scales(make_colon_slash, no_userinfo("repeated :// without @ is unchanged"),
+                  "repeated ://");
+    expect_scales(make_pgsqlx, no_userinfo("repeated pgsqlx:// without @ is unchanged"),
+                  "repeated pgsqlx://");
+    expect_scales(make_uri, no_userinfo("repeated postgresql:// without @ is not userinfo"),
+                  "HasCredentialLeak postgresql://");
+
+    auto scale_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scale_t0)
+            .count();
+    std::clog << "secret_redact scale block " << scale_ms << " ms\n";
 }

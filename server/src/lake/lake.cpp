@@ -262,32 +262,29 @@ void RedactPostgresUriUserinfo(std::string &s) {
         size_t copy_from = 0;
         size_t i = 0;
         bool any = false;
+        const size_t slen = std::char_traits<char>::length(scheme);
         while (i < s.size()) {
             if (CiEq(s, i, scheme)) {
-                size_t user = i + std::char_traits<char>::length(scheme);
-                // Userinfo ends at '/', whitespace, or EOS — do not find('@')
-                // / find(':') through the rest of a long operator string.
-                size_t token_end = user;
-                while (token_end < s.size() && !IsWs(s[token_end]) && s[token_end] != '/') {
-                    token_end++;
-                }
+                size_t user = i + slen;
+                // Userinfo ends at whitespace (or EOS), not '/': standard base64
+                // passwords contain '/'. One forward scan records the first ':'
+                // and stops at '@' — never find() to the end, never rescan.
+                size_t colon = std::string::npos;
                 size_t at = std::string::npos;
-                for (size_t p = user; p < token_end; p++) {
+                size_t p = user;
+                while (p < s.size() && !IsWs(s[p])) {
                     if (s[p] == '@') {
                         at = p;
                         break;
                     }
+                    if (s[p] == ':' && colon == std::string::npos) {
+                        colon = p;
+                    }
+                    p++;
                 }
                 if (at == std::string::npos) {
-                    i++;
+                    i = (p > i) ? p : i + 1;
                     continue;
-                }
-                size_t colon = std::string::npos;
-                for (size_t p = user; p < at; p++) {
-                    if (s[p] == ':') {
-                        colon = p;
-                        break;
-                    }
                 }
                 if (colon != std::string::npos && colon < at) {
                     if (!any) {
@@ -300,6 +297,8 @@ void RedactPostgresUriUserinfo(std::string &s) {
                     i = at;
                     continue;
                 }
+                i = at;
+                continue;
             }
             i++;
         }
@@ -508,14 +507,32 @@ bool LooksLikeConfiguredDsn(const std::string &v) {
 }
 
 bool HasUriUserinfo(const std::string &text) {
-    size_t sep = 0;
-    while ((sep = text.find("://", sep)) != std::string::npos) {
-        size_t start = sep + 3;
-        size_t at = text.find('@', start);
-        if (at != std::string::npos && text.find(':', start) < at) {
-            return true;
+    size_t i = 0;
+    while (i < text.size()) {
+        if (i + 2 < text.size() && text[i] == ':' && text[i + 1] == '/' && text[i + 2] == '/') {
+            size_t colon = std::string::npos;
+            size_t at = std::string::npos;
+            size_t p = i + 3;
+            while (p < text.size()) {
+                if (text[p] == '@') {
+                    at = p;
+                    break;
+                }
+                if (text[p] == ':' && colon == std::string::npos) {
+                    colon = p;
+                }
+                p++;
+            }
+            if (at != std::string::npos && colon != std::string::npos && colon < at) {
+                return true;
+            }
+            if (at == std::string::npos) {
+                return false;
+            }
+            i = at + 1;
+            continue;
         }
-        sep += 3;
+        i++;
     }
     return false;
 }

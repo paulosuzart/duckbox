@@ -45,7 +45,8 @@ std::string ResolvePath(const std::string &base_dir, const std::string &path);
 // Pattern values follow libpq conninfo rules (whitespace terminates unless
 // backslash-escaped; quoted values with escapes). '=' and ':' inside an
 // unquoted value (base64 padding, key=value lookalikes) do not end it —
-// password= keepme=yes redacts keepme=yes. Key names that contain a known
+// password= keepme=yes redacts keepme=yes. URI userinfo continues through
+// '/' (base64) until '@' or whitespace. Key names that contain a known
 // secret key are matched (prefer over-redacting). Never apply this to
 // tenant-visible error text.
 std::string RedactSecretText(const std::string &text);
