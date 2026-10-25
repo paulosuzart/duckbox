@@ -341,16 +341,15 @@ bool DeadlineReached(Deadline deadline) {
     if (now >= deadline) {
         return ::arrow::flight::TimeoutDuration(0);
     }
-    // Same units as FlightCallOptions (seconds). Ceil leftover sub-ms
-    // so a truncated millisecond cannot fire the gRPC deadline before
-    // the per-call steady_clock deadline. Constructing TimeoutDuration
-    // from a raw tick count can yield 0 (no deadline) on some libc++ /
-    // Arrow builds.
-    const auto ms = std::chrono::ceil<std::chrono::milliseconds>(deadline - now).count();
-    if (ms <= 0) {
-        return ::arrow::flight::TimeoutDuration(0);
+    // Seconds, matching FlightCallOptions. Arrow treats timeout == 0 as
+    // "no deadline"; never pass 0 while the steady_clock deadline is
+    // still in the future. duration<double> avoids ceil/ms truncation
+    // that produced 0 on some libc++ / Arrow builds.
+    const double secs = std::chrono::duration<double>(deadline - now).count();
+    if (secs <= 0) {
+        return ::arrow::flight::TimeoutDuration(0.001);
     }
-    return ::arrow::flight::TimeoutDuration(static_cast<double>(ms) / 1000.0);
+    return ::arrow::flight::TimeoutDuration(secs);
 }
 
 // Arrow maps gRPC DEADLINE_EXCEEDED to FlightStatusCode::TimedOut. That is the
