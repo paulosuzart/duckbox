@@ -410,6 +410,16 @@ void duckbox::test::RunSecretRedactPatternTests() {
     Expect(!HasCredentialLeak("postgresql://postgresql://"),
            "HasCredentialLeak is false for postgresql:// without @");
     Expect(!HasCredentialLeak("://://://"), "HasCredentialLeak is false for :// without @");
+    // Small inputs must walk RedactPostgresUriUserinfo's no-'@' advance so
+    // new-line coverage stays complete without the 256 KB / 4 MB scale block.
+    auto uri_no_at = RedactSecretText("postgresql://postgresql://");
+    Expect(uri_no_at == "postgresql://postgresql://",
+           "repeated postgresql:// without @ is left intact");
+    auto uri_no_userinfo = RedactSecretText("postgresql://host/db postgres://other/db");
+    Expect(uri_no_userinfo == "postgresql://host/db postgres://other/db",
+           "postgres URI without userinfo is left intact");
+    auto uri_scheme_eos = RedactSecretText("postgresql://");
+    Expect(uri_scheme_eos == "postgresql://", "bare postgresql:// scheme is left intact");
     Expect(!HasCredentialLeak("http://user@host"),
            "://user@ without a password colon is not userinfo");
     Expect(HasCredentialLeak("http://user@host postgresql://u:p@h"),
@@ -521,6 +531,9 @@ void duckbox::test::RunSecretRedactPatternTests() {
         "postgresql://u:YWI/jZGVm+Zw==@h/db",
         "postgres://duckbox:short-secret@pg/lake",
         "postgresql://duckbox@127.0.0.1/lake",
+        "postgresql://postgresql://",
+        "postgresql://host/db postgres://other/db",
+        "postgresql://",
         "SECRET 'quoted-secret-1'",
         "mypassword=prefixed-secret-9",
         "password=x SECRET 'y' postgresql://u:z@h/db",
