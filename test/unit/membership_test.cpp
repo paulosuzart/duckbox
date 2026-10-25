@@ -21,6 +21,7 @@ void duckbox::test::RunMembershipTests() {
 	S3LeaseOptions opt;
 	opt.owner_id = "node-a";
 	opt.flight = "grpc://127.0.0.1:4747";
+	opt.advertised_address = "grpc+tls://node-a.example:4747";
 	opt.prefix = "leases/";
 	opt.ttl_ms = 10'000;
 	opt.version = "test";
@@ -30,7 +31,14 @@ void duckbox::test::RunMembershipTests() {
 	auto live = a.List();
 	Expect(live.size() == 1 && live[0].node_id == "node-a", "heartbeat registers the node");
 	Expect(live[0].flight == "grpc://127.0.0.1:4747", "heartbeat stores Flight URL");
+	Expect(live[0].advertised_address == "grpc+tls://node-a.example:4747",
+	       "heartbeat stores advertised_address");
 	Expect(live[0].started_at_ms == 2'000'000, "started_at is construction time");
+	auto node_obj = s3->Get("leases/nodes/node-a.json");
+	Expect(node_obj.status == 200 &&
+	           node_obj.body.find("\"advertised_address\":\"grpc+tls://node-a.example:4747\"") !=
+	               std::string::npos,
+	       "nodes/{node_id}.json contains advertised_address");
 	auto text = metrics->Render();
 	Expect(text.find("duckbox_cluster_nodes") != std::string::npos, "heartbeat publishes cluster node gauge");
 
@@ -154,17 +162,31 @@ void duckbox::test::RunMembershipTests() {
 		auto inner = MakeMemoryS3ControlClient("dir-cache");
 		auto counted = std::make_shared<CountingS3>(inner);
 		S3LeaseOptions opt_c = opt;
-		opt_c.owner_id = "node-cache";
+		opt_c.owner_id = "node-c";
 		opt_c.flight = "grpc://127.0.0.1:4792";
+		opt_c.advertised_address = "grpc://127.0.0.1:4749";
 		opt_c.cache_ms = 1000;
 		S3NodeDirectory d(counted, opt_c, {}, clock);
 		d.Heartbeat();
 		int lists_after_hb = counted->lists();
-		Expect(d.IsKnownFlight("grpc://127.0.0.1:4792"), "own advertise URL is a known flight");
+		Expect(d.AdvertisedAddressOf("node-c") == "grpc://127.0.0.1:4749",
+		       "AdvertisedAddressOf returns node-c's advertised address");
 		int lists_after_first = counted->lists();
 		Expect(lists_after_first > lists_after_hb, "cache miss lists the node directory");
-		Expect(d.IsKnownFlight("grpc://127.0.0.1:4792"), "second lookup hits the directory cache");
-		Expect(counted->lists() == lists_after_first, "cache hit does not ListKeys");
+		Expect(d.AdvertisedAddressOf("node-c") == "grpc://127.0.0.1:4749",
+		       "second AdvertisedAddressOf hits the directory cache");
+		Expect(counted->lists() == lists_after_first,
+		       "AdvertisedAddressOf cache hit does not ListKeys");
+		Expect(d.IsKnownFlight("grpc://127.0.0.1:4792"),
+		       "IsKnownFlight reuses the cache filled by AdvertisedAddressOf");
+		Expect(counted->lists() == lists_after_first,
+		       "IsKnownFlight does not ListKeys inside the AdvertisedAddressOf cache window");
+		Expect(d.AdvertisedAddressOf("").empty(), "empty owner_id is not a directory lookup");
+		Expect(counted->lists() == lists_after_first, "empty owner_id does not ListKeys");
+		Expect(d.AdvertisedAddressOf("missing").empty(),
+		       "unknown owner is a negative cache hit on AdvertisedAddressOf");
+		Expect(counted->lists() == lists_after_first,
+		       "AdvertisedAddressOf negative cache does not ListKeys");
 		Expect(!d.IsKnownFlight("grpc://127.0.0.1:65535"), "unknown flight is a negative cache hit");
 		Expect(counted->lists() == lists_after_first, "negative cache does not ListKeys for unknown targets");
 		Expect(!d.IsKnownFlight("grpc://127.0.0.1:1"), "another unknown target stays negatively cached");
@@ -173,7 +195,36 @@ void duckbox::test::RunMembershipTests() {
 		clock->AdvanceMs(1000);
 		Expect(d.IsKnownFlight("grpc://127.0.0.1:4792"), "expired cache refreshes uncached");
 		Expect(counted->lists() > lists_before_expire, "TTL expiry lists the node directory");
+		Expect(d.AdvertisedAddressOf("node-c") == "grpc://127.0.0.1:4749",
+		       "AdvertisedAddressOf after refresh still returns node-c");
+		Expect(counted->lists() == lists_before_expire + 1,
+		       "IsKnownFlight refresh populated the cache for AdvertisedAddressOf");
 		d.Deregister();
+	}
+
+	{
+		S3LeaseOptions opt_legacy = opt;
+		opt_legacy.owner_id = "node-legacy";
+		opt_legacy.advertised_address.clear();
+		S3NodeDirectory legacy(s3, opt_legacy, {}, clock);
+		std::string body =
+		    "{\"node_id\":\"node-legacy\",\"flight\":\"grpc://127.0.0.1:1\","
+		    "\"started_at_ms\":" +
+		    std::to_string(clock->NowMs()) +
+		    ",\"version\":\"test\",\"expiry_ms\":" + std::to_string(clock->NowMs() + 10'000) +
+		    ",\"draining\":false,\"instance_id\":\"abc\"}";
+		auto put = s3->Put("leases/nodes/node-legacy.json", body, "", "");
+		Expect(put.status == 200, "legacy node record without advertised_address is stored");
+		auto parsed = legacy.List();
+		bool found_empty = false;
+		for (auto &n : parsed) {
+			if (n.node_id == "node-legacy") {
+				found_empty = n.advertised_address.empty();
+			}
+		}
+		Expect(found_empty, "record without advertised_address parses with an empty address");
+		Expect(legacy.AdvertisedAddressOf("node-legacy").empty(),
+		       "AdvertisedAddressOf is empty for a record written without the field");
 	}
 
 	{

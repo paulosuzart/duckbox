@@ -1,6 +1,7 @@
 #include "check.hpp"
 #include "suite.hpp"
 
+#include "cluster/lease.hpp"
 #include "common/crypto.hpp"
 #include "common/yaml.hpp"
 #include "config/policy.hpp"
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 #include <sys/stat.h>
 
 void duckbox::test::RunSpecLoaderTests() {
@@ -41,6 +43,10 @@ void duckbox::test::RunSpecLoaderTests() {
     Expect(cluster_a.peer_secret == "duckbox-peer-dev", "peer secret is resolved from env ref");
     Expect(cluster_a.lease.advertise.find("5747") != std::string::npos,
            "advertise is the internal address");
+    Expect(cluster_a.advertised_address == "grpc://127.0.0.1:4747",
+           "cluster YAML sets advertised_address to the public loopback listener");
+    Expect(loaded_daemon.advertised_address == "grpc://127.0.0.1:4747",
+           "unset advertised_address falls back to grpc:// + listen");
     Expect(loaded_daemon.metrics_listen.find("9477") != std::string::npos,
            "daemon yaml metrics listen");
     Expect(loaded_daemon.metrics_policy_classes.count("analyst") == 1,
@@ -488,6 +494,7 @@ void duckbox::test::RunSpecLoaderTests() {
                  "5s\n  proxy_first_message_max: 60s\n  proxy_max_inflight: 256\n"
                  "  proxy_max_inflight_per_peer: 256\n  shutdown_watchdog: 8s\n"
                  "  advertise: grpc://127.0.0.1:5747\n"
+                 "advertised_address: grpc+tls://node-a.example:4747\n"
                  "limits:\n  idle_timeout: 30s\n  max_idle_timeout: 5m\n  max_sandboxes: 10\n";
         }
         auto d = LoadDaemonFile(path);
@@ -567,6 +574,21 @@ void duckbox::test::RunSpecLoaderTests() {
         Expect(tls.ok(), "ParseFlightLocation grpc+tls://");
         Expect(d.lease.advertise.find("5747") != std::string::npos,
                "daemon yaml lease advertise is the internal listener");
+        Expect(d.advertised_address == "grpc+tls://node-a.example:4747",
+               "daemon yaml advertised_address accepts grpc+tls://");
+        {
+            std::ostringstream log;
+            LogAdvertisedAddress(log, d.advertised_address);
+            Expect(log.str().find("grpc+tls://node-a.example:4747") != std::string::npos,
+                   "advertised_address is logged at startup");
+            Expect(log.str().find("duckbox advertised address") != std::string::npos,
+                   "startup log names advertised address");
+        }
+        {
+            auto lopt = cluster::LeaseOptionsFromDaemon(d);
+            Expect(lopt.advertised_address == "grpc+tls://node-a.example:4747",
+                   "LeaseOptionsFromDaemon copies advertised_address for the node record");
+        }
         Expect(d.idle_evict_ms == 30000, "daemon yaml idle_timeout 30s");
         ValidateDaemonOrThrow(d);
         {
@@ -630,6 +652,58 @@ void duckbox::test::RunSpecLoaderTests() {
             dashed.lease.node_id = "a-b";
             dashed.lease.skip_probe = true;
             ValidateDaemonOrThrow(dashed);
+            DaemonConfig fallback = TestDaemon();
+            fallback.advertised_address.clear();
+            FinalizeDaemonListen(fallback);
+            Expect(
+                fallback.advertised_address == "grpc://127.0.0.1:4747",
+                "FinalizeDaemonListen publishes grpc:// + listen when advertised_address is unset");
+            DaemonConfig wild = TestDaemon();
+            wild.listen = "0.0.0.0:4747";
+            wild.internal_listen = "127.0.0.1:5747";
+            wild.internal_listen_configured = true;
+            wild.lease.endpoint = "http://127.0.0.1:9";
+            wild.lease.bucket = "b";
+            wild.lease.skip_probe = true;
+            wild.peer_secret = "duckbox-peer-secret";
+            wild.advertised_address.clear();
+            FinalizeDaemonListen(wild);
+            Expect(wild.advertised_address.empty(),
+                   "wildcard listen in multi-node does not invent an advertised_address");
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(wild); }, "advertised_address",
+                                "multi-node wildcard listen without advertised_address is refused");
+            wild.advertised_address = "grpc://node-a.example:4747";
+            ValidateDaemonOrThrow(wild);
+            DaemonConfig v6 = TestDaemon();
+            v6.listen = "[::]:4747";
+            v6.internal_listen = "127.0.0.1:5747";
+            v6.internal_listen_configured = true;
+            v6.lease.endpoint = "http://127.0.0.1:9";
+            v6.lease.bucket = "b";
+            v6.lease.skip_probe = true;
+            v6.peer_secret = "duckbox-peer-secret";
+            FinalizeDaemonListen(v6);
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(v6); }, "advertised_address",
+                                "IPv6 wildcard listen in multi-node requires advertised_address");
+            DaemonConfig bad_url = TestDaemon();
+            bad_url.advertised_address = "not a uri !!!";
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(bad_url); }, "advertised_address",
+                                "invalid advertised_address fails validation naming the option");
+        }
+        {
+            auto badp = "/tmp/duckbox-bad-advertised.yaml";
+            {
+                std::ofstream o(badp);
+                o << "name: x\nlisten: 127.0.0.1:4747\nhandle_secret: duckbox-dev-secret\n"
+                     "advertised_address: not a uri !!!\n";
+            }
+            ExpectThrowContains([&] { LoadDaemonFile(badp); }, "advertised_address",
+                                "invalid advertised_address fails config load naming the option");
+        }
+        {
+            std::ostringstream empty_log;
+            LogAdvertisedAddress(empty_log, "");
+            Expect(empty_log.str().empty(), "empty advertised_address is not logged");
         }
         {
             auto loc = ParseFlightLocation("127.0.0.1:5747");

@@ -7,6 +7,7 @@
 #include "common/error.hpp"
 
 #include <cstdint>
+#include <iosfwd>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -85,6 +86,9 @@ struct DaemonConfig {
     std::string listen = "127.0.0.1:4747";
     std::string internal_listen; // empty → 127.0.0.1:<public port+1000> when listen is loopback
     bool internal_listen_configured = false;
+    // Public Flight URL clients use to reach this node (grpc:// or grpc+tls://).
+    // Distinct from lease.advertise (internal peer URL). Empty until Finalize.
+    std::string advertised_address;
     std::string handle_secret;
     int64_t handle_ttl_seconds = 300;
     int64_t idle_evict_ms = 300000; // default instance idle timeout (ms)
@@ -130,8 +134,12 @@ std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::strin
                                        ListenerPlane plane = ListenerPlane::Public);
 
 bool IsLoopbackHost(const std::string &host);
+bool IsWildcardHost(const std::string &host); // 0.0.0.0 / :: — cannot be advertised
 std::string DefaultInternalListen(const std::string &listen); // 127.0.0.1:<port+1000>
-void FinalizeDaemonListen(DaemonConfig &cfg); // fill internal_listen / advertise defaults
+void FinalizeDaemonListen(
+    DaemonConfig &cfg); // fill internal_listen / advertise / advertised_address
+// Startup log line next to the public/internal listener lines. No-op if address is empty.
+void LogAdvertisedAddress(std::ostream &out, const std::string &address);
 
 DaemonConfig LoadDaemonFile(const std::string &path); // unknown/duplicate YAML keys are errors
 // Local helper: sets allow_insecure_dev. Does not bake in duckbox-dev-secret

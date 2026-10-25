@@ -3,6 +3,7 @@
 #include "common/error.hpp"
 #include "common/yaml.hpp"
 #include "config/policy.hpp"
+#include "flight/flight_sql_server.hpp"
 #include "s3/s3.hpp"
 #include "s3/s3_credentials.hpp"
 #include "s3/secrets.hpp"
@@ -17,6 +18,7 @@
 #include <cstdlib>
 #include <fnmatch.h>
 #include <iostream>
+#include <ostream>
 #include <sstream>
 #include <sys/stat.h>
 
@@ -29,6 +31,18 @@ namespace {
 
 std::vector<std::string> StringList(const YamlNode *n, const std::string &path) {
     return YamlStringList(n, path);
+}
+
+bool LeaseEndpointConfigured(const DaemonConfig &cfg) {
+    return !cfg.lease.endpoint.empty() || !cfg.lease.endpoint_env.empty();
+}
+
+void ValidateAdvertisedAddressOrThrow(const std::string &address, const char *what) {
+    auto loc = flight::ParseFlightLocation(address);
+    if (!loc.ok()) {
+        throw PolicyError(std::string(what) + ": invalid Flight URL (grpc://host:port or "
+                                              "grpc+tls://host:port)");
+    }
 }
 
 } // namespace
@@ -65,6 +79,10 @@ bool IsLoopbackHost(const std::string &host) {
            host == "0:0:0:0:0:0:0:1";
 }
 
+bool IsWildcardHost(const std::string &host) {
+    return host == "0.0.0.0" || host == "::" || host == "[::]";
+}
+
 std::string DefaultInternalListen(const std::string &listen) {
     auto lp = ParseListenAddress(listen, 4747);
     return "127.0.0.1:" + std::to_string(lp.second + 1000);
@@ -80,6 +98,21 @@ void FinalizeDaemonListen(DaemonConfig &cfg) {
     if (cfg.lease.advertise.empty() && !cfg.internal_listen.empty()) {
         cfg.lease.advertise = "grpc://" + cfg.internal_listen;
     }
+    if (cfg.advertised_address.empty()) {
+        auto lp = ParseListenAddress(cfg.listen, 4747);
+        if (LeaseEndpointConfigured(cfg) && IsWildcardHost(lp.first)) {
+            // Multi-node cannot publish a wildcard; ValidateDaemonOrThrow names the option.
+        } else {
+            cfg.advertised_address = "grpc://" + cfg.listen;
+        }
+    }
+}
+
+void LogAdvertisedAddress(std::ostream &out, const std::string &address) {
+    if (address.empty()) {
+        return;
+    }
+    out << "duckbox advertised address " << address << std::endl;
 }
 
 void AuthorizeOperator(const DaemonConfig &cfg, const std::string &identity) {
@@ -141,10 +174,10 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
         throw PolicyError("daemon config root must be a mapping: " + path);
     }
     // Allowed-but-forbidden: lake/tables/policy/spec are rejected below, not as unknown keys.
-    YamlRejectUnknownKeys(root, {"name", "listen", "internal_listen", "handle_secret",
-                                 "handle_secret_env", "auth", "limits", "metrics", "metrics_listen",
-                                 "lake_allow", "lease", "debug_http", "lake", "tables", "policy",
-                                 "spec"});
+    YamlRejectUnknownKeys(root, {"name", "listen", "internal_listen", "advertised_address",
+                                 "handle_secret", "handle_secret_env", "auth", "limits", "metrics",
+                                 "metrics_listen", "lake_allow", "lease", "debug_http", "lake",
+                                 "tables", "policy", "spec"});
     DaemonConfig d;
     d.source_path = path;
     d.name = root.GetString("name", d.name);
@@ -152,6 +185,10 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
     if (root.Get("internal_listen")) {
         d.internal_listen_configured = true;
         d.internal_listen = root.GetString("internal_listen");
+    }
+    if (root.Get("advertised_address")) {
+        d.advertised_address = root.GetString("advertised_address");
+        ValidateAdvertisedAddressOrThrow(d.advertised_address, "advertised_address");
     }
     d.handle_secret = root.GetString("handle_secret", d.handle_secret);
     auto secret_env = root.GetString("handle_secret_env");
@@ -473,8 +510,19 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
         if (lp.second <= 0 || lp.second > 65535) {
             add("listen", "port out of range");
         }
+        if (LeaseEndpointConfigured(cfg) && IsWildcardHost(lp.first) &&
+            cfg.advertised_address.empty()) {
+            add("advertised_address", "required when listen is a wildcard in multi-node mode");
+        }
     } catch (const std::exception &e) {
         add("listen", e.what());
+    }
+    if (!cfg.advertised_address.empty()) {
+        try {
+            ValidateAdvertisedAddressOrThrow(cfg.advertised_address, "advertised_address");
+        } catch (const std::exception &e) {
+            add("advertised_address", e.what());
+        }
     }
     if (cfg.max_sandboxes == 0) {
         add("limits.max_sandboxes", "must be >= 1");

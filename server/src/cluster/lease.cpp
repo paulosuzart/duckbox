@@ -198,6 +198,7 @@ S3LeaseOptions LeaseOptionsFromDaemon(const DaemonConfig &daemon) {
 	S3LeaseOptions o;
 	o.owner_id = daemon.lease.node_id.empty() ? daemon.name : daemon.lease.node_id;
 	o.flight = daemon.lease.advertise.empty() ? ("grpc://" + daemon.listen) : daemon.lease.advertise;
+	o.advertised_address = daemon.advertised_address;
 	o.prefix = daemon.lease.prefix;
 	o.ttl_ms = daemon.lease.ttl_ms;
 	o.heartbeat_ms = daemon.lease.heartbeat_ms;
@@ -668,8 +669,8 @@ void S3ConditionalLeaseManager::GcTombstones() {
 namespace {
 
 const char *kNodeWhat = "node heartbeat JSON";
-const std::set<std::string> kNodeKeys = {"node_id", "flight", "started_at_ms", "version",
-                                         "expiry_ms", "draining", "instance_id"};
+const std::set<std::string> kNodeKeys = {"node_id", "flight", "advertised_address", "started_at_ms",
+                                         "version", "expiry_ms", "draining", "instance_id"};
 
 } // namespace
 
@@ -707,6 +708,7 @@ std::string S3NodeDirectory::Encode(const NodeRecord &n) const {
 	Json j;
 	j["node_id"] = n.node_id;
 	j["flight"] = n.flight;
+	j["advertised_address"] = n.advertised_address;
 	j["started_at_ms"] = n.started_at_ms;
 	j["version"] = n.version;
 	j["expiry_ms"] = n.expiry_ms;
@@ -721,6 +723,8 @@ NodeRecord S3NodeDirectory::Parse(const S3Object &obj) const {
 	NodeRecord n;
 	n.node_id = JsonRequireString(j, "node_id", kNodeWhat);
 	n.flight = JsonRequireString(j, "flight", kNodeWhat);
+	n.advertised_address =
+	    JsonHas(j, "advertised_address") ? JsonRequireString(j, "advertised_address", kNodeWhat) : "";
 	n.started_at_ms = JsonRequireInt(j, "started_at_ms", kNodeWhat);
 	n.version = JsonHas(j, "version") ? JsonRequireString(j, "version", kNodeWhat) : "";
 	n.expiry_ms = JsonRequireInt(j, "expiry_ms", kNodeWhat);
@@ -754,36 +758,45 @@ void S3NodeDirectory::InvalidateLiveCacheLocked() {
 	live_cache_until_ms_ = 0;
 }
 
-bool S3NodeDirectory::IsKnownFlight(const std::string &flight) {
-	if (flight.empty()) {
-		return false;
-	}
+std::vector<NodeRecord> S3NodeDirectory::CachedLiveNodes() {
 	int64_t now = clock_->NowMs();
 	{
 		std::lock_guard<std::mutex> hold(mu_);
 		if (live_cache_until_ms_ > now) {
-			for (auto &n : live_cache_) {
-				if (n.flight == flight) {
-					return true;
-				}
-			}
-			return false; // negative cache: recent list did not contain this URL
+			return live_cache_;
 		}
 	}
 	auto live = ListUncached();
-	bool found = false;
-	for (auto &n : live) {
-		if (n.flight == flight) {
-			found = true;
-			break;
-		}
-	}
 	{
 		std::lock_guard<std::mutex> hold(mu_);
-		live_cache_ = std::move(live);
+		live_cache_ = live;
 		live_cache_until_ms_ = clock_->NowMs() + DirectoryCacheTtlMs();
 	}
-	return found;
+	return live;
+}
+
+bool S3NodeDirectory::IsKnownFlight(const std::string &flight) {
+	if (flight.empty()) {
+		return false;
+	}
+	for (auto &n : CachedLiveNodes()) {
+		if (n.flight == flight) {
+			return true;
+		}
+	}
+	return false;
+}
+
+std::string S3NodeDirectory::AdvertisedAddressOf(const std::string &owner_id) {
+	if (owner_id.empty()) {
+		return "";
+	}
+	for (auto &n : CachedLiveNodes()) {
+		if (n.node_id == owner_id) {
+			return n.advertised_address;
+		}
+	}
+	return "";
 }
 
 void S3NodeDirectory::Heartbeat() {
@@ -796,6 +809,7 @@ void S3NodeDirectory::PutHeartbeatLocked() {
 	NodeRecord n;
 	n.node_id = opt_.owner_id;
 	n.flight = opt_.flight;
+	n.advertised_address = opt_.advertised_address;
 	n.started_at_ms = started_at_ms_;
 	n.version = opt_.version.empty() ? std::string(DUCKBOX_DUCKDB_VERSION) : opt_.version;
 	n.expiry_ms = clock_->NowMs() + opt_.ttl_ms;
