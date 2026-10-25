@@ -48,12 +48,6 @@ void ValidateAdvertisedAddressOrThrow(const std::string &address, const char *wh
         spec = "grpc://" + spec;
     }
     auto uri = ::arrow::util::Uri::FromString(spec);
-    if (!uri.ok()) {
-        auto sep = spec.find("://");
-        if (sep != std::string::npos) {
-            uri = ::arrow::util::Uri::FromString("http://" + spec.substr(sep + 3));
-        }
-    }
     if (uri.ok() && (!uri->username().empty() || !uri->password().empty())) {
         throw PolicyError(std::string(what) + ": Flight URL must not contain userinfo");
     }
