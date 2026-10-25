@@ -93,8 +93,8 @@ class TenantSandbox {
 
   private:
     QueryOutput RunTimed(const std::string &sql, std::vector<ddb::Value> params);
-    // Caller holds mu_. DescribeHandleArrow uses this after try_lock_for so
-    // GetFlightInfo cannot block forever in Warmup's lock_guard.
+    // Caller holds mu_. DescribeHandleArrow uses this after a deadline-bounded
+    // try_lock so GetFlightInfo cannot block forever in Warmup's lock_guard.
     void WarmupLocked(bool validate_lake);
     // ROLLBACK so a rewrite / binder / timeout failure cannot leave DuckLake's
     // catalog transaction aborted (next query would be a cheap DoS).
@@ -118,8 +118,9 @@ class TenantSandbox {
     // DescribeHandleArrow waits until query_timeout_ms (else
     // proxy_first_message_max_ms) so GetFlightInfo cannot wait forever behind
     // a DoGet stuck in Arrow #31235 send-after-cancel. Apple libc++
-    // try_lock_for does not time out; the wait is try_lock until that deadline.
-    std::timed_mutex mu_;
+    // timed_mutex::try_lock / try_lock_for do not return; use std::mutex and
+    // poll try_lock until that deadline.
+    std::mutex mu_;
     std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
     int64_t last_used_wall_ms_ = 0;
     int warmup_count_ = 0;
@@ -159,7 +160,7 @@ class WarmupHardeningReadError {
 
 #ifdef DUCKBOX_TESTING
 // Test seam (compiled only with DUCKBOX_TESTING). Holds TenantSandbox::mu_
-// so DescribeHandleArrow's try_lock_for path can be exercised.
+// so DescribeHandleArrow's bounded try_lock path can be exercised.
 class DescribeLockHold {
   public:
     explicit DescribeLockHold(TenantSandbox &box);

@@ -808,10 +808,10 @@ void duckbox::test::RunSandboxExecTests() {
         }
     }
     auto describe_while_held = [](TenantSandbox &box, const std::function<void()> &fn) {
-        // timed_mutex is not recursive. Holding it on this thread and then
-        // try_lock_for in DescribeHandleArrow deadlocks on Apple libc++
-        // (Linux timedlock can return). Production GetFlightInfo vs DoGet
-        // are different threads; the test must match that.
+        // mu_ is not recursive. Holding it on this thread and then try_lock
+        // in DescribeHandleArrow deadlocks (Apple timed_mutex also failed to
+        // return). Production GetFlightInfo vs DoGet are different threads;
+        // the test must match that.
         std::atomic<bool> locked{false};
         std::atomic<bool> release{false};
         std::thread holder([&] {
