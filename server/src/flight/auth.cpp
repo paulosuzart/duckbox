@@ -4,6 +4,8 @@
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 
+#include <cstdlib>
+
 namespace duckbox {
 namespace flight {
 using namespace common;
@@ -21,6 +23,17 @@ std::string BearerTokenFromAuthorization(const std::string &header) {
         return "";
     }
     return std::string(absl::StripAsciiWhitespace(view));
+}
+
+std::string ResolveBearerToken(const std::string &explicit_token) {
+    if (!explicit_token.empty()) {
+        return explicit_token;
+    }
+    const char *env = std::getenv(kBearerTokenEnv);
+    if (env == nullptr || env[0] == '\0') {
+        return "";
+    }
+    return std::string(env);
 }
 
 TenantKey Authenticate(const Policy &policy, const AuthRequest &req) {

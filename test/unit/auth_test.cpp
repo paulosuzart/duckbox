@@ -6,6 +6,7 @@
 #include "flight/auth.hpp"
 #include "node/daemon_config.hpp"
 
+#include <cstdlib>
 #include <ctime>
 #include <iostream>
 #include <string>
@@ -48,6 +49,27 @@ void duckbox::test::RunAuthTests() {
            "non-Bearer scheme is ignored");
     Expect(BearerTokenFromAuthorization("secret-token").empty(),
            "raw value without Bearer is ignored");
+
+    {
+        const char *prev = std::getenv(kBearerTokenEnv);
+        std::string saved = prev ? prev : "";
+        const bool had = prev != nullptr;
+        unsetenv(kBearerTokenEnv);
+        Expect(ResolveBearerToken("").empty(), "empty flag and unset env yield no token");
+        Expect(ResolveBearerToken("flag-token") == "flag-token", "explicit token is used as-is");
+        setenv(kBearerTokenEnv, "env-token", 1);
+        Expect(ResolveBearerToken("") == "env-token",
+               "DUCKBOX_TOKEN is used when the flag is empty");
+        Expect(ResolveBearerToken("flag-token") == "flag-token",
+               "explicit token overrides the env");
+        setenv(kBearerTokenEnv, "", 1);
+        Expect(ResolveBearerToken("").empty(), "empty DUCKBOX_TOKEN is treated as unset");
+        if (had) {
+            setenv(kBearerTokenEnv, saved.c_str(), 1);
+        } else {
+            unsetenv(kBearerTokenEnv);
+        }
+    }
 
     {
         DaemonConfig locked;

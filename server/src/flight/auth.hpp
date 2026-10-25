@@ -25,6 +25,12 @@ struct AuthRequest {
 // Never returns the raw header when the scheme is missing or the token is blank.
 std::string BearerTokenFromAuthorization(const std::string &header);
 
+// CLI / Python client token. Explicit --token / token= wins; otherwise
+// DUCKBOX_TOKEN. Empty means no Authorization header (insecure-dev caller).
+// Never logs the value.
+inline constexpr const char *kBearerTokenEnv = "DUCKBOX_TOKEN";
+std::string ResolveBearerToken(const std::string &explicit_token);
+
 // Parses req.key_header with policy.key. AuthError if missing/unparseable.
 rewriter::TenantKey Authenticate(const config::Policy &policy, const AuthRequest &req);
 
