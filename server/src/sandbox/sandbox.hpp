@@ -162,8 +162,7 @@ class TenantSandbox {
     std::mutex interrupt_mu_; // Interrupt vs Passivate; not held during Execute
     // Held for the whole user statement (Execute / ExtractPlan / Describe).
     // DescribeHandleArrow waits until query_timeout_ms (else
-    // proxy_first_message_max_ms), via SaturatingDeadlineMs, so GetFlightInfo
-    // cannot wait forever behind
+    // proxy_first_message_max_ms) so GetFlightInfo cannot wait forever behind
     // a DoGet stuck in Arrow #31235 send-after-cancel. Apple libc++
     // timed_mutex / try_lock loops do not return; the wait is
     // SandboxMutex::try_lock_until (condition_variable) until that deadline.
