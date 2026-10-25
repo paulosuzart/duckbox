@@ -19,12 +19,15 @@ ctest --test-dir "$BUILD" --output-on-failure
 python3 -m pip install --user -q 'gcovr>=7.2'
 
 # Filter to server/src/*.cpp — this is the number CI reports (not a homemade gcov parser).
+# suspicious_hits: gcov 32-bit counters overflow on the 4 MB linear-scan tests
+# (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=68080).
 python3 -m gcovr --root "$ROOT" \
   --filter 'server/src/' \
   --exclude '\.deps/' \
   --exclude 'test/' \
   --gcov-ignore-errors=no_working_dir_found \
   --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
+  --gcov-ignore-parse-errors=suspicious_hits.warn_once_per_file \
   "$BUILD" \
   --txt \
   --print-summary \
