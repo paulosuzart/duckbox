@@ -17,6 +17,7 @@
 #include <arrow/flight/sql/server.h>
 #include <arrow/flight/server.h>
 #include <arrow/record_batch.h>
+#include <arrow/util/cancel.h>
 
 #include <memory>
 #include <mutex>
@@ -125,7 +126,7 @@ private:
 	    const std::string &key, const std::string &token, const std::shared_ptr<::arrow::Schema> &schema);
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> MaybeProxyDoGet(
 	    const common::RedirectError &re, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
-	    const std::string &key);
+	    const std::string &key, const ::arrow::flight::ServerCallContext &context);
 
 	node::DaemonConfig daemon_;
 	std::shared_ptr<sandbox::SandboxRegistry> defs_;
@@ -215,14 +216,16 @@ public:
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightInfo>> ForwardGetFlightInfo(
 	    const std::string &url, const ::arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
 	    const std::string &key);
-	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> ForwardDoGet(const std::string &url,
-	                                                                            const ::arrow::flight::Ticket &ticket,
-	                                                                            const std::string &sandbox_id,
-	                                                                            const std::string &key);
+	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> ForwardDoGet(
+	    const std::string &url, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
+	    const std::string &key, const ::arrow::flight::ServerCallContext &context);
 
 private:
 	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Client(const std::string &url);
+	::arrow::flight::FlightCallOptions BaseOpt(const std::string &sandbox_id, const std::string &key) const;
 	::arrow::flight::FlightCallOptions CallOpt(const std::string &sandbox_id, const std::string &key) const;
+	::arrow::flight::FlightCallOptions StreamOpt(const std::string &sandbox_id, const std::string &key,
+	                                            ::arrow::StopToken stop_token) const;
 
 	std::string secret_;
 	int64_t timeout_ms_ = 5000;

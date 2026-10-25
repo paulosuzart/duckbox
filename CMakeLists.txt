@@ -507,6 +507,7 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/cli_auth_test.cpp
   test/integration/python_client_auth_test.cpp
   test/integration/cluster_test.cpp
+  test/integration/proxy_timeout_test.cpp
   test/integration/signal_shutdown_test.cpp
   test/integration/connect_runtime_test.cpp
   test/integration/trigger_runtime_test.cpp

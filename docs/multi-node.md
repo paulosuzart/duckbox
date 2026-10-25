@@ -127,7 +127,7 @@ Under `lease:` in the daemon YAML (all optional except the S3 endpoint block you
 | `skew` / `skew_ms` | `1s` | Extra wait past `expiry_ms` before stealing another node’s lease (local-clock skew margin). |
 | `cache_ms` | `250` | Short Acquire cache (also caps the node-directory lookup cache). `0` disables the Acquire cache; directory lookups then use a 1s TTL. Must stay well below TTL. |
 | `gc` / `gc_ms` | `24h` | Age after which a lease tombstone may be deleted. Epoch is copied to `{prefix}epochs/{id}.json` first. `0` disables. |
-| `proxy_timeout` / `proxy_timeout_ms` | `5s` | Deadline for peer Flight proxy RPCs. |
+| `proxy_timeout` / `proxy_timeout_ms` | `5s` | Deadline for peer **connect**, Authenticate handshake, and GetFlightInfo (and other unary peer RPCs). Not applied to the proxied DoGet stream. When the downstream client cancels or disconnects, the proxy cancels the upstream owner stream. |
 | `max_leases` | `0` (unlimited) | Optional cap of sandboxes this node will own. |
 
 Startup lists `{prefix}.duckbox-cw-probe-<node_id>-` and deletes leftover objects whose remainder is a 16-hex nonce and whose `LastModified` is older than five minutes (crash between PUT and DELETE). In-flight probes — including another process of the same `node_id`, or a longer id such as `a-b` when this node is `a` — are left alone. A list failure is logged (`s3_list` / `lease_probe_list`) and does not fail startup. Each DELETE is logged (`lease_probe_delete`). Nodes need **NTP-synced clocks** for that five-minute cutoff: cleanup compares S3 `LastModified` to the local clock. A node more than five minutes ahead can delete a peer's in-flight probe; a node behind leaves stale objects longer.
