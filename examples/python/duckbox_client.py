@@ -95,8 +95,10 @@ class TokenError(ValueError):
 def resolve_token(token: Optional[str] = None) -> str:
     """Explicit token wins; otherwise DUCKBOX_TOKEN. Empty means no Bearer header.
 
-    Surrounding whitespace is stripped. Control characters or an empty-after-trim
-    value raise TokenError with a generic message. Never logs the value.
+    Surrounding ASCII whitespace is stripped (space, tab, LF, CR, FF, VT).
+    After trim, every character must be visible ASCII (0x21-0x7E). Empty
+    after trim or any other character raises TokenError with a generic
+    message. Never logs the value.
     """
     if token:
         raw = token
@@ -104,8 +106,8 @@ def resolve_token(token: Optional[str] = None) -> str:
         raw = os.environ.get("DUCKBOX_TOKEN") or ""
         if not raw:
             return ""
-    trimmed = raw.strip()
-    if not trimmed or any(ord(c) < 0x20 or ord(c) == 0x7F for c in trimmed):
+    trimmed = raw.strip(" \t\n\r\f\v")
+    if not trimmed or any(not (0x21 <= ord(c) <= 0x7E) for c in trimmed):
         raise TokenError("invalid bearer token")
     return trimmed
 

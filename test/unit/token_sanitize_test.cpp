@@ -106,4 +106,20 @@ void duckbox::test::RunTokenSanitizeTests() {
     token_env.Set("bad\r\nenv");
     ExpectRejects("", "bad", "DUCKBOX_TOKEN with embedded CRLF");
     token_env.Clear();
+
+    const std::string eacute_secret = "LEAKTOK";
+    ExpectRejects("LEAKTOK\xC3\xA9X", eacute_secret, "UTF-8 e-acute inside the token");
+    ExpectRejects("LEAKTOK\xC2\xA0X", eacute_secret, "UTF-8 NBSP inside the token");
+    ExpectRejects("LEAKTOK\xC2\x85X", eacute_secret, "UTF-8 NEL C2 85 inside the token");
+    ExpectRejects("LEAKTOK\xFFX", eacute_secret, "0xFF inside the token");
+    ExpectRejects("\xC2\xA0LEAKTOK", eacute_secret, "leading UTF-8 NBSP is not trimmed");
+    ExpectRejects("LEAK\tTOK", "LEAK", "tab inside the token");
+
+    std::string huge(100 * 1024, 'A');
+    huge[0] = 'L';
+    huge[1] = 'E';
+    huge[2] = 'A';
+    huge[3] = 'K';
+    huge[4] = '\xFF';
+    ExpectRejects(huge, "LEAK", "100 KiB token fails without echoing");
 }

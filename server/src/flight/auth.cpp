@@ -41,7 +41,7 @@ std::string ResolveBearerToken(const std::string &explicit_token) {
         throw AuthError(kInvalidBearerToken);
     }
     for (char ch : trimmed) {
-        if (absl::ascii_iscntrl(static_cast<unsigned char>(ch))) {
+        if (!absl::ascii_isgraph(static_cast<unsigned char>(ch))) {
             throw AuthError(kInvalidBearerToken);
         }
     }

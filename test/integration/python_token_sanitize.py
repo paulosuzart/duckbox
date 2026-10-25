@@ -86,6 +86,20 @@ def test_resolve_token() -> None:
         _expect_reject(None, "bad", "DUCKBOX_TOKEN with embedded CRLF")
     finally:
         os.environ.pop("DUCKBOX_TOKEN", None)
+
+    _expect_reject("LEAKTOK\u00e9X", "LEAKTOK", "UTF-8 e-acute inside the token")
+    _expect_reject("LEAKTOK\u00a0X", "LEAKTOK", "NBSP inside the token")
+    _expect_reject("LEAKTOK\u0085X", "LEAKTOK", "NEL U+0085 inside the token")
+    _expect_reject("LEAKTOK\u00ffX", "LEAKTOK", "U+00FF inside the token")
+    _expect_reject("\u00a0LEAKTOK", "LEAKTOK", "leading NBSP is not trimmed")
+    _expect_reject("LEAK\tTOK", "LEAK", "tab inside the token")
+    _expect_reject("A" * (100 * 1024 - 1) + "\u00e9", "AAAA", "100 KiB token fails without echoing")
+
+    os.environ["DUCKBOX_TOKEN"] = "LEAKTOK\u00e9X"
+    try:
+        _expect_reject(None, "LEAKTOK", "DUCKBOX_TOKEN with e-acute")
+    finally:
+        os.environ.pop("DUCKBOX_TOKEN", None)
     print("ok resolve_token sanitization")
 
 

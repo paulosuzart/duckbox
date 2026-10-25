@@ -83,7 +83,7 @@ void ExpectRejectsCli(const std::string &token, const std::string &secret, const
     req.url = "grpc://127.0.0.1:1";
     req.token = token;
     auto cap = RunCli(req);
-    duckbox::test::Expect(cap.rc != 0, std::string(what) + " is rejected");
+    duckbox::test::Expect(cap.rc != 0 && cap.rc != 134, std::string(what) + " is rejected");
     duckbox::test::Expect(cap.out.find(duckbox::flight::kInvalidBearerToken) != std::string::npos,
                           std::string(what) + " prints the generic error");
     duckbox::test::Expect(cap.out.find(secret) == std::string::npos,
@@ -135,16 +135,44 @@ void duckbox::test::RunTokenSanitizeTests() {
 
     ExpectRejectsCli("   ", "   ", "CLI empty-after-trim token");
 
+    const std::string leak = "LEAKTOK";
+    ExpectRejectsCli("LEAKTOK\xC3\xA9X", leak, "CLI UTF-8 e-acute");
+    ExpectRejectsCli("LEAKTOK\xC2\xA0X", leak, "CLI UTF-8 NBSP");
+    ExpectRejectsCli("LEAKTOK\xC2\x85X", leak, "CLI UTF-8 NEL C2 85");
+    ExpectRejectsCli("LEAKTOK\xFFX", leak, "CLI 0xFF");
+    ExpectRejectsCli("\xC2\xA0LEAKTOK", leak, "CLI leading UTF-8 NBSP");
+    ExpectRejectsCli("LEAK\tTOK", "LEAK", "CLI tab inside the token");
+    {
+        std::string huge(100 * 1024, 'A');
+        huge[0] = 'L';
+        huge[1] = 'E';
+        huge[2] = 'A';
+        huge[3] = 'K';
+        huge[4] = '\xFF';
+        ExpectRejectsCli(huge, "LEAK", "CLI 100 KiB token");
+    }
+
     {
         NodeCliRequest drain;
         drain.url = "grpc://127.0.0.1:1";
         drain.token = crlf;
         auto cap = RunDrain(drain);
-        Expect(cap.rc != 0, "drain CLI CRLF token is rejected before metadata");
+        Expect(cap.rc != 0 && cap.rc != 134, "drain CLI CRLF token is rejected before metadata");
         Expect(cap.out.find(kInvalidBearerToken) != std::string::npos,
                "drain CLI CRLF prints the generic error");
         Expect(cap.out.find(crlf_secret) == std::string::npos,
                "drain CLI CRLF must not echo the token");
+    }
+    {
+        NodeCliRequest drain;
+        drain.url = "grpc://127.0.0.1:1";
+        drain.token = "LEAKTOK\xC3\xA9X";
+        auto cap = RunDrain(drain);
+        Expect(cap.rc != 0 && cap.rc != 134, "drain CLI non-ASCII token is rejected");
+        Expect(cap.out.find(kInvalidBearerToken) != std::string::npos,
+               "drain CLI non-ASCII prints the generic error");
+        Expect(cap.out.find(leak) == std::string::npos,
+               "drain CLI non-ASCII must not echo the token");
     }
 
     // Cover RunNodeDrain's Authorization: Bearer header (flight_sql_server.cpp
