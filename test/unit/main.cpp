@@ -34,5 +34,6 @@ int main() {
     RunStorageFormatTests();
     RunDuckLakeAttachSqlTests();
     RunLakeAttachSecretTests();
+    RunTempDirectoryTests();
     return ReportAndExit("unit");
 }

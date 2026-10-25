@@ -23,6 +23,7 @@ void RunLambdaNewSyntaxRuntimeTests();
 void RunLambdaOldSyntaxRuntimeTests();
 void RunStorageFormatRuntimeTests();
 void RunSecretFlightTests();
+void RunTempDirectoryExecTests();
 
 } // namespace test
 } // namespace duckbox

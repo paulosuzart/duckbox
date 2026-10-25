@@ -81,6 +81,9 @@ class TenantSandbox {
     config::Policy &GetPolicyMut() { return policy_; }
     const rewriter::TenantKey &GetKey() const { return key_; }
     const std::string &SandboxId() const { return sandbox_id_; }
+    // Per-instance DuckDB temp_directory (`{base}/{id}/{version}-{random}`).
+    // Empty when the daemon option is unset or this instance has no sandbox id.
+    const std::string &ManagedTempDirectory() const { return managed_temp_directory_; }
     int Version() const { return version_; }
     int warmup_count() const { return warmup_count_; }
 
@@ -99,6 +102,7 @@ class TenantSandbox {
     rewriter::TenantKey key_;
     std::string spec_dir_;
     std::string sandbox_id_;
+    std::string managed_temp_directory_;
     int version_ = 0;
     std::shared_ptr<s3::SecretResolver> secrets_;
     std::unique_ptr<ddb::DuckDB> db_;
