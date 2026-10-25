@@ -260,33 +260,10 @@ def node_status(port=5747):
 PY
 }
 
-# Slow owner: C still holds the lease after drain(B); A/B proxy to C.
-# GetFlightInfo while C is live, then SIGSTOP C and DoGet (first-message bound).
-export OWNER_PID="$PID_C"
-"$PY" - <<PY
-$(py_flight_sql)
-import os, signal, time
-
-owner = int(os.environ["OWNER_PID"])
-client = flight.FlightClient("grpc://127.0.0.1:4747")
-info, options = statement_info(client)
-print("GetFlightInfo before freeze ok")
-os.kill(owner, signal.SIGSTOP)
-t0 = time.time()
-try:
-    list(client.do_get(info.endpoints[0].ticket, options))
-    raise SystemExit("DoGet to SIGSTOPped owner should not succeed")
-except SystemExit:
-    raise
-except Exception as e:  # noqa: BLE001
-    elapsed = time.time() - t0
-    print("slow owner DoGet failed as expected", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 2))
-    if elapsed > 20:
-        raise SystemExit(f"proxied DoGet hung too long: {elapsed}")
-PY
-kill -CONT "$PID_C" 2>/dev/null || true
-
 # Healthy-path proxied DoGet latency (owner C is live; client hits proxy A).
+# Do this — and the 150-stream hang — before any freeze longer than lease TTL
+# (5s). A 13s SIGSTOP lets another node steal ownership; later DoGets then
+# succeed locally on A and proxy_inflight stays 0.
 "$PY" - <<PY
 $(py_flight_sql)
 import time
@@ -307,6 +284,9 @@ PY
 # SIGTERM the proxy while N DoGets are hung on a frozen owner. One FlightClient
 # per stream (a shared client serializes DoGet). Caps default 256/256 so N=150
 # must be accepted, not "peer proxy busy". Wait on NodeStatus.proxy_inflight.
+OWNER_LIST="$("$BIN" sandbox list --url grpc://127.0.0.1:4748 --id-prefix cluster-analyst)"
+echo "$OWNER_LIST"
+echo "$OWNER_LIST" | grep -q '"owner":"node-c"'
 export OWNER_PID="$PID_C"
 export PROXY_PID="$PID_A"
 "$PY" - <<PY
@@ -496,6 +476,32 @@ rm -f "$BUSY_YAML"
 PID_A=$!
 wait_port 4747
 wait_port 5747
+
+# After the short freezes above, C should still own. A 13s SIGSTOP exceeds TTL
+# and is only safe once inflight/thread measurements are done.
+export OWNER_PID="$PID_C"
+"$PY" - <<PY
+$(py_flight_sql)
+import os, signal, time
+
+owner = int(os.environ["OWNER_PID"])
+client = flight.FlightClient("grpc://127.0.0.1:4747")
+info, options = statement_info(client)
+print("GetFlightInfo before freeze ok")
+os.kill(owner, signal.SIGSTOP)
+t0 = time.time()
+try:
+    list(client.do_get(info.endpoints[0].ticket, options))
+    raise SystemExit("DoGet to SIGSTOPped owner should not succeed")
+except SystemExit:
+    raise
+except Exception as e:  # noqa: BLE001
+    elapsed = time.time() - t0
+    print("slow owner DoGet failed as expected", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 2))
+    if elapsed > 20:
+        raise SystemExit(f"proxied DoGet hung too long: {elapsed}")
+PY
+kill -CONT "$PID_C" 2>/dev/null || true
 
 # S3 outage longer than TTL (5s): nodes self-fence (exit 3), then restart recovers.
 docker compose pause rustfs

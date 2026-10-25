@@ -2008,6 +2008,7 @@ int RunServer(const ServerOptions &opt_in) {
     sig_th.detach();
 
     st = pub->Serve();
+    const bool requested_stop = shutting_down->load();
     graceful();
     if (renew.joinable()) {
         renew.join();
@@ -2018,7 +2019,9 @@ int RunServer(const ServerOptions &opt_in) {
     servers_gone->store(true);
     StopMetricsHttp();
     SetMetrics(nullptr);
-    if (!st.ok()) {
+    // Flight Serve() often returns a non-OK status after a requested Shutdown.
+    // That is a clean SIGINT/SIGTERM exit, not a serve failure.
+    if (!st.ok() && !requested_stop) {
         std::cerr << "serve failed: " << st.ToString() << "\n";
         return 1;
     }
