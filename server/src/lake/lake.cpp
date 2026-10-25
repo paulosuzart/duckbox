@@ -266,13 +266,16 @@ void RedactPostgresUriUserinfo(std::string &s) {
         while (i < s.size()) {
             if (CiEq(s, i, scheme)) {
                 size_t user = i + slen;
-                // Userinfo ends at whitespace (or EOS), not '/': standard base64
-                // passwords contain '/'. One forward scan records the first ':'
-                // and stops at '@' — never find() to the end, never rescan.
+                // libpq keeps raw whitespace in a URI password
+                // (password='pass word'). '/' is also inside userinfo
+                // (standard base64). One forward scan to EOS records the
+                // first ':' and stops at '@' — never find() to the end,
+                // never rescan, never stop at '/' or whitespace. i and p
+                // only move forward.
                 size_t colon = std::string::npos;
                 size_t at = std::string::npos;
                 size_t p = user;
-                while (p < s.size() && !IsWs(s[p])) {
+                while (p < s.size()) {
                     if (s[p] == '@') {
                         at = p;
                         break;
@@ -283,8 +286,7 @@ void RedactPostgresUriUserinfo(std::string &s) {
                     p++;
                 }
                 if (at == std::string::npos) {
-                    i = (p > i) ? p : i + 1;
-                    continue;
+                    break;
                 }
                 if (colon != std::string::npos && colon < at) {
                     if (!any) {

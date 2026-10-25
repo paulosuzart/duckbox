@@ -46,9 +46,9 @@ std::string ResolvePath(const std::string &base_dir, const std::string &path);
 // backslash-escaped; quoted values with escapes). '=' and ':' inside an
 // unquoted value (base64 padding, key=value lookalikes) do not end it —
 // password= keepme=yes redacts keepme=yes. URI userinfo continues through
-// '/' (base64) until '@' or whitespace. Key names that contain a known
-// secret key are matched (prefer over-redacting). Never apply this to
-// tenant-visible error text.
+// '/' (base64) and raw whitespace (libpq password='pass word') until '@'.
+// Key names that contain a known secret key are matched (prefer
+// over-redacting). Never apply this to tenant-visible error text.
 std::string RedactSecretText(const std::string &text);
 std::string RedactSecretText(const std::string &text, const SecretRedactionContext &ctx);
 

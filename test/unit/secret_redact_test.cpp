@@ -21,8 +21,11 @@ void ExpectNoSecret(const std::string &redacted, const std::string &secret,
                           msg + " (marker)");
 }
 
-// In-place reference for the pattern path (libpq values, URI userinfo through
-// '/' until whitespace). Used only to assert production is never weaker.
+// In-place reference: origin/main's replace/find algorithm plus only the
+// documented #59 libpq fixes (unquoted value to unescaped whitespace;
+// identifier-contains-key) and URI '@' to EOS ('/' and raw whitespace stay
+// inside the password). Not a copy of the production builder. Used only to
+// assert production is never weaker.
 namespace refimpl {
 
 bool IsIdent(char c) {
@@ -187,28 +190,14 @@ void RedactUri(std::string &s, std::vector<std::string> &secrets) {
         while (i < s.size()) {
             if (CiEq(s, i, scheme)) {
                 size_t user = i + std::char_traits<char>::length(scheme);
-                size_t token_end = user;
-                while (token_end < s.size() && !IsWs(s[token_end])) {
-                    token_end++;
-                }
-                size_t at = std::string::npos;
-                for (size_t p = user; p < token_end; p++) {
-                    if (s[p] == '@') {
-                        at = p;
-                        break;
-                    }
-                }
+                // origin/main: find('@') / find(':') to EOS, then replace.
+                // '/' and raw whitespace stay inside the password (libpq).
+                size_t at = s.find('@', user);
                 if (at == std::string::npos) {
                     i++;
                     continue;
                 }
-                size_t colon = std::string::npos;
-                for (size_t p = user; p < at; p++) {
-                    if (s[p] == ':') {
-                        colon = p;
-                        break;
-                    }
-                }
+                size_t colon = s.find(':', user);
                 if (colon != std::string::npos && colon < at) {
                     ReplaceRec(s, colon + 1, at, secrets);
                     i = colon + 1 + 10;
@@ -407,10 +396,42 @@ void duckbox::test::RunSecretRedactPatternTests() {
     ExpectNoSecret(uri_b64, "YWI/jZGVm+Zw==", "URI base64 password with / is redacted");
     Expect(HasCredentialLeak("postgresql://u:paLEAK6/ssLEAK6@h/db"),
            "HasCredentialLeak sees userinfo when password contains /");
+
+    // libpq accepts raw whitespace in a URI password (PQconninfoParse).
+    auto uri_space = RedactSecretText("postgresql://u:PWr18 LEAKr18@h/db");
+    ExpectNoSecret(uri_space, "PWr18 LEAKr18", "URI password containing a space is redacted");
+    Expect(uri_space.find("PWr18") == std::string::npos &&
+               uri_space.find("LEAKr18") == std::string::npos,
+           "URI password with a space does not leak either side");
+    Expect(uri_space.find("h/db") != std::string::npos,
+           "URI host after a space password stays visible");
+    auto uri_tab = RedactSecretText("postgresql://u:PWr18\tLEAKr18@h/db");
+    ExpectNoSecret(uri_tab, "PWr18\tLEAKr18", "URI password containing a tab is redacted");
+    Expect(uri_tab.find("LEAKr18") == std::string::npos,
+           "URI password with a tab does not leak the tail");
+    auto uri_lead_space = RedactSecretText("postgresql://u: leadSPACE@h/db");
+    ExpectNoSecret(uri_lead_space, " leadSPACE", "URI password with a leading space is redacted");
+    Expect(uri_lead_space.find("leadSPACE") == std::string::npos,
+           "URI password with a leading space does not leak");
+    auto uri_slash_space = RedactSecretText("postgresql://u:pa/ss LEAKws@h/db");
+    ExpectNoSecret(uri_slash_space, "pa/ss LEAKws",
+                   "URI password containing / and a space is redacted");
+    Expect(uri_slash_space.find("LEAKws") == std::string::npos,
+           "URI password with / and a space does not leak");
+    auto uri_space_cast =
+        RedactSecretText("SELECT CAST('Zz postgresql://u:PWr18 LEAKr18@h/db' AS INTEGER)");
+    ExpectNoSecret(uri_space_cast, "PWr18 LEAKr18",
+                   "CAST DSN URI password with a space is redacted");
+    Expect(uri_space_cast.find("LEAKr18") == std::string::npos,
+           "CAST DSN URI with a space does not leak");
+    Expect(HasCredentialLeak("postgresql://u:PWr18 LEAKr18@h/db"),
+           "HasCredentialLeak sees userinfo when password contains a space");
+    Expect(HasCredentialLeak("postgresql://u:PWr18\tLEAKr18@h/db"),
+           "HasCredentialLeak sees userinfo when password contains a tab");
     Expect(!HasCredentialLeak("postgresql://postgresql://"),
            "HasCredentialLeak is false for postgresql:// without @");
     Expect(!HasCredentialLeak("://://://"), "HasCredentialLeak is false for :// without @");
-    // Small inputs must walk RedactPostgresUriUserinfo's no-'@' advance so
+    // Small inputs must walk RedactPostgresUriUserinfo's no-'@' stop so
     // new-line coverage stays complete without the 256 KB / 4 MB scale block.
     auto uri_no_at = RedactSecretText("postgresql://postgresql://");
     Expect(uri_no_at == "postgresql://postgresql://",
@@ -516,7 +537,9 @@ void duckbox::test::RunSecretRedactPatternTests() {
                pairs.find("pwd-secret-3") == std::string::npos,
            "multiple key=value pairs are each redacted");
 
-    // Differential: production must not be weaker than the in-place reference.
+    // Differential: production must not be weaker than origin/main's in-place
+    // algorithm + #59 libpq + URI '@' to EOS. 20k+ seeded random concatenations
+    // plus the fixed leak/repro cases.
     std::vector<std::string> diff_inputs = {
         "password=FAKE\\ 37",
         "password= keepme=yes",
@@ -534,11 +557,15 @@ void duckbox::test::RunSecretRedactPatternTests() {
         "postgresql://postgresql://",
         "postgresql://host/db postgres://other/db",
         "postgresql://",
+        "postgresql://u:PWr18 LEAKr18@h/db",
+        "postgresql://u:PWr18\tLEAKr18@h/db",
+        "postgresql://u: leadSPACE@h/db",
+        "postgresql://u:pa/ss LEAKws@h/db",
+        "SELECT CAST('Zz postgresql://u:PWr18 LEAKr18@h/db' AS INTEGER)",
         "SECRET 'quoted-secret-1'",
         "mypassword=prefixed-secret-9",
         "password=x SECRET 'y' postgresql://u:z@h/db",
     };
-    std::mt19937 rng(85);
     const char *frags[] = {
         "password=",
         "secret=",
@@ -548,6 +575,10 @@ void duckbox::test::RunSecretRedactPatternTests() {
         "postgresql://u:p@h/db ",
         "postgresql://u:pa/ss@h/db ",
         "postgresql://u:YWI/jZGVm+Zw==@h/db ",
+        "postgresql://u:PWr18 LEAKr18@h/db ",
+        "postgresql://u:PWr18\tLEAKr18@h/db ",
+        "postgresql://u: leadSPACE@h ",
+        "postgresql://u:pa/ss LEAKws@h/db ",
         "postgres://u:x@h ",
         "SECRET 'abc' ",
         "://",
@@ -558,14 +589,21 @@ void duckbox::test::RunSecretRedactPatternTests() {
         "aaaa",
         "////",
         "@@@@",
+        " ",
+        "\t",
     };
-    for (int n = 0; n < 160; n++) {
-        std::string s;
-        int parts = 1 + static_cast<int>(rng() % 8);
-        for (int p = 0; p < parts; p++) {
-            s += frags[rng() % (sizeof(frags) / sizeof(frags[0]))];
+    const unsigned seeds[] = {85, 59, 2026, 1, 42, 12345, 99991, 314159};
+    constexpr int kPerSeed = 2500;
+    for (unsigned seed : seeds) {
+        std::mt19937 rng(seed);
+        for (int n = 0; n < kPerSeed; n++) {
+            std::string s;
+            int parts = 1 + static_cast<int>(rng() % 8);
+            for (int p = 0; p < parts; p++) {
+                s += frags[rng() % (sizeof(frags) / sizeof(frags[0]))];
+            }
+            diff_inputs.push_back(std::move(s));
         }
-        diff_inputs.push_back(std::move(s));
     }
     for (const auto &in : diff_inputs) {
         refimpl::ExpectNeverWeaker(in, RedactSecretText(in), "differential");
@@ -574,8 +612,10 @@ void duckbox::test::RunSecretRedactPatternTests() {
 #ifndef DUCKBOX_COVERAGE
     // Scaling: 256 KB vs 4 MB (linear ≈16x, quadratic ≈256x). Median of 5 only
     // at 4 MB; one run at 256 KB. Ratio < 64. Times RedactSecretText and
-    // HasCredentialLeak. Compiled out of the coverage build: gcov 32-bit
-    // counters overflow, and timing under -O0 instrumentation is not meaningful.
+    // HasCredentialLeak. Compiled out of the coverage build: timing under
+    // -O0+gcov is not meaningful, and gcovr's suspicious_hits threshold
+    // rejects files whose line hit counts exceed 2^32 (SuspiciousHitsError
+    // on lake.cpp:47 / CiEq; 4,798,288,602). GCC's gcov counters are 64-bit.
     const size_t kSmall = static_cast<size_t>(256) << 10;
     const size_t kBig = static_cast<size_t>(4) << 20;
     constexpr int kRuns = 5;
@@ -750,5 +790,7 @@ void duckbox::test::RunSecretRedactPatternTests() {
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scale_t0)
             .count();
     std::clog << "secret_redact scale block " << scale_ms << " ms\n";
+#else
+    std::clog << "secret_redact scale SKIP (DUCKBOX_COVERAGE)\n";
 #endif
 }
