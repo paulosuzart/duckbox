@@ -146,17 +146,31 @@ std::vector<ddb::Value> RowToValues(const ::arrow::RecordBatch &batch) {
     return out;
 }
 
-std::string EncodeDoPutHandle(const std::string &handle) {
-    std::string inner;
-    inner.push_back(0x0A);
-    uint32_t n = static_cast<uint32_t>(handle.size());
+void AppendLenDelimited(std::string &s, int field, const std::string &v) {
+    s.push_back(static_cast<char>((field << 3) | 2));
+    auto n = static_cast<uint32_t>(v.size());
     while (n > 0x7F) {
-        inner.push_back(static_cast<char>((n & 0x7F) | 0x80));
+        s.push_back(static_cast<char>((n & 0x7F) | 0x80));
         n >>= 7;
     }
-    inner.push_back(static_cast<char>(n));
-    inner += handle;
+    s.push_back(static_cast<char>(n));
+    s.append(v);
+}
+
+std::string EncodeDoPutHandle(const std::string &handle) {
+    std::string inner;
+    AppendLenDelimited(inner, 1, handle);
     return inner;
+}
+
+// Flight SQL CommandPreparedStatementQuery packed as google.protobuf.Any so a
+// non-owner can forward the re-signed handle (bind parameters included).
+FlightDescriptor PreparedStatementDescriptor(const std::string &handle) {
+    std::string any;
+    AppendLenDelimited(
+        any, 1, "type.googleapis.com/arrow.flight.protocol.sql.CommandPreparedStatementQuery");
+    AppendLenDelimited(any, 2, EncodeDoPutHandle(handle));
+    return FlightDescriptor::Command(any);
 }
 
 Status FromEx(const std::exception &e) {
@@ -1081,6 +1095,9 @@ DuckboxFlightSqlServer::MaybeProxyInfo(const RedirectError &re, const FlightDesc
         Metrics().IncProxyError("get_flight_info", "error");
         return ProxyStatus(forwarded.status(), "get_flight_info");
     }
+    // Prepared-statement callers pass a descriptor already rebuilt from
+    // `token` (params included). Statement queries keep the original SQL
+    // command; the owner re-signs.
     (void)token;
     (void)schema;
     return forwarded;
@@ -1246,30 +1263,26 @@ DuckboxFlightSqlServer::DoGetStatement(const ServerCallContext &context,
             return MaybeProxyDoGet(re, ticket, rec.id, rec.key, context,
                                    rec.spec.resources.query_timeout_ms);
         }
+        // Params come from the signed handle. bind_cache_ is a same-node
+        // fallback for clients that reuse the original handle on this node.
         std::vector<ddb::Value> params;
-        if (!h.params_ipc.empty()) {
+        std::string params_ipc = h.params_ipc;
+        if (params_ipc.empty()) {
+            std::lock_guard<std::mutex> g(bind_mu_);
+            auto it = bind_cache_.find(command.statement_handle);
+            if (it != bind_cache_.end()) {
+                params_ipc = it->second;
+            }
+        }
+        if (!params_ipc.empty()) {
             auto buf = std::make_shared<::arrow::Buffer>(
-                reinterpret_cast<const uint8_t *>(h.params_ipc.data()),
-                static_cast<int64_t>(h.params_ipc.size()));
+                reinterpret_cast<const uint8_t *>(params_ipc.data()),
+                static_cast<int64_t>(params_ipc.size()));
             auto rdr = std::make_shared<::arrow::io::BufferReader>(buf);
             ARROW_ASSIGN_OR_RAISE(auto br, ::arrow::ipc::RecordBatchStreamReader::Open(rdr));
             ARROW_ASSIGN_OR_RAISE(auto batch, br->Next());
             if (batch) {
                 params = RowToValues(*batch);
-            }
-        } else {
-            std::lock_guard<std::mutex> g(bind_mu_);
-            auto it = bind_cache_.find(command.statement_handle);
-            if (it != bind_cache_.end() && !it->second.empty()) {
-                auto buf = std::make_shared<::arrow::Buffer>(
-                    reinterpret_cast<const uint8_t *>(it->second.data()),
-                    static_cast<int64_t>(it->second.size()));
-                auto rdr = std::make_shared<::arrow::io::BufferReader>(buf);
-                ARROW_ASSIGN_OR_RAISE(auto br, ::arrow::ipc::RecordBatchStreamReader::Open(rdr));
-                ARROW_ASSIGN_OR_RAISE(auto batch, br->Next());
-                if (batch) {
-                    params = RowToValues(*batch);
-                }
             }
         }
         QueryInterruptWatch watch(context, box);
@@ -1356,15 +1369,15 @@ DuckboxFlightSqlServer::GetFlightInfoPreparedStatement(const ServerCallContext &
                                                        const FlightDescriptor &descriptor) {
     try {
         auto h = signer_->Verify(command.prepared_statement_handle);
-        std::string token;
-        {
+        // A cache miss must not erase parameters already sealed in the handle.
+        if (h.params_ipc.empty()) {
             std::lock_guard<std::mutex> g(bind_mu_);
             auto it = bind_cache_.find(command.prepared_statement_handle);
             if (it != bind_cache_.end()) {
                 h.params_ipc = it->second;
             }
         }
-        token = signer_->Sign(h);
+        auto token = signer_->Sign(h);
         RememberBind(token, h.params_ipc);
         auto current = defs_->Get(h.sandbox_id);
         if (h.handle_gen != current.handle_gen) {
@@ -1381,7 +1394,7 @@ DuckboxFlightSqlServer::GetFlightInfoPreparedStatement(const ServerCallContext &
             auto schema = box->DescribeHandleArrow(h.rewritten_sql);
             return Info(descriptor, token, schema);
         } catch (const RedirectError &re) {
-            return MaybeProxyInfo(re, descriptor, rec.id, rec.key, token,
+            return MaybeProxyInfo(re, PreparedStatementDescriptor(token), rec.id, rec.key, token,
                                   ::arrow::schema({::arrow::field("_empty", ::arrow::null())}));
         }
     } catch (const std::exception &e) {
@@ -1401,17 +1414,17 @@ DuckboxFlightSqlServer::DoGetPreparedStatement(const ServerCallContext &context,
                                                const sql::PreparedStatementQuery &command) {
     sql::StatementQueryTicket t;
     t.statement_handle = command.prepared_statement_handle;
-    {
-        std::lock_guard<std::mutex> g(bind_mu_);
-        auto it = bind_cache_.find(command.prepared_statement_handle);
-        if (it != bind_cache_.end()) {
-            try {
-                auto h = signer_->Verify(command.prepared_statement_handle);
+    try {
+        auto h = signer_->Verify(command.prepared_statement_handle);
+        if (h.params_ipc.empty()) {
+            std::lock_guard<std::mutex> g(bind_mu_);
+            auto it = bind_cache_.find(command.prepared_statement_handle);
+            if (it != bind_cache_.end()) {
                 h.params_ipc = it->second;
                 t.statement_handle = signer_->Sign(h);
-            } catch (...) {
             }
         }
+    } catch (...) {
     }
     return DoGetStatement(context, t);
 }
