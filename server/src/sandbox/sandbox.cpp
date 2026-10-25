@@ -190,7 +190,7 @@ TenantSandbox::~TenantSandbox() {
 }
 
 void TenantSandbox::Passivate(const char *reason) {
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<std::timed_mutex> hold(mu_);
     std::lock_guard<std::mutex> interrupt(interrupt_mu_);
     bool was_warm = static_cast<bool>(db_);
     con_.reset();
@@ -212,7 +212,7 @@ void TenantSandbox::Interrupt() {
 }
 
 void TenantSandbox::Warmup(bool validate_lake) {
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<std::timed_mutex> hold(mu_);
     if (db_) {
         Touch();
         return;
@@ -542,7 +542,7 @@ QueryOutput TenantSandbox::Execute(const std::string &sql) {
     auto t0 = std::chrono::steady_clock::now();
     try {
         Warmup(false);
-        std::lock_guard<std::mutex> hold(mu_);
+        std::lock_guard<std::timed_mutex> hold(mu_);
         Touch();
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto out = RunTimed(rewritten, {});
@@ -566,7 +566,7 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql,
     auto t0 = std::chrono::steady_clock::now();
     try {
         Warmup(false);
-        std::lock_guard<std::mutex> hold(mu_);
+        std::lock_guard<std::timed_mutex> hold(mu_);
         Touch();
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto out = RunTimed(rewritten, std::move(params));
@@ -589,7 +589,7 @@ QueryOutput TenantSandbox::ExecuteHandle(const std::string &sql, std::vector<ddb
     auto t0 = std::chrono::steady_clock::now();
     try {
         Warmup(false);
-        std::lock_guard<std::mutex> hold(mu_);
+        std::lock_guard<std::timed_mutex> hold(mu_);
         Touch();
         auto out = RunTimed(sql, std::move(params));
         FinishQuery(policy_, key_, cold,
@@ -644,14 +644,14 @@ std::string StripOrderByLimitForExtract(const std::string &sql) {
 
 QueryOutput TenantSandbox::ExecuteUnrewritten(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<std::timed_mutex> hold(mu_);
     Touch();
     return RunTimed(sql, {});
 }
 
 ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<std::timed_mutex> hold(mu_);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();
@@ -693,7 +693,7 @@ ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::stri
 
 std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<std::timed_mutex> hold(mu_);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();
@@ -732,7 +732,7 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
 
 std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<std::timed_mutex> hold(mu_);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();
@@ -776,7 +776,12 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std
 
 std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeHandleArrow(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    const int64_t bound_ms =
+        policy_.resources.query_timeout_ms > 0 ? policy_.resources.query_timeout_ms : 5000;
+    if (!mu_.try_lock_for(std::chrono::milliseconds(bound_ms))) {
+        throw UnavailableError("sandbox busy");
+    }
+    std::lock_guard<std::timed_mutex> hold(mu_, std::adopt_lock);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();

@@ -108,7 +108,10 @@ class TenantSandbox {
     std::unique_ptr<ddb::DuckDB> db_;
     std::unique_ptr<ddb::Connection> con_;
     std::mutex interrupt_mu_; // Interrupt vs Passivate; not held during Execute
-    std::mutex mu_; // held for the whole user statement (Execute / ExtractPlan / Describe)
+    // Held for the whole user statement (Execute / ExtractPlan / Describe).
+    // timed so GetFlightInfo (DescribeHandleArrow) cannot wait forever behind
+    // a DoGet stuck in Arrow #31235 send-after-cancel.
+    std::timed_mutex mu_;
     std::chrono::steady_clock::time_point last_used_ = std::chrono::steady_clock::now();
     int64_t last_used_wall_ms_ = 0;
     int warmup_count_ = 0;

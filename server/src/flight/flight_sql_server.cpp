@@ -661,6 +661,13 @@ PeerFlight::~PeerFlight() {
 ::arrow::flight::FlightClientOptions PeerFlight::PeerClientOpts() const {
     auto opt = ::arrow::flight::FlightClientOptions::Defaults();
     AddPeerKeepalive(opt);
+    // gRPC MIN_CONNECT_TIMEOUT defaults to 20s and is independent of the RPC
+    // deadline. Cap reconnect so a SIGSTOP'd / half-open peer cannot sit in
+    // CONNECTING longer than proxy_timeout_ms.
+    const int connect_ms = static_cast<int>(timeout_ms_ > 0 ? timeout_ms_ : 5000);
+    opt.generic_options.emplace_back(GRPC_ARG_MIN_RECONNECT_BACKOFF_MS, connect_ms);
+    opt.generic_options.emplace_back(GRPC_ARG_MAX_RECONNECT_BACKOFF_MS, connect_ms);
+    opt.generic_options.emplace_back(GRPC_ARG_INITIAL_RECONNECT_BACKOFF_MS, connect_ms);
     return opt;
 }
 
@@ -715,7 +722,19 @@ PeerFlight::Dial(const std::string &url) {
     auto auth = std::make_unique<PeerClientAuth>(secret_);
     ::arrow::flight::FlightCallOptions auth_opt;
     auth_opt.timeout = ::arrow::flight::TimeoutDuration(static_cast<double>(timeout_ms_) / 1000.0);
-    ARROW_RETURN_NOT_OK(client->Authenticate(auth_opt, std::move(auth)));
+    const auto t0 = std::chrono::steady_clock::now();
+    auto st = client->Authenticate(auth_opt, std::move(auth));
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    if (!st.ok()) {
+        // Handshake Write/Read can surface Deadline Exceeded as Internal
+        // ("Could not finish writing") when the peer is SIGSTOP'd.
+        if (IsPeerTimeout(st) || elapsed_ms + 100 >= timeout_ms_) {
+            return Status::IOError("peer proxy timed out");
+        }
+        return st;
+    }
     return client;
 }
 
@@ -765,7 +784,17 @@ PeerFlight::DialTransport(const std::string &url) {
     auto auth = std::make_unique<PeerClientAuth>(secret_);
     ::arrow::flight::FlightCallOptions auth_opt;
     auth_opt.timeout = ::arrow::flight::TimeoutDuration(static_cast<double>(timeout_ms_) / 1000.0);
-    ARROW_RETURN_NOT_OK(transport->Authenticate(auth_opt, std::move(auth)));
+    const auto t0 = std::chrono::steady_clock::now();
+    auto st = transport->Authenticate(auth_opt, std::move(auth));
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    if (!st.ok()) {
+        if (IsPeerTimeout(st) || elapsed_ms + 100 >= timeout_ms_) {
+            return Status::IOError("peer proxy timed out");
+        }
+        return st;
+    }
     return transport;
 }
 

@@ -25,10 +25,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 
 namespace {
 
@@ -608,6 +612,58 @@ void TestSlowStubStream() {
     owner.Stop();
 }
 
+void TestSigstopPeerGetFlightInfo() {
+    ProxyFixture fx(kProxyTimeoutMs);
+    int fds[2];
+    Expect(pipe(fds) == 0, "sigstop pipe");
+    auto cfg = fx.daemon_b;
+    pid_t pid = fork();
+    Expect(pid >= 0, "sigstop fork");
+    if (pid == 0) {
+        close(fds[0]);
+        OwnerStub srv(OwnerStub::Mode::HangInfo);
+        auto loc = Location::ForGrpcTcp("127.0.0.1", 0);
+        FlightServerOptions opt(*loc);
+        opt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
+        duckbox::flight::ApplyInternalListenerKeepalive(opt);
+        if (!srv.Init(opt).ok()) {
+            _exit(2);
+        }
+        const int port = srv.port();
+        std::thread th([&srv] { (void)srv.Serve(); });
+        th.detach();
+        dprintf(fds[1], "%d\n", port);
+        close(fds[1]);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        raise(SIGSTOP);
+        pause();
+        _exit(0);
+    }
+    close(fds[1]);
+    char buf[32] = {};
+    const ssize_t n = read(fds[0], buf, sizeof(buf) - 1);
+    close(fds[0]);
+    Expect(n > 0, "sigstop child published a port");
+    const int port = std::atoi(buf);
+    const std::string url = "grpc://127.0.0.1:" + std::to_string(port);
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    auto desc = FlightDescriptor::Command("proxy-timeout");
+    auto t0 = std::chrono::steady_clock::now();
+    auto info = fx.peers_a->ForwardGetFlightInfo(url, desc, fx.rec.id, fx.rec.key);
+    auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::cout << "sigstop_peer_getflightinfo_ms=" << elapsed_ms << "\n";
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+    Expect(!info.ok(), "GetFlightInfo to a SIGSTOP'd peer fails");
+    auto msg = info.status().ToString();
+    Expect(absl::StrContains(msg, "peer proxy timed out"),
+           "SIGSTOP'd peer is a timeout, not an unbounded wait");
+    Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 4000,
+           "SIGSTOP'd peer GetFlightInfo is bounded by proxy_timeout_ms");
+}
+
 } // namespace
 
 void duckbox::test::RunProxyTimeoutTests() {
@@ -617,4 +673,5 @@ void duckbox::test::RunProxyTimeoutTests() {
     TestSlowStubStream();
     TestLongProxiedQuery();
     TestOwnerInterruptOnCancel();
+    TestSigstopPeerGetFlightInfo();
 }

@@ -237,15 +237,18 @@ def command_statement_query(sql):
     body = _len_field(1, sql.encode())
     return _len_field(1, b"type.googleapis.com/arrow.flight.protocol.sql.CommandStatementQuery") + _len_field(2, body)
 
-def call_opts():
-    return flight.FlightCallOptions(headers=[
+def call_opts(timeout=None):
+    kw = dict(headers=[
         (b"x-duckbox-sandbox", b"cluster-analyst"),
         (b"x-duckbox-caller", b"local"),
         (b"x-duckbox-key", b"tenant_21:user_sergio"),
     ])
+    if timeout is not None:
+        kw["timeout"] = timeout
+    return flight.FlightCallOptions(**kw)
 
-def statement_info(client, sql="SELECT id FROM deals"):
-    options = call_opts()
+def statement_info(client, sql="SELECT id FROM deals", timeout=None):
+    options = call_opts(timeout)
     info = client.get_flight_info(
         flight.FlightDescriptor.for_command(command_statement_query(sql)), options)
     return info, options
@@ -493,29 +496,58 @@ PID_A=$!
 wait_port 4747
 wait_port 5747
 
-# Do not SIGSTOP the owner longer than lease TTL here. A 13s freeze lets another
-# node steal the sandbox and has hung GetFlightInfo for the full step budget
-# (owner gRPC threads still draining cancelled peer DoGets). Whole-call deadline
-# is covered by test/integration/proxy_timeout_test.cpp.
-# Restart C so leftover cancelled streams cannot wedge the S3-outage tail.
-kill -CONT "$PID_C" 2>/dev/null || true
-if [[ -n "${PID_C:-}" ]] && kill -0 "$PID_C" 2>/dev/null; then
-	kill -9 "$PID_C" 2>/dev/null || true
-	wait "$PID_C" 2>/dev/null || true
-fi
-PID_C=""
-"$BIN" serve --daemon "$ROOT/daemons/cluster-node-c.yaml" --no-metrics &
-PID_C=$!
-wait_port 4749
-wait_port 5749
-"$PY" - <<'PY'
-from duckbox_client import connect
-db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=20)
-df = db.query("SELECT id FROM deals ORDER BY id")
-assert len(df) >= 1, df
-print("cluster ok after hung-DoGet / over-cap", list(df["id"]))
-db.close()
+# Owner freeze longer than lease TTL (5s). GetFlightInfo is bounded by
+# proxy_timeout_ms (5s); DoGet by query_timeout_ms + proxy_timeout_ms (8+5=13s).
+# Either a timeout or a post-takeover success is fine — an unbounded wait is not.
+# Client FlightCallOptions.timeout is a safety net; the server must return first.
+export OWNER_PID="$PID_C"
+"$PY" - <<PY
+$(py_flight_sql)
+import os, signal, time
+
+owner = int(os.environ["OWNER_PID"])
+# Documented bounds (cluster YAML defaults): proxy_timeout_ms=5000,
+# query_timeout_ms=8000, first-message ceiling=60s.
+GETINFO_BOUND_S = 5.0
+DOGET_BOUND_S = 13.0
+client = flight.FlightClient("grpc://127.0.0.1:4747")
+
+t0 = time.time()
+try:
+    info, options = statement_info(client, timeout=GETINFO_BOUND_S + 2)
+    print("GetFlightInfo before freeze ok elapsed", round(time.time() - t0, 3), flush=True)
+except Exception as e:  # noqa: BLE001
+    elapsed = time.time() - t0
+    print("GetFlightInfo before freeze failed", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 3), flush=True)
+    if elapsed > GETINFO_BOUND_S + 2.5:
+        raise SystemExit(f"GetFlightInfo before freeze hung: {elapsed}")
+    raise
+
+ticket = info.endpoints[0].ticket
+os.kill(owner, signal.SIGSTOP)
+
+t1 = time.time()
+try:
+    info2, _ = statement_info(client, timeout=GETINFO_BOUND_S + 2)
+    print("GetFlightInfo during freeze ok (takeover) elapsed", round(time.time() - t1, 3), flush=True)
+except Exception as e:  # noqa: BLE001
+    elapsed = time.time() - t1
+    print("GetFlightInfo during freeze failed", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 3), flush=True)
+    if elapsed > GETINFO_BOUND_S + 2.5:
+        raise SystemExit(f"GetFlightInfo during freeze hung: {elapsed}")
+
+t2 = time.time()
+try:
+    doget_opts = call_opts(timeout=DOGET_BOUND_S + 2)
+    list(client.do_get(ticket, doget_opts))
+    print("DoGet during freeze ok elapsed", round(time.time() - t2, 3), flush=True)
+except Exception as e:  # noqa: BLE001
+    elapsed = time.time() - t2
+    print("DoGet during freeze failed", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 3), flush=True)
+    if elapsed > DOGET_BOUND_S + 2.5:
+        raise SystemExit(f"DoGet during freeze hung: {elapsed}")
 PY
+kill -CONT "$PID_C" 2>/dev/null || true
 
 # S3 outage longer than TTL (5s): nodes self-fence (exit 3), then restart recovers.
 docker compose pause rustfs
