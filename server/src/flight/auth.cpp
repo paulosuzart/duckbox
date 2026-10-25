@@ -26,14 +26,26 @@ std::string BearerTokenFromAuthorization(const std::string &header) {
 }
 
 std::string ResolveBearerToken(const std::string &explicit_token) {
+    std::string raw;
     if (!explicit_token.empty()) {
-        return explicit_token;
+        raw = explicit_token;
+    } else {
+        const char *env = std::getenv(kBearerTokenEnv);
+        if (env == nullptr || env[0] == '\0') {
+            return "";
+        }
+        raw = env;
     }
-    const char *env = std::getenv(kBearerTokenEnv);
-    if (env == nullptr || env[0] == '\0') {
-        return "";
+    auto trimmed = std::string(absl::StripAsciiWhitespace(raw));
+    if (trimmed.empty()) {
+        throw AuthError(kInvalidBearerToken);
     }
-    return std::string(env);
+    for (char ch : trimmed) {
+        if (absl::ascii_iscntrl(static_cast<unsigned char>(ch))) {
+            throw AuthError(kInvalidBearerToken);
+        }
+    }
+    return trimmed;
 }
 
 TenantKey Authenticate(const Policy &policy, const AuthRequest &req) {

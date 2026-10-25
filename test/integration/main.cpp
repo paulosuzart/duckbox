@@ -23,5 +23,6 @@ int main() {
     RunAgentModeRuntimeTests();
     RunSecretFlightTests();
     RunTempDirectoryExecTests();
+    RunTokenSanitizeTests();
     return ReportAndExit("integration");
 }

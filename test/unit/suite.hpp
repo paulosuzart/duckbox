@@ -31,6 +31,7 @@ void RunTableFunction20Tests();
 void RunMacroCatalog20Tests();
 void RunLakeAttachSecretTests();
 void RunTempDirectoryTests();
+void RunTokenSanitizeTests();
 
 } // namespace test
 } // namespace duckbox

@@ -31,5 +31,6 @@ int main() {
     RunMacroCatalog20Tests();
     RunLakeAttachSecretTests();
     RunTempDirectoryTests();
+    RunTokenSanitizeTests();
     return ReportAndExit("unit");
 }

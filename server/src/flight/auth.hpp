@@ -26,9 +26,13 @@ struct AuthRequest {
 std::string BearerTokenFromAuthorization(const std::string &header);
 
 // CLI / Python client token. Explicit --token / token= wins; otherwise
-// DUCKBOX_TOKEN. Empty means no Authorization header (insecure-dev caller).
+// DUCKBOX_TOKEN. Surrounding ASCII whitespace is stripped. Empty after
+// trim, or any ASCII control (CR, LF, NUL, other < 0x20 or DEL), is
+// rejected with kInvalidBearerToken (never echoes the token). Empty
+// flag + unset/empty env means no Authorization header (insecure-dev).
 // Never logs the value.
 inline constexpr const char *kBearerTokenEnv = "DUCKBOX_TOKEN";
+inline constexpr const char *kInvalidBearerToken = "invalid bearer token";
 std::string ResolveBearerToken(const std::string &explicit_token);
 
 // Parses req.key_header with policy.key. AuthError if missing/unparseable.
