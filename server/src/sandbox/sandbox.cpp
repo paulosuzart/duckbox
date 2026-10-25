@@ -1,8 +1,3 @@
-#if defined(__APPLE__)
-#ifndef _DARWIN_C_SOURCE
-#define _DARWIN_C_SOURCE 1
-#endif
-#endif
 #include "sandbox/sandbox.hpp"
 #include "arrow/arrow_ipc.hpp"
 #include "arrow/arrow_types.hpp"
@@ -20,21 +15,12 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
 #include <chrono>
 #include <condition_variable>
-#include <ctime>
 #include <iostream>
 #include <mutex>
-#include <pthread.h>
 #include <sstream>
 #include <thread>
-
-#if defined(__APPLE__)
-// macOS has the symbol (10.12+) but headers hide it under feature tests.
-extern "C" int pthread_mutex_timedlock(pthread_mutex_t *mutex,
-                                       const struct timespec *abstime);
-#endif
 
 namespace duckbox {
 namespace sandbox {
@@ -57,48 +43,6 @@ thread_local std::string g_hardening_read_error_setting;
 std::mutex g_query_error_mu;
 std::string g_query_error_inject;
 #endif
-
-// Apple libc++ timed_mutex::try_lock / try_lock_for and even a try_lock
-// yield loop have hung the macOS integration suite. pthread_mutex_timedlock
-// is the OS primitive that actually returns. Deadline is steady_clock;
-// timedlock uses CLOCK_REALTIME, so convert the remaining duration.
-bool LockMutexUntil(std::mutex &mu, std::chrono::steady_clock::time_point deadline) {
-    while (true) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) {
-            return mu.try_lock();
-        }
-        const auto rem =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now);
-        timespec ts{};
-        if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
-            return mu.try_lock();
-        }
-        const auto add_ns = rem.count();
-        ts.tv_sec += static_cast<time_t>(add_ns / 1000000000LL);
-        ts.tv_nsec += static_cast<long>(add_ns % 1000000000LL);
-        if (ts.tv_nsec >= 1000000000L) {
-            ts.tv_sec += 1;
-            ts.tv_nsec -= 1000000000L;
-        }
-        const int rc = pthread_mutex_timedlock(mu.native_handle(), &ts);
-        if (rc == 0) {
-            return true;
-        }
-        if (rc == ETIMEDOUT) {
-            return false;
-        }
-        if (rc == EINVAL || rc == ENOTSUP) {
-            while (!mu.try_lock()) {
-                if (std::chrono::steady_clock::now() >= deadline) {
-                    return false;
-                }
-                std::this_thread::yield();
-            }
-            return true;
-        }
-    }
-}
 
 // Booleans compare case-insensitively after trim. allowed_configs must
 // read back as exactly [] — empty / null / none is not accepted.
@@ -257,7 +201,7 @@ TenantSandbox::~TenantSandbox() {
 }
 
 void TenantSandbox::Passivate(const char *reason) {
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     std::lock_guard<std::mutex> interrupt(interrupt_mu_);
     bool was_warm = static_cast<bool>(db_);
     con_.reset();
@@ -279,7 +223,7 @@ void TenantSandbox::Interrupt() {
 }
 
 void TenantSandbox::Warmup(bool validate_lake) {
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     WarmupLocked(validate_lake);
 }
 
@@ -613,7 +557,7 @@ QueryOutput TenantSandbox::Execute(const std::string &sql) {
     auto t0 = std::chrono::steady_clock::now();
     try {
         Warmup(false);
-        std::lock_guard<std::mutex> hold(mu_);
+        std::lock_guard<SandboxMutex> hold(mu_);
         Touch();
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto out = RunTimed(rewritten, {});
@@ -637,7 +581,7 @@ QueryOutput TenantSandbox::ExecuteRewritten(const std::string &sql,
     auto t0 = std::chrono::steady_clock::now();
     try {
         Warmup(false);
-        std::lock_guard<std::mutex> hold(mu_);
+        std::lock_guard<SandboxMutex> hold(mu_);
         Touch();
         auto rewritten = RewriteUserSql(sql, policy_, key_);
         auto out = RunTimed(rewritten, std::move(params));
@@ -660,7 +604,7 @@ QueryOutput TenantSandbox::ExecuteHandle(const std::string &sql, std::vector<ddb
     auto t0 = std::chrono::steady_clock::now();
     try {
         Warmup(false);
-        std::lock_guard<std::mutex> hold(mu_);
+        std::lock_guard<SandboxMutex> hold(mu_);
         Touch();
         auto out = RunTimed(sql, std::move(params));
         FinishQuery(policy_, key_, cold,
@@ -715,14 +659,14 @@ std::string StripOrderByLimitForExtract(const std::string &sql) {
 
 QueryOutput TenantSandbox::ExecuteUnrewritten(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     Touch();
     return RunTimed(sql, {});
 }
 
 ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();
@@ -764,7 +708,7 @@ ddb::unique_ptr<ddb::LogicalOperator> TenantSandbox::ExtractPlan(const std::stri
 
 std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();
@@ -803,7 +747,7 @@ std::vector<ColumnSchema> TenantSandbox::DescribeRewritten(const std::string &sq
 
 std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeRewrittenArrow(const std::string &sql) {
     Warmup(false);
-    std::lock_guard<std::mutex> hold(mu_);
+    std::lock_guard<SandboxMutex> hold(mu_);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
         RecoverAfterFailure();
@@ -849,16 +793,16 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeHandleArrow(const std::s
     // Same ceiling as proxied DoGet when query_timeout_ms is 0
     // (lease.proxy_first_message_max_ms). GetFlightInfo used to call Warmup()
     // first — Warmup's lock_guard (this file, Warmup) waited unbounded if a
-    // DoGet held mu_ (Arrow #31235). try_lock first, then WarmupLocked.
+    // DoGet held mu_ (Arrow #31235). try_lock_until first, then WarmupLocked.
     const int64_t bound_ms = policy_.resources.query_timeout_ms > 0
                                  ? policy_.resources.query_timeout_ms
                                  : daemon_.lease.proxy_first_message_max_ms;
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(bound_ms);
-    if (!LockMutexUntil(mu_, deadline)) {
+    if (!mu_.try_lock_until(deadline)) {
         throw UnavailableError("sandbox describe timed out");
     }
-    std::lock_guard<std::mutex> hold(mu_, std::adopt_lock);
+    std::lock_guard<SandboxMutex> hold(mu_, std::adopt_lock);
     WarmupLocked(false);
     Touch();
     if (con_ && con_->HasActiveTransaction()) {
