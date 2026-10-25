@@ -45,9 +45,15 @@ std::string ResolvePath(const std::string &base_dir, const std::string &path);
 // Pattern values follow libpq conninfo rules (whitespace terminates unless
 // backslash-escaped; quoted values with escapes). '=' and ':' inside an
 // unquoted value (base64 padding, key=value lookalikes) do not end it —
-// password= keepme=yes redacts keepme=yes. URI userinfo continues through
-// '/' (base64) and raw whitespace (libpq password='pass word') until '@'.
-// Key names that contain a known secret key are matched (prefer
+// password= keepme=yes redacts keepme=yes. URI scan (postgresql:// /
+// postgres://): one forward pointer from after the scheme records the
+// first ':' and stops at '@', a line terminator, or EOS. Space, tab, and
+// '/' stay inside the password (libpq). If '@' is found, the password is
+// redacted and the scan continues at '@'. If '@' is not found before the
+// line or string ends (DuckDB "LINE 1:" excerpts cut at ~60 characters
+// inside a password), everything after the scheme is redacted up to that
+// bound. Over-redacting a host in an operator log is acceptable. Key
+// names that contain a known secret key are matched (prefer
 // over-redacting). Never apply this to tenant-visible error text.
 std::string RedactSecretText(const std::string &text);
 std::string RedactSecretText(const std::string &text, const SecretRedactionContext &ctx);

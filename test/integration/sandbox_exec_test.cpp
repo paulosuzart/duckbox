@@ -76,6 +76,36 @@ void duckbox::test::RunSandboxExecTests() {
                "operator log records the catalog-down event");
     }
     {
+        // DuckDB LINE 1: excerpts cut at ~60 characters. A password that
+        // starts after `SELECT CAST('Zz postgresql://u:` is truncated
+        // before '@', so the excerpt has no userinfo terminator.
+        const char *pw = "TRUNCpw20SECRETLEAK";
+        auto sql = std::string("SELECT CAST('Zz postgresql://u:") + pw + "@h/db' AS INTEGER)";
+        std::ostringstream log;
+        auto *old = std::clog.rdbuf(log.rdbuf());
+        std::string err;
+        try {
+            box_yaml.Execute(sql);
+            std::clog.rdbuf(old);
+            Expect(false, "truncated-URI CAST must fail");
+        } catch (const std::exception &e) {
+            std::clog.rdbuf(old);
+            err = e.what();
+        }
+        Expect(!err.empty(), "truncated-URI CAST fails");
+        Expect(err.find(pw) == std::string::npos, "client error has no truncated URI password");
+        auto logged = log.str();
+        Expect(!logged.empty(), "truncated-URI CAST is written to the operator log");
+        Expect(logged.find(pw) == std::string::npos,
+               "operator log redacts a LINE 1: password cut before @");
+        Expect(logged.find("TRUNCpw") == std::string::npos &&
+                   logged.find("SECRETLEAK") == std::string::npos,
+               "operator log has no fragment of the truncated URI password");
+        Expect(logged.find(kCatalogUnavailableClientError) != std::string::npos ||
+                   logged.find("lake catalog unavailable") != std::string::npos,
+               "truncated-URI CAST is logged as a catalog/credential event");
+    }
+    {
         // Single-connection failure (injection): keyword and URL DSNs must not
         // leak on Execute, Describe, prepared, ExtractPlan.
         struct DsnCase {

@@ -190,11 +190,18 @@ void RedactUri(std::string &s, std::vector<std::string> &secrets) {
         while (i < s.size()) {
             if (CiEq(s, i, scheme)) {
                 size_t user = i + std::char_traits<char>::length(scheme);
-                // origin/main: find('@') / find(':') to EOS, then replace.
-                // '/' and raw whitespace stay inside the password (libpq).
+                // origin/main: find('@') / find(':') then replace. '@' is
+                // accepted only before EOL (LINE 1: excerpt bound). '/' and
+                // raw whitespace stay inside the password (libpq). No '@'
+                // before that bound: redact after the scheme (truncated).
+                size_t line = user;
+                while (line < s.size() && s[line] != '\n' && s[line] != '\r') {
+                    line++;
+                }
                 size_t at = s.find('@', user);
-                if (at == std::string::npos) {
-                    i++;
+                if (at == std::string::npos || at >= line) {
+                    ReplaceRec(s, user, line, secrets);
+                    i = user + 10;
                     continue;
                 }
                 size_t colon = s.find(':', user);
@@ -428,19 +435,33 @@ void duckbox::test::RunSecretRedactPatternTests() {
            "HasCredentialLeak sees userinfo when password contains a space");
     Expect(HasCredentialLeak("postgresql://u:PWr18\tLEAKr18@h/db"),
            "HasCredentialLeak sees userinfo when password contains a tab");
-    Expect(!HasCredentialLeak("postgresql://postgresql://"),
-           "HasCredentialLeak is false for postgresql:// without @");
+    Expect(HasCredentialLeak("postgresql://postgresql://"),
+           "HasCredentialLeak is true for postgresql:// without @");
     Expect(!HasCredentialLeak("://://://"), "HasCredentialLeak is false for :// without @");
-    // Small inputs must walk RedactPostgresUriUserinfo's no-'@' stop so
-    // new-line coverage stays complete without the 256 KB / 4 MB scale block.
+    // No '@' before EOL/EOS: redact after the scheme (truncated LINE 1:).
     auto uri_no_at = RedactSecretText("postgresql://postgresql://");
-    Expect(uri_no_at == "postgresql://postgresql://",
-           "repeated postgresql:// without @ is left intact");
+    Expect(uri_no_at == std::string("postgresql://") + kRedactedMarker,
+           "repeated postgresql:// without @ is redacted after the scheme");
     auto uri_no_userinfo = RedactSecretText("postgresql://host/db postgres://other/db");
-    Expect(uri_no_userinfo == "postgresql://host/db postgres://other/db",
-           "postgres URI without userinfo is left intact");
+    Expect(uri_no_userinfo == std::string("postgresql://") + kRedactedMarker,
+           "postgres URI without @ is redacted through the end of the line");
     auto uri_scheme_eos = RedactSecretText("postgresql://");
-    Expect(uri_scheme_eos == "postgresql://", "bare postgresql:// scheme is left intact");
+    Expect(uri_scheme_eos == std::string("postgresql://") + kRedactedMarker,
+           "bare postgresql:// scheme is redacted");
+    auto uri_trunc = RedactSecretText("LINE 1: SELECT CAST('Zz postgresql://u:TRUNCpw20SECRE");
+    ExpectNoSecret(uri_trunc, "TRUNCpw20SECRE", "truncated LINE 1: URI password is redacted");
+    Expect(uri_trunc.find("LINE 1:") != std::string::npos, "LINE 1: prefix stays visible");
+    auto uri_trunc_nl =
+        RedactSecretText("Conversion Error: see below\nLINE 1: SELECT CAST('Zz postgresql://"
+                         "u:TRUNCpw20SECRE\n^");
+    ExpectNoSecret(uri_trunc_nl, "TRUNCpw20SECRE",
+                   "truncated LINE 1: URI password on its own line is redacted");
+    Expect(uri_trunc_nl.find("Conversion Error") != std::string::npos,
+           "text before a truncated LINE 1: stays visible");
+    Expect(HasCredentialLeak("LINE 1: SELECT CAST('Zz postgresql://u:TRUNCpw20SECRE"),
+           "HasCredentialLeak sees a truncated postgres URI without @");
+    Expect(HasCredentialLeak("postgresql://user@host postgresql://u:TRUNCpw20SECRE"),
+           "HasPostgresUriWithoutAt continues after user@ to a truncated URI");
     Expect(!HasCredentialLeak("http://user@host"),
            "://user@ without a password colon is not userinfo");
     Expect(HasCredentialLeak("http://user@host postgresql://u:p@h"),
@@ -562,6 +583,8 @@ void duckbox::test::RunSecretRedactPatternTests() {
         "postgresql://u: leadSPACE@h/db",
         "postgresql://u:pa/ss LEAKws@h/db",
         "SELECT CAST('Zz postgresql://u:PWr18 LEAKr18@h/db' AS INTEGER)",
+        "LINE 1: SELECT CAST('Zz postgresql://u:TRUNCpw20SECRE",
+        "Conversion Error: see below\nLINE 1: SELECT CAST('Zz postgresql://u:TRUNCpw20SECRE\n^",
         "SECRET 'quoted-secret-1'",
         "mypassword=prefixed-secret-9",
         "password=x SECRET 'y' postgresql://u:z@h/db",
@@ -579,6 +602,8 @@ void duckbox::test::RunSecretRedactPatternTests() {
         "postgresql://u:PWr18\tLEAKr18@h/db ",
         "postgresql://u: leadSPACE@h ",
         "postgresql://u:pa/ss LEAKws@h/db ",
+        "postgresql://u:TRUNCpw20SECRE",
+        "LINE 1: SELECT CAST('Zz postgresql://u:TRUNCpw ",
         "postgres://u:x@h ",
         "SECRET 'abc' ",
         "://",
@@ -770,6 +795,14 @@ void duckbox::test::RunSecretRedactPatternTests() {
         }
         return s;
     };
+    auto make_trunc = [](size_t n) {
+        std::string s;
+        s.reserve(n + 32);
+        while (s.size() < n) {
+            s += "postgresql://u:TRUNCpw ";
+        }
+        return s;
+    };
     expect_scales(
         make_uri_slash,
         [](const std::string &, const std::string &out) {
@@ -783,8 +816,24 @@ void duckbox::test::RunSecretRedactPatternTests() {
                   "repeated ://");
     expect_scales(make_pgsqlx, no_userinfo("repeated pgsqlx:// without @ is unchanged"),
                   "repeated pgsqlx://");
-    expect_scales(make_uri, no_userinfo("repeated postgresql:// without @ is not userinfo"),
-                  "HasCredentialLeak postgresql://");
+    expect_scales(
+        make_uri,
+        [](const std::string &in, const std::string &out) {
+            Expect(HasCredentialLeak(in), "repeated postgresql:// without @ is a truncated URI");
+            Expect(out.find(kRedactedMarker) != std::string::npos,
+                   "repeated postgresql:// without @ is redacted");
+        },
+        "HasCredentialLeak postgresql://");
+    expect_scales(
+        make_trunc,
+        [](const std::string &in, const std::string &out) {
+            Expect(HasCredentialLeak(in), "truncated URI without @ is a credential leak");
+            Expect(out.find("TRUNCpw") == std::string::npos,
+                   "repeated truncated URI password is redacted");
+            Expect(out.find(kRedactedMarker) != std::string::npos,
+                   "repeated truncated URI uses the marker");
+        },
+        "repeated truncated URI without @");
 
     auto scale_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scale_t0)

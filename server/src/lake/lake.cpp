@@ -268,14 +268,16 @@ void RedactPostgresUriUserinfo(std::string &s) {
                 size_t user = i + slen;
                 // libpq keeps raw whitespace in a URI password
                 // (password='pass word'). '/' is also inside userinfo
-                // (standard base64). One forward scan to EOS records the
-                // first ':' and stops at '@' — never find() to the end,
-                // never rescan, never stop at '/' or whitespace. i and p
-                // only move forward.
+                // (standard base64). One forward scan records the first
+                // ':' and stops at '@', a line terminator, or EOS —
+                // never find() to the end, never rescan, never stop at
+                // ' ' / '\t' / '/'. i and p only move forward.
+                // No '@' before EOL/EOS: DuckDB LINE 1: excerpt cut
+                // inside the password; redact after the scheme.
                 size_t colon = std::string::npos;
                 size_t at = std::string::npos;
                 size_t p = user;
-                while (p < s.size()) {
+                while (p < s.size() && s[p] != '\n' && s[p] != '\r') {
                     if (s[p] == '@') {
                         at = p;
                         break;
@@ -286,6 +288,13 @@ void RedactPostgresUriUserinfo(std::string &s) {
                     p++;
                 }
                 if (at == std::string::npos) {
+                    if (!any) {
+                        out.reserve(s.size());
+                        any = true;
+                    }
+                    out.append(s, copy_from, user - copy_from);
+                    out.append(kRedactedMarker);
+                    copy_from = p;
                     break;
                 }
                 if (colon != std::string::npos && colon < at) {
@@ -539,6 +548,34 @@ bool HasUriUserinfo(const std::string &text) {
     return false;
 }
 
+// postgres/postgresql scheme with no '@' before EOL or EOS: a truncated
+// LINE 1: excerpt (or a host-only URI). Over-detecting a host is OK.
+bool HasPostgresUriWithoutAt(const std::string &text) {
+    const char *schemes[] = {"postgresql://", "postgres://"};
+    for (const char *scheme : schemes) {
+        const size_t slen = std::char_traits<char>::length(scheme);
+        size_t i = 0;
+        while (i < text.size()) {
+            if (CiEq(text, i, scheme)) {
+                size_t p = i + slen;
+                while (p < text.size() && text[p] != '\n' && text[p] != '\r') {
+                    if (text[p] == '@') {
+                        break;
+                    }
+                    p++;
+                }
+                if (p >= text.size() || text[p] == '\n' || text[p] == '\r') {
+                    return true;
+                }
+                i = p + 1;
+                continue;
+            }
+            i++;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 bool IsCatalogTransportType(ddb::ExceptionType type) {
@@ -557,6 +594,9 @@ bool HasCredentialLeak(const std::string &text, const SecretRedactionContext &ct
         return true;
     }
     if (HasUriUserinfo(text)) {
+        return true;
+    }
+    if (HasPostgresUriWithoutAt(text)) {
         return true;
     }
     for (const auto &v : ctx.exact_values) {
