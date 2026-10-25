@@ -21,6 +21,11 @@
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/task_info.h>
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -29,6 +34,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -571,6 +577,24 @@ struct ProcSnap {
 
 ProcSnap SelfSnap() {
     ProcSnap s;
+#ifdef __APPLE__
+    thread_act_array_t list = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &list, &count) == KERN_SUCCESS) {
+        s.threads = static_cast<int>(count);
+        for (mach_msg_type_number_t i = 0; i < count; ++i) {
+            mach_port_deallocate(mach_task_self(), list[i]);
+        }
+        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(list),
+                      sizeof(thread_act_t) * count);
+    }
+    mach_task_basic_info_data_t info{};
+    mach_msg_type_number_t info_count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info),
+                  &info_count) == KERN_SUCCESS) {
+        s.rss_kb = static_cast<long>(info.resident_size / 1024);
+    }
+#else
     std::ifstream in("/proc/self/status");
     std::string line;
     while (std::getline(in, line)) {
@@ -580,8 +604,28 @@ ProcSnap SelfSnap() {
             s.rss_kb = std::atol(line.c_str() + 6);
         }
     }
+#endif
     return s;
 }
+
+// std::thread's destructor calls terminate() if the thread is still joinable.
+// Detach leftovers so a late throw or a failed spawn cannot abort the suite.
+struct WorkerPool {
+    std::vector<std::thread> workers;
+    ~WorkerPool() {
+        for (auto &w : workers) {
+            if (w.joinable()) {
+                w.detach();
+            }
+        }
+    }
+};
+
+#ifdef __APPLE__
+constexpr int kHungDoGetN = 32;
+#else
+constexpr int kHungDoGetN = 150;
+#endif
 
 void TestProxyBusyGlobal() {
     HangFixture fx;
@@ -694,44 +738,51 @@ void TestHungDoGetResources() {
     owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::IgnoreCancel);
     auto *stub = owner.server.get();
     owner.Start(fx.daemon_b);
-    constexpr int kN = 150;
+    // 150 concurrent streams is the #87 proxy-node measurement (e2e). The
+    // in-process harness also starts owner gRPC handlers in this process;
+    // Apple CI aborts (libc++abi terminate) at N=150, so use 32 there.
+    constexpr int kN = kHungDoGetN;
     auto before = SelfSnap();
-    std::vector<std::thread> workers;
+    WorkerPool pool;
     std::vector<Status> statuses(static_cast<size_t>(kN), Status::OK());
     std::atomic<int> done{0};
-    workers.reserve(static_cast<size_t>(kN));
+    pool.workers.reserve(static_cast<size_t>(kN));
+    int spawned = 0;
     for (int i = 0; i < kN; i++) {
-        workers.emplace_back([&, i] {
-            FakeCallContext ctx;
-            auto stream_res = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-hang"}, fx.rec.id,
-                                                       fx.rec.key, ctx, 0);
-            statuses[static_cast<size_t>(i)] = stream_res.status();
-            done.fetch_add(1);
-        });
+        try {
+            pool.workers.emplace_back([&, i] {
+                FakeCallContext ctx;
+                auto stream_res = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-hang"},
+                                                           fx.rec.id, fx.rec.key, ctx, 0);
+                statuses[static_cast<size_t>(i)] = stream_res.status();
+                done.fetch_add(1);
+            });
+            ++spawned;
+        } catch (const std::system_error &) {
+            break;
+        }
     }
+    Expect(spawned == kN, "spawned hung-DoGet worker threads");
     auto entered = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-    while (stub->DoGetCount() < kN && std::chrono::steady_clock::now() < entered) {
+    while (stub->DoGetCount() < spawned && std::chrono::steady_clock::now() < entered) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     auto during = SelfSnap();
     auto t0 = std::chrono::steady_clock::now();
-    // Unblock the owner DoGets. Avoid PeerFlight::Shutdown TryCancel on 150
+    // Unblock the owner DoGets. Avoid PeerFlight::Shutdown TryCancel on many
     // streams — that path can stick in channel shutdown (Arrow #31235).
     if (stub) {
         stub->Release();
     }
     auto join_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (done.load() < kN && std::chrono::steady_clock::now() < join_deadline) {
+    while (done.load() < spawned && std::chrono::steady_clock::now() < join_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    for (auto &w : workers) {
-        if (!w.joinable()) {
-            continue;
-        }
-        if (done.load() == kN) {
-            w.join();
-        } else {
-            w.detach();
+    if (done.load() == spawned) {
+        for (auto &w : pool.workers) {
+            if (w.joinable()) {
+                w.join();
+            }
         }
     }
     auto shutdown_ms =
@@ -741,17 +792,17 @@ void TestHungDoGetResources() {
     // N worker threads are the test harness. The in-process owner Flight
     // server also takes a handler thread per hung DoGet, and gRPC may grow a
     // small executor pool. There is no per-stream watcher on the proxy.
-    const int extra = during.threads - before.threads - kN;
-    std::cout << "hung_doget_n=" << kN << " threads_before=" << before.threads
+    const int extra = during.threads - before.threads - spawned;
+    std::cout << "hung_doget_n=" << spawned << " threads_before=" << before.threads
               << " threads_during=" << during.threads << " threads_after=" << after.threads
               << " threads_extra_over_workers=" << extra << " rss_before_kb=" << before.rss_kb
               << " rss_during_kb=" << during.rss_kb << " rss_after_kb=" << after.rss_kb
               << " shutdown_ms=" << shutdown_ms << std::endl;
     Expect(done.load() >= 1, "owner release unblocked hung DoGets");
-    Expect(stub->DoGetCount() >= kN, "all 150 hung DoGets reached the owner");
+    Expect(stub->DoGetCount() >= spawned, "all hung DoGets reached the owner");
     // Extra includes the in-process owner's N handler threads plus a gRPC
     // pool. A per-stream watcher would add a third set of N.
-    Expect(extra < 2 * kN + 32, "proxy adds no per-stream thread beyond gRPC handlers");
+    Expect(extra < 2 * spawned + 32, "proxy adds no per-stream thread beyond gRPC handlers");
     Expect(after.threads <= during.threads, "thread count does not grow after hung DoGets finish");
     Expect(after.rss_kb < before.rss_kb + 128 * 1024,
            "RSS stays within a 128MB band after hung DoGets");
