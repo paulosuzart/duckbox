@@ -18,6 +18,7 @@
 #include <iterator>
 #include <sstream>
 #include <sys/stat.h>
+#include <vector>
 
 void duckbox::test::RunSpecLoaderTests() {
     using namespace duckbox;
@@ -699,6 +700,55 @@ void duckbox::test::RunSpecLoaderTests() {
             }
             ExpectThrowContains([&] { LoadDaemonFile(badp); }, "advertised_address",
                                 "invalid advertised_address fails config load naming the option");
+        }
+        {
+            auto expect_userinfo_rejected = [&](const std::string &url,
+                                                const std::vector<std::string> &secrets,
+                                                const char *msg) {
+                DaemonConfig cfg = TestDaemon();
+                cfg.advertised_address = url;
+                try {
+                    ValidateDaemonOrThrow(cfg);
+                    Expect(false, std::string(msg) + " (no throw)");
+                } catch (const std::exception &e) {
+                    std::string w = e.what();
+                    Expect(w.find("advertised_address") != std::string::npos,
+                           std::string(msg) + " names advertised_address");
+                    Expect(w.find(url) == std::string::npos,
+                           std::string(msg) + " does not echo the full address");
+                    for (auto &s : secrets) {
+                        Expect(w.find(s) == std::string::npos,
+                               std::string(msg) + " does not echo credential");
+                    }
+                }
+            };
+            expect_userinfo_rejected("grpc+tls://leakuser@node-a.example:4984", {"leakuser"},
+                                     "user-only advertised_address is refused");
+            expect_userinfo_rejected("grpc+tls://leakuser:s3cretLeak@node-a.example:4984",
+                                     {"leakuser", "s3cretLeak"},
+                                     "user:password advertised_address is refused");
+            DaemonConfig ok = TestDaemon();
+            ok.advertised_address = "grpc+tls://node-a.example:4984";
+            ValidateDaemonOrThrow(ok);
+            {
+                auto leakp = "/tmp/duckbox-advertised-userinfo.yaml";
+                {
+                    std::ofstream o(leakp);
+                    o << "name: x\nlisten: 127.0.0.1:4747\nhandle_secret: duckbox-dev-secret\n"
+                         "advertised_address: grpc+tls://leakuser:s3cretLeak@node-a.example:4984\n";
+                }
+                try {
+                    LoadDaemonFile(leakp);
+                    Expect(false, "LoadDaemonFile userinfo advertised_address (no throw)");
+                } catch (const std::exception &e) {
+                    std::string w = e.what();
+                    Expect(w.find("advertised_address") != std::string::npos,
+                           "LoadDaemonFile userinfo names advertised_address");
+                    Expect(w.find("leakuser") == std::string::npos &&
+                               w.find("s3cretLeak") == std::string::npos,
+                           "LoadDaemonFile userinfo does not echo credential");
+                }
+            }
         }
         {
             std::ostringstream empty_log;
