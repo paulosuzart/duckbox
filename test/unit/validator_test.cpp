@@ -1,6 +1,7 @@
 #include "check.hpp"
 #include "suite.hpp"
 
+#include "common/deadline.hpp"
 #include "common/duckdb_layer.hpp"
 #include "common/error.hpp"
 #include "config/policy.hpp"
@@ -70,6 +71,13 @@ void duckbox::test::RunValidatorTests() {
         auto bad = LoadSpecString(s, "<idle>");
         Expect(has_path(validator.ValidateStatic(bad), "lifecycle.idle_timeout", "duration"),
                "bad idle_timeout is a field-path error");
+    }
+    {
+        auto huge = loaded;
+        huge.resources.query_timeout_ms = 9'300'000'000'000;
+        Expect(has_path(validator.ValidateStatic(huge), "resources.query_timeout_ms",
+                        std::to_string(kMaxSteadyClockTimeoutMs)),
+               "ValidateStatic names resources.query_timeout_ms and the maximum");
     }
 
     ExpectThrowContains(

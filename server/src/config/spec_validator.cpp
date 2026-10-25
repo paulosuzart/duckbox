@@ -1,4 +1,5 @@
 #include "config/spec_validator.hpp"
+#include "common/deadline.hpp"
 #include "lake/lake.hpp"
 #include "rewriter/rewriter.hpp"
 #include "rewriter/tenant_key.hpp"
@@ -392,6 +393,10 @@ std::vector<SpecIssue> SpecValidator::ValidateStatic(const SandboxSpec &spec) co
         } catch (const std::exception &e) {
             add("functions", e.what());
         }
+    }
+    if (spec.resources.query_timeout_ms > kMaxSteadyClockTimeoutMs) {
+        add("resources.query_timeout_ms",
+            SteadyClockTimeoutMaxMessage("resources.query_timeout_ms"));
     }
     if (!spec.handles.stale_version_grace_raw.empty() && spec.handles.stale_version_grace_ms < 0) {
         add("handles.stale_version_grace", "expected duration like 0s, 30s, 5m, 1h (cap 1h)");

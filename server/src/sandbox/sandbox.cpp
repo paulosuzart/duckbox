@@ -2,6 +2,7 @@
 #include "arrow/arrow_ipc.hpp"
 #include "arrow/arrow_types.hpp"
 #include "cluster/lease.hpp"
+#include "common/deadline.hpp"
 #include "common/error.hpp"
 #include "common/json.hpp"
 #include "config/spec_validator.hpp"
@@ -797,8 +798,7 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeHandleArrow(const std::s
     const int64_t bound_ms = policy_.resources.query_timeout_ms > 0
                                  ? policy_.resources.query_timeout_ms
                                  : daemon_.lease.proxy_first_message_max_ms;
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(bound_ms);
+    const auto deadline = SaturatingDeadlineMs(std::chrono::steady_clock::now(), bound_ms);
     if (!mu_.try_lock_until(deadline)) {
         throw UnavailableError("sandbox describe timed out");
     }

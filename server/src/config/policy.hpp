@@ -54,6 +54,9 @@ struct LakeSettings {
 struct Resources {
     std::string memory_limit = "256MB";
     int64_t threads = 2;
+    // 0 = no per-query cap (DescribeHandleArrow falls back to
+    // lease.proxy_first_message_max_ms). Must be <= kMaxSteadyClockTimeoutMs
+    // so now + bound cannot overflow a signed nanosecond duration.
     int64_t query_timeout_ms = 8000;
     int64_t max_result_rows = 1000;
 };
