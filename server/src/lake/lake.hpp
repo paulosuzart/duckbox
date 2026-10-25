@@ -42,7 +42,10 @@ SecretRedactionContext CollectSecretRedactionContextFromSpec(const config::Sandb
 std::string EscapeSqlString(const std::string &s); // single-quote doubling for SQL literals
 std::string ResolvePath(const std::string &base_dir, const std::string &path);
 // Operator-log redaction: configured secret values, then password=/URI/JSON/SQL.
-// Never apply this to tenant-visible error text.
+// Pattern values follow libpq conninfo rules (whitespace terminates unless
+// backslash-escaped; quoted values with escapes). Key names that contain a
+// known secret key are matched (prefer over-redacting). Never apply this to
+// tenant-visible error text.
 std::string RedactSecretText(const std::string &text);
 std::string RedactSecretText(const std::string &text, const SecretRedactionContext &ctx);
 

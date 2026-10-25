@@ -482,6 +482,7 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/table_function_20_test.cpp
   test/unit/macro_catalog_20_test.cpp
   test/unit/lake_attach_test.cpp
+  test/unit/secret_redact_test.cpp
   test/unit/temp_directory_test.cpp)
 
 duckbox_add_test(duckbox_guardrail_tests

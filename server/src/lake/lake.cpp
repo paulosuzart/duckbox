@@ -59,12 +59,6 @@ bool IsWs(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-bool IsPatternUnquotedValueEnd(char c) {
-    // Pattern pass only: '"' and ':' stop the value so diagnostic text
-    // after a DSN or JSON fragment is not swallowed.
-    return IsWs(c) || c == ';' || c == ',' || c == ')' || c == '&' || c == '"' || c == ':';
-}
-
 void ReplaceAllExact(std::string &s, const std::string &needle, const char *repl) {
     if (needle.empty()) {
         return;
@@ -110,15 +104,6 @@ size_t QuotedValueEnd(const std::string &s, size_t vs) {
     return ve;
 }
 
-// Pattern pass: stop at '"' / ':' so leftover diagnostics stay visible.
-size_t PatternUnquotedValueEnd(const std::string &s, size_t vs) {
-    size_t ve = vs;
-    while (ve < s.size() && !IsPatternUnquotedValueEnd(s[ve])) {
-        ve++;
-    }
-    return ve;
-}
-
 // libpq: an unquoted value ends only at unescaped whitespace; '\' escapes.
 size_t LibpqUnquotedValueEnd(const std::string &s, size_t vs) {
     size_t ve = vs;
@@ -151,10 +136,19 @@ std::string LibpqUnescape(const std::string &raw) {
 void RedactKeyedValue(std::string &s, const std::string &key, bool allow_colon) {
     size_t i = 0;
     while (i < s.size()) {
-        if (CiEq(s, i, key) && (i == 0 || !IsIdentChar(s[i - 1]))) {
+        if (CiEq(s, i, key)) {
+            // Conservative key variants: any identifier that contains the key
+            // (mypassword=, passwordhash=), optionally quote-wrapped.
+            size_t left = i;
+            while (left > 0 && IsIdentChar(s[left - 1])) {
+                left--;
+            }
             size_t after = i + key.size();
-            if (after < s.size() && after > 0 && (s[after] == '"' || s[after] == '\'') && i > 0 &&
-                s[i - 1] == s[after]) {
+            while (after < s.size() && IsIdentChar(s[after])) {
+                after++;
+            }
+            if (after < s.size() && left > 0 && (s[after] == '"' || s[after] == '\'') &&
+                s[left - 1] == s[after]) {
                 after++;
             }
             size_t sep = after;
@@ -176,7 +170,7 @@ void RedactKeyedValue(std::string &s, const std::string &key, bool allow_colon) 
                 if (ve < s.size() && (s[ve] == '\'' || s[ve] == '"')) {
                     ve = QuotedValueEnd(s, ve);
                 } else {
-                    ve = PatternUnquotedValueEnd(s, ve);
+                    ve = LibpqUnquotedValueEnd(s, ve);
                 }
                 s.replace(vs, ve - vs, kRedactedMarker);
                 i = vs + 10;
