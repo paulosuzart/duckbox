@@ -45,6 +45,10 @@ jobs:
             duckdb-v2.0.0-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
       - name: Install AWS SDK C++ (S3+STS, vcpkg)
         run: bash scripts/install_aws_sdk.sh
+      # Test-time only: optional CMake libpq oracle (S1). Not a default-build
+      # dependency; other CI jobs and local builds without libpq-dev SKIP.
+      - name: Install libpq-dev (S1 redaction oracle, this job only)
+        run: sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libpq-dev
       - name: ccache
         uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
         with:
@@ -60,7 +64,7 @@ jobs:
       - name: Unit tests
         env:
           DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: ctest --test-dir build -L unit --output-on-failure
+        run: ctest --test-dir build -L unit --output-on-failure --verbose
       - name: Guardrail tests
         run: ctest --test-dir build -L guardrails --output-on-failure
       - name: Integration tests

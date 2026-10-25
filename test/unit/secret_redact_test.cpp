@@ -431,6 +431,26 @@ void RunLibpqRedactionOracle() {
     for (const auto &c : cases) {
         CheckLibpqCase(c, &ran, &parsed, &empty_pw, &parse_fail);
     }
+
+    // Raw '/' starts the URI path for PQconninfoParse, so libpq extracts no
+    // password. Production still redacts the userinfo span (over-redact).
+    {
+        const char *raw_slash =
+            "postgresql://oracle_u:LIBPQ-ORACLE-PW-06/slash@oracle-host/oracledb";
+        auto ext = ParseLibpqPassword(raw_slash);
+        duckbox::test::Expect(ext.parsed, "URI raw slash: PQconninfoParse succeeds");
+        duckbox::test::Expect(ext.password.empty(), "URI raw slash: libpq extracts no password");
+        auto got = duckbox::lake::RedactSecretText(raw_slash);
+        duckbox::test::Expect(got.find("LIBPQ-ORACLE-PW-06/slash") == std::string::npos,
+                              "URI raw slash: production still redacts the / span");
+        duckbox::test::Expect(got.find("LIBPQ-ORACLE-PW-06") == std::string::npos,
+                              "URI raw slash: production does not leak the / span head");
+        duckbox::test::Expect(got.find(duckbox::lake::kRedactedMarker) != std::string::npos,
+                              "URI raw slash: uses the redaction marker");
+        duckbox::test::Expect(got.find("oracle-host") != std::string::npos,
+                              "URI raw slash: host stays visible");
+    }
+
     std::cout << "libpq oracle: RAN " << ran << " cases (parsed=" << parsed
               << " empty_password=" << empty_pw << " parse_fail=" << parse_fail << ")\n";
 }
