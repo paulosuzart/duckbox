@@ -47,6 +47,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sstream>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -1912,10 +1913,12 @@ int RunServer(const ServerOptions &opt_in) {
     auto shutting_down = std::make_shared<std::atomic<bool>>(false);
     auto servers_gone = std::make_shared<std::atomic<bool>>(false);
     struct ShutdownWatchdog {
+        std::mutex mu;
         std::atomic<bool> cancel{false};
         std::thread th;
         int64_t delay_ms = 0;
         void Arm(int64_t ms) {
+            std::lock_guard<std::mutex> hold(mu);
             if (th.joinable()) {
                 return;
             }
@@ -1940,8 +1943,14 @@ int RunServer(const ServerOptions &opt_in) {
         }
         void Disarm() {
             cancel.store(true, std::memory_order_release);
-            if (th.joinable()) {
+            std::lock_guard<std::mutex> hold(mu);
+            if (!th.joinable()) {
+                return;
+            }
+            try {
                 th.join();
+            } catch (const std::system_error &) {
+                // libc++ can throw EINVAL if join races the thread's exit.
             }
         }
         ~ShutdownWatchdog() { Disarm(); }
@@ -1996,7 +2005,9 @@ int RunServer(const ServerOptions &opt_in) {
                 forced["event"] = "signal_forced_exit";
                 forced["signal"] = sig;
                 std::clog << forced.dump() << "\n";
-                std::_Exit(1);
+                // Already draining: a second SIGTERM is a requested stop (0).
+                // After Serve() returned, force-abort is still 1.
+                std::_Exit(servers_gone->load() ? 1 : 0);
             }
             Json ev;
             ev["event"] = "signal_shutdown";

@@ -293,6 +293,7 @@ export PROXY_PID="$PID_A"
 $(py_flight_sql)
 import os, signal, threading, time
 
+signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 owner = int(os.environ["OWNER_PID"])
 proxy = int(os.environ["PROXY_PID"])
 N = 150
@@ -350,7 +351,8 @@ print(
     f"proxy_hung_doget_n={N} in_flight={inflight} rejected_busy={state['busy']} "
     f"other_done={state['other']} ok_done={state['ok']} "
     f"threads_before={before[0]} threads_during={during[0]} "
-    f"rss_before_kb={before[1]} rss_during_kb={during[1]}"
+    f"rss_before_kb={before[1]} rss_during_kb={during[1]}",
+    flush=True,
 )
 if state["other_msgs"]:
     print("proxy_hung_doget_other", state["other_msgs"])
@@ -374,16 +376,21 @@ if grown >= 2 * N:
     )
 t0 = time.time()
 os.kill(proxy, signal.SIGTERM)
+exited = False
 while time.time() - t0 < 8:
     try:
         os.kill(proxy, 0)
     except OSError:
-        print(f"sigterm_hung_doget_exit_s={time.time()-t0:.3f}")
+        print(f"sigterm_hung_doget_exit_s={time.time()-t0:.3f}", flush=True)
+        exited = True
         break
     time.sleep(0.05)
-else:
+try:
+    os.kill(owner, signal.SIGCONT)
+except OSError:
+    pass
+if not exited:
     raise SystemExit("proxy did not exit after SIGTERM with hung DoGet")
-os.kill(owner, signal.SIGCONT)
 PY
 wait "$PID_A" 2>/dev/null || true
 PID_A=""
@@ -410,6 +417,7 @@ export PROXY_PID="$PID_A"
 $(py_flight_sql)
 import os, signal, threading, time
 
+signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 owner = int(os.environ["OWNER_PID"])
 N = 8
 CAP = 2
