@@ -17,11 +17,67 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <thread>
+
+namespace {
+
+// 5x the configured lock bound plus 2s of scheduler slack. Enough for loaded
+// CI; still fails in a few seconds if try_lock_until never returns.
+constexpr int64_t kDescribeWatchdogMul = 5;
+constexpr int64_t kDescribeWatchdogSlackMs = 2000;
+
+std::chrono::milliseconds DescribeWatchdog(int64_t configured_ms) {
+    return std::chrono::milliseconds(configured_ms * kDescribeWatchdogMul +
+                                     kDescribeWatchdogSlackMs);
+}
+
+[[noreturn]] void FailHungDescribe(const std::string &what, std::chrono::milliseconds watchdog) {
+    std::cerr << "FAIL: " << what << " did not finish within " << watchdog.count()
+              << "ms (DescribeHandleArrow lock-bound watchdog)\n";
+    std::cerr.flush();
+    std::cout.flush();
+    // The async worker is blocked in DescribeHandleArrow and the holder
+    // thread still owns mu_. std::future's destructor would join the worker
+    // and hang the suite. detach() would leak both threads until process
+    // exit. _Exit(1) reports failure and skips destructors, so neither
+    // happens. abort() would look like a crash; this is a test failure.
+    std::_Exit(1);
+}
+
+std::string DescribeHandleArrowError(duckbox::sandbox::TenantSandbox &box) {
+    try {
+        (void)box.DescribeHandleArrow("SELECT 1");
+        return {};
+    } catch (const std::exception &e) {
+        return e.what();
+    }
+}
+
+int64_t ExpectDescribeLockTimeout(duckbox::sandbox::TenantSandbox &box, int64_t configured_ms,
+                                  const char *what) {
+    const auto watchdog = DescribeWatchdog(configured_ms);
+    const auto t0 = std::chrono::steady_clock::now();
+    auto fut = std::async(std::launch::async, [&box] { return DescribeHandleArrowError(box); });
+    if (fut.wait_for(watchdog) != std::future_status::ready) {
+        FailHungDescribe(what, watchdog);
+    }
+    duckbox::test::Expect(fut.get() == "sandbox describe timed out",
+                          std::string(what) + " is a fixed error");
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::clog << "DescribeHandleArrow lock wait " << elapsed_ms << " ms (" << what << ")\n";
+    return elapsed_ms;
+}
+
+} // namespace
 
 void duckbox::test::RunSandboxExecTests() {
     using namespace duckbox;
@@ -895,13 +951,7 @@ void duckbox::test::RunSandboxExecTests() {
         TenantSandbox box(d, pol, key_a, spec_dir);
         box.Warmup(false);
         describe_while_held(box, [&] {
-            auto t0 = std::chrono::steady_clock::now();
-            ExpectThrowExact([&] { (void)box.DescribeHandleArrow("SELECT 1"); },
-                             "sandbox describe timed out",
-                             "DescribeHandleArrow lock timeout is a fixed error");
-            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now() - t0)
-                                  .count();
+            auto elapsed_ms = ExpectDescribeLockTimeout(box, query_bound_ms, "query_timeout_ms");
             Expect(elapsed_ms >= query_bound_ms && elapsed_ms < query_bound_ms + 2000,
                    "DescribeHandleArrow lock wait is query_timeout_ms");
         });
@@ -915,14 +965,8 @@ void duckbox::test::RunSandboxExecTests() {
         TenantSandbox box(d, pol, key_a, spec_dir);
         box.Warmup(false);
         describe_while_held(box, [&] {
-            auto t0 = std::chrono::steady_clock::now();
-            ExpectThrowExact([&] { (void)box.DescribeHandleArrow("SELECT 1"); },
-                             "sandbox describe timed out",
-                             "DescribeHandleArrow lock timeout uses first-message ceiling when "
-                             "query_timeout_ms is 0");
-            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now() - t0)
-                                  .count();
+            auto elapsed_ms =
+                ExpectDescribeLockTimeout(box, ceiling_ms, "proxy_first_message_max_ms");
             Expect(elapsed_ms >= ceiling_ms && elapsed_ms < ceiling_ms + 2000,
                    "DescribeHandleArrow lock wait is proxy_first_message_max_ms when "
                    "query_timeout_ms is 0");
