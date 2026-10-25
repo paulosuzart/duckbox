@@ -12,6 +12,8 @@ int main() {
     RunS3RegistryTests();
     RunAuthFlightTests();
     RunBearerFlightTests();
+    RunCliAuthTests();
+    RunPythonClientAuthTests();
     RunClusterTests();
     RunSignalShutdownTests();
     RunConnectRuntimeTests();

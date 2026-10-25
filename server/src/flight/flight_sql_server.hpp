@@ -181,6 +181,7 @@ struct SandboxCliRequest {
 	std::string id;
 	std::string key;
 	std::string caller;
+	std::string token; // Authorization: Bearer (JWT / bearer secret); else DUCKBOX_TOKEN
 	std::string id_prefix;
 	std::string key_prefix;
 	std::string policy_class;

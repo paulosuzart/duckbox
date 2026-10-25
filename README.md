@@ -150,7 +150,7 @@ db = connect()    # queries send id + SQL
 print(db.query("SELECT id, title, amount FROM deals"))
 ```
 
-`DUCKBOX_URL` / `DUCKBOX_SPEC` / `DUCKBOX_SANDBOX` override the defaults. Memory lake (no Docker): serve `daemons/memory.yaml` and set `DUCKBOX_SPEC=policies/memory/analyst.yaml`. A flag-oriented one-shot lives at `examples/python/query_cli.py`.
+`DUCKBOX_URL` / `DUCKBOX_SPEC` / `DUCKBOX_SANDBOX` override the defaults. On a daemon with `auth.bearer_secrets` or JWT, pass `--token` / `token=` or set `DUCKBOX_TOKEN`; the CLI and Python client send `Authorization: Bearer` and never log the value. Local daemons with `auth.allow_insecure_dev` still accept `x-duckbox-caller` only. Memory lake (no Docker): serve `daemons/memory.yaml` and set `DUCKBOX_SPEC=policies/memory/analyst.yaml`. A flag-oriented one-shot lives at `examples/python/query_cli.py`.
 
 `lake.bootstrap_sql` file paths are **relative to the spec file**, not the working directory (`policies/memory/analyst.yaml` uses `../../examples/sql/memory_init.sql`). Inlined SQL is also accepted. The daemon never re-reads that host path at warmup — LoadSpecFile inlines the file first. That SQL is trusted SaaS seed input (it can `read_csv` / `query()` via `CREATE TABLE AS SELECT` or `INSERT … SELECT` before external access is disabled). Agent queries stay tenant-wrapped. On DuckLake the field is a validation error.
 
@@ -311,7 +311,7 @@ Without that option, ARM64 clients can SIGSEGV in `StringArray::GetView`. Duckbo
 
 Advertised Flight SQL schemas (`GetFlightInfo`, `GetSchema`, prepared `dataset_schema`, and `GetTables` with `include_schema`) use the same Arrow conversion as DoGet batches. Clients that cached the previous mapping will see type changes — for example `count(*)` is `int64` (BIGINT), not `int32`. Nested `LIST` / `STRUCT` / `MAP` columns keep those Arrow types instead of collapsing to `utf8`. `GetTables include_schema` describes each allowlisted table through the rewriter (`DescribeRewrittenArrow`); there is no un-rewritten catalog fallback.
 
-Python is Arrow Flight SQL via ADBC. Use `examples/python/quickstart.ipynb` (or `quickstart.py`) after the daemon is up. `create_sandbox()` / `connect(sandbox=...)` send the id header for you.
+Python is Arrow Flight SQL via ADBC. Use `examples/python/quickstart.ipynb` (or `quickstart.py`) after the daemon is up. `create_sandbox()` / `connect(sandbox=...)` send the id header for you. `duckbox sandbox …` and the Python helper send `Authorization: Bearer` when `--token` / `token=` / `DUCKBOX_TOKEN` is set (same credential `duckbox node drain --token` already used). The token is never logged.
 
 The registry is `SandboxRegistry` (S3 impl against RustFS in CI, in-memory impl for tests). With a `lease` endpoint, `S3ConditionalLeaseManager` owns sandboxes via If-None-Match / If-Match and a fencing epoch; memory daemons keep `SingleNodeLeaseManager`. Multi-node add/drain/crash: [docs/multi-node.md](docs/multi-node.md). CRUD also includes `DrainNode` (`duckbox node drain`).
 

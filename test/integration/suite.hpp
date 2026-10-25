@@ -12,6 +12,8 @@ void RunRuntimeTests();
 void RunS3RegistryTests();
 void RunAuthFlightTests();
 void RunBearerFlightTests();
+void RunCliAuthTests();
+void RunPythonClientAuthTests();
 void RunClusterTests();
 void RunSignalShutdownTests();
 void RunConnectRuntimeTests();

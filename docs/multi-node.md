@@ -159,7 +159,7 @@ duckbox node drain --url grpc://127.0.0.1:5748 --token "$JWT"
 duckbox node drain --url grpc://127.0.0.1:5748 --peer-secret env:DUCKBOX_PEER_SECRET
 ```
 
-`--url` is the **internal** listener. `DrainNode` on the public listener is rejected. `--token` sends `Authorization: Bearer` (JWT / bearer secret). `--peer-secret` handshakes with the peer secret (`env:` / `file:` / literal).
+`--url` is the **internal** listener. `DrainNode` on the public listener is rejected. `--token` (or `DUCKBOX_TOKEN`) sends `Authorization: Bearer` (JWT / bearer secret). `--peer-secret` handshakes with the peer secret (`env:` / `file:` / literal). The token is never logged.
 
 `DrainNode` is a **node-admin** action. The AI agent is an authenticated caller and must not drain a node. Authorization is `auth.operators` in the daemon YAML (deny by default: an empty list denies everyone, including under `allow_insecure_dev`). Cluster examples list `local` so `duckbox node drain --caller local` works. `auth.callers` (sandbox CRUD) is a separate list — an analyst identity can create sandboxes and still be denied DrainNode.
 
