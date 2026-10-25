@@ -136,6 +136,20 @@ void ValidateExpression(ddb::ParsedExpression &expr, ValidationContext &ctx) {
         }
         break;
     }
+    case ddb::ExpressionClass::LAMBDA: {
+        auto &lam = expr.Cast<ddb::LambdaExpression>();
+        auto syntax = lam.GetLambdaSyntaxType();
+        if (syntax == ddb::LambdaSyntaxType::SINGLE_ARROW ||
+            syntax == ddb::LambdaSyntaxType::SINGLE_ARROW_STORAGE) {
+            throw SqlRejected("single-arrow lambda syntax is denied");
+        }
+        std::string param_err;
+        auto params = lam.ExtractColumnRefExpressions(param_err);
+        if (params.size() > 1) {
+            throw SqlRejected("multi-parameter lambda is denied");
+        }
+        break;
+    }
     default:
         break;
     }

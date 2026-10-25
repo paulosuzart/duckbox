@@ -645,6 +645,85 @@ cases:
     extra_functions:
       - parquet_metadata
 
+  # DuckDB 2.0 lambda syntax. New (Python-style) is accepted; old single-arrow
+  # is denied. list_transform is rewrite-only here — warmup still rejects it as
+  # a non-exception catalog function (1.5.6 contract).
+  - id: lambda_new_syntax_literal
+    sql: "SELECT list_transform([1, 2, 3], lambda x : x + 1)"
+    expect: allow
+    stage: rewrite
+    extra_functions:
+      - list_transform
+      - list_value
+
+  - id: lambda_new_syntax_tenant_wrap
+    sql: "SELECT list_transform([amount], lambda x : x + 1) FROM deals"
+    expect: allow
+    stage: rewrite
+    extra_functions:
+      - list_transform
+      - list_value
+    rewrite_contains:
+      - "21"
+      - tenant_id
+
+  - id: lambda_new_syntax_columns
+    sql: "SELECT COLUMNS(lambda c : c = 'id' OR c = 'title' OR c = 'amount') FROM deals"
+    expect: allow
+    stage: rewrite
+    extra_functions:
+      - list_filter
+    rewrite_contains:
+      - "21"
+      - tenant_id
+
+  - id: lambda_new_syntax_body_denied
+    sql: "SELECT list_transform(['A'], lambda x : md5(x)) FROM deals"
+    expect: deny
+    reason: function not allowlisted
+    extra_functions:
+      - list_transform
+      - list_value
+
+  - id: lambda_old_syntax_literal
+    sql: "SELECT list_transform([1, 2, 3], x -> x + 1)"
+    expect: deny
+    reason: single-arrow lambda syntax is denied
+    extra_functions:
+      - list_transform
+      - list_value
+
+  - id: lambda_old_syntax_table
+    sql: "SELECT list_transform([amount], x -> x + 1) FROM deals"
+    expect: deny
+    reason: single-arrow lambda syntax is denied
+    extra_functions:
+      - list_transform
+      - list_value
+
+  - id: lambda_old_syntax_json_arrow
+    sql: "SELECT title -> '$.a' FROM deals"
+    expect: deny
+    reason: single-arrow lambda syntax is denied
+
+  - id: lambda_new_syntax_multi_param
+    sql: "SELECT list_reduce([1, 2, 3], lambda x, y : x + y)"
+    expect: deny
+    reason: multi-parameter lambda is denied
+    extra_functions:
+      - list_reduce
+      - list_value
+
+  - id: set_lambda_syntax_enable
+    sql: "SET lambda_syntax='enable_single_arrow'"
+    expect: deny
+    reason: only SELECT
+
+  - id: set_storage_compatibility_version
+    sql: "SET storage_compatibility_version='v1.0.0'"
+    expect: deny
+    reason: only SELECT
+
   - id: at_timestamp_current_setting
     sql: "SELECT id FROM deals AT (TIMESTAMP => current_setting('allowed_paths')::VARCHAR)"
     expect: deny
