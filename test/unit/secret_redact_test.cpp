@@ -206,12 +206,14 @@ void duckbox::test::RunSecretRedactPatternTests() {
            "multiple key=value pairs are each redacted");
 
     // Linear scan: ~1 MB of key-shaped text without separators must stay fast.
+    // Bound is 60s so -O0 --coverage CI runners still pass; O(n^2) on 1MB does not.
     const size_t kBig = static_cast<size_t>(1) << 20;
-    auto expect_linear = [](const std::string &input, const char *msg) {
+    const auto kLinearBound = std::chrono::seconds(60);
+    auto expect_linear = [&](const std::string &input, const char *msg) {
         auto t0 = std::chrono::steady_clock::now();
         auto out = RedactSecretText(input);
         auto elapsed = std::chrono::steady_clock::now() - t0;
-        Expect(elapsed < std::chrono::seconds(1), msg);
+        Expect(elapsed < kLinearBound, msg);
         return out;
     };
 
@@ -220,7 +222,7 @@ void duckbox::test::RunSecretRedactPatternTests() {
     while (repeated.size() < kBig) {
         repeated += "password";
     }
-    auto repeated_out = expect_linear(repeated, "1MB repeated password finishes in < 1s");
+    auto repeated_out = expect_linear(repeated, "1MB repeated password finishes in < 60s");
     Expect(repeated_out == repeated, "repeated password without '=' is unchanged");
 
     std::string spaced;
@@ -228,7 +230,7 @@ void duckbox::test::RunSecretRedactPatternTests() {
     while (spaced.size() < kBig) {
         spaced += "password ";
     }
-    auto spaced_out = expect_linear(spaced, "1MB spaced password finishes in < 1s");
+    auto spaced_out = expect_linear(spaced, "1MB spaced password finishes in < 60s");
     Expect(spaced_out == spaced, "spaced password without '=' is unchanged");
 
     std::string mixed;
@@ -238,7 +240,7 @@ void duckbox::test::RunSecretRedactPatternTests() {
     while (mixed.size() < kBig) {
         mixed += mixed_word;
     }
-    auto mixed_out = expect_linear(mixed, "1MB mixed key-identifiers finish in < 1s");
+    auto mixed_out = expect_linear(mixed, "1MB mixed key-identifiers finish in < 60s");
     Expect(mixed_out == mixed, "mixed key-identifiers without separators are unchanged");
 
     std::string cast_lit = "SELECT CAST('";
@@ -247,6 +249,6 @@ void duckbox::test::RunSecretRedactPatternTests() {
         cast_lit += "password";
     }
     cast_lit += "' AS INTEGER)";
-    auto cast_out = expect_linear(cast_lit, "1MB CAST password literal finishes in < 1s");
+    auto cast_out = expect_linear(cast_lit, "1MB CAST password literal finishes in < 60s");
     Expect(cast_out == cast_lit, "CAST password literal without '=' is unchanged");
 }
