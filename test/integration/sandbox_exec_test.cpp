@@ -76,11 +76,30 @@ void duckbox::test::RunSandboxExecTests() {
                "operator log records the catalog-down event");
     }
     {
-        // DuckDB LINE 1: excerpts cut at ~60 characters. A password that
-        // starts after `SELECT CAST('Zz postgresql://u:` is truncated
-        // before '@', so the excerpt has no userinfo terminator.
+        // DuckDB LINE 1: excerpts cut at ~60 characters. ~20 x's of
+        // padding before the URI lands the cut inside the password.
         const char *pw = "TRUNCpw20SECRETLEAK";
-        auto sql = std::string("SELECT CAST('Zz postgresql://u:") + pw + "@h/db' AS INTEGER)";
+        auto sql = std::string("SELECT CAST('") + std::string(20, 'x') + " postgresql://u:" + pw +
+                   "@h/db' AS INTEGER)";
+        std::string line1;
+        {
+            ddb::DuckDB db(nullptr);
+            ddb::Connection con(db);
+            auto r = con.Query(sql);
+            Expect(r->HasError(), "padded CAST produces a DuckDB error");
+            auto raw = r->GetError();
+            auto line1_at = raw.find("LINE 1:");
+            Expect(line1_at != std::string::npos, "DuckDB error includes LINE 1:");
+            auto line1_end = raw.find('\n', line1_at);
+            line1 = raw.substr(line1_at, line1_end == std::string::npos ? std::string::npos
+                                                                        : line1_end - line1_at);
+            if (!line1.empty() && line1.back() == '\r') {
+                line1.pop_back();
+            }
+            Expect(line1.size() >= 3 && line1.substr(line1.size() - 3) == "...",
+                   "LINE 1 excerpt ends with ...");
+            Expect(line1.find("@h") == std::string::npos, "LINE 1 excerpt does not contain @h");
+        }
         std::ostringstream log;
         auto *old = std::clog.rdbuf(log.rdbuf());
         std::string err;
@@ -96,6 +115,14 @@ void duckbox::test::RunSandboxExecTests() {
         Expect(err.find(pw) == std::string::npos, "client error has no truncated URI password");
         auto logged = log.str();
         Expect(!logged.empty(), "truncated-URI CAST is written to the operator log");
+        auto log_line1_at = logged.find("LINE 1:");
+        Expect(log_line1_at != std::string::npos, "operator log includes LINE 1:");
+        auto log_line1_end = logged.find('\n', log_line1_at);
+        auto log_line1 = logged.substr(log_line1_at, log_line1_end == std::string::npos
+                                                         ? std::string::npos
+                                                         : log_line1_end - log_line1_at);
+        Expect(log_line1.find("@h") == std::string::npos,
+               "operator log LINE 1 does not contain @h");
         Expect(logged.find(pw) == std::string::npos,
                "operator log redacts a LINE 1: password cut before @");
         Expect(logged.find("TRUNCpw") == std::string::npos &&

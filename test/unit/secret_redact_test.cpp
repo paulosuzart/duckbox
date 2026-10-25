@@ -190,18 +190,18 @@ void RedactUri(std::string &s, std::vector<std::string> &secrets) {
         while (i < s.size()) {
             if (CiEq(s, i, scheme)) {
                 size_t user = i + std::char_traits<char>::length(scheme);
-                // origin/main: find('@') / find(':') then replace. '@' is
-                // accepted only before EOL (LINE 1: excerpt bound). '/' and
-                // raw whitespace stay inside the password (libpq). No '@'
-                // before that bound: redact after the scheme (truncated).
-                size_t line = user;
-                while (line < s.size() && s[line] != '\n' && s[line] != '\r') {
-                    line++;
-                }
+                // origin/main: find('@') / find(':') to EOS, then replace.
+                // Space, tab, '/', '\n', and '\r' stay inside the password
+                // (libpq). No '@' remaining: redact after the scheme to EOL
+                // and keep scanning later lines.
                 size_t at = s.find('@', user);
-                if (at == std::string::npos || at >= line) {
-                    ReplaceRec(s, user, line, secrets);
-                    i = user + 10;
+                if (at == std::string::npos) {
+                    size_t eol = user;
+                    while (eol < s.size() && s[eol] != '\n' && s[eol] != '\r') {
+                        eol++;
+                    }
+                    ReplaceRec(s, user, eol, secrets);
+                    i = (eol > i) ? eol : i + 1;
                     continue;
                 }
                 size_t colon = s.find(':', user);
@@ -435,6 +435,23 @@ void duckbox::test::RunSecretRedactPatternTests() {
            "HasCredentialLeak sees userinfo when password contains a space");
     Expect(HasCredentialLeak("postgresql://u:PWr18\tLEAKr18@h/db"),
            "HasCredentialLeak sees userinfo when password contains a tab");
+    auto uri_after_host_nl = RedactSecretText(
+        "SELECT CAST('postgresql://h/db\npostgresql://u:NLONE1LEAK@h/db' AS INTEGER)");
+    ExpectNoSecret(uri_after_host_nl, "NLONE1LEAK", "URI after a host-only line is still redacted");
+    Expect(uri_after_host_nl.find("LEAK") == std::string::npos,
+           "URI after a host-only line does not leak");
+    auto uri_nl_pw = RedactSecretText("postgresql://u:NLa2\nLEAKb2@h/db");
+    ExpectNoSecret(uri_nl_pw, "NLa2\nLEAKb2", "URI password containing a newline is redacted");
+    Expect(uri_nl_pw.find("LEAKb2") == std::string::npos,
+           "URI password with a newline does not leak the tail");
+    auto uri_crlf_pw = RedactSecretText("postgresql://u:NLa2\r\nLEAKb2@h/db");
+    ExpectNoSecret(uri_crlf_pw, "NLa2\r\nLEAKb2", "URI password containing CRLF is redacted");
+    Expect(uri_crlf_pw.find("LEAKb2") == std::string::npos,
+           "URI password with CRLF does not leak the tail");
+    Expect(HasCredentialLeak("postgresql://u:NLa2\nLEAKb2@h/db"),
+           "HasCredentialLeak sees userinfo when password contains a newline");
+    Expect(HasCredentialLeak("postgresql://u:NLa2\r\nLEAKb2@h/db"),
+           "HasCredentialLeak sees userinfo when password contains CRLF");
     Expect(HasCredentialLeak("postgresql://postgresql://"),
            "HasCredentialLeak is true for postgresql:// without @");
     Expect(!HasCredentialLeak("://://://"), "HasCredentialLeak is false for :// without @");
@@ -583,6 +600,9 @@ void duckbox::test::RunSecretRedactPatternTests() {
         "postgresql://u: leadSPACE@h/db",
         "postgresql://u:pa/ss LEAKws@h/db",
         "SELECT CAST('Zz postgresql://u:PWr18 LEAKr18@h/db' AS INTEGER)",
+        "SELECT CAST('postgresql://h/db\npostgresql://u:NLONE1LEAK@h/db' AS INTEGER)",
+        "postgresql://u:NLa2\nLEAKb2@h/db",
+        "postgresql://u:NLa2\r\nLEAKb2@h/db",
         "LINE 1: SELECT CAST('Zz postgresql://u:TRUNCpw20SECRE",
         "Conversion Error: see below\nLINE 1: SELECT CAST('Zz postgresql://u:TRUNCpw20SECRE\n^",
         "SECRET 'quoted-secret-1'",
@@ -616,6 +636,8 @@ void duckbox::test::RunSecretRedactPatternTests() {
         "@@@@",
         " ",
         "\t",
+        "\n",
+        "\r\n",
     };
     const unsigned seeds[] = {85, 59, 2026, 1, 42, 12345, 99991, 314159};
     constexpr int kPerSeed = 2500;

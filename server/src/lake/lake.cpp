@@ -263,50 +263,55 @@ void RedactPostgresUriUserinfo(std::string &s) {
         size_t i = 0;
         bool any = false;
         const size_t slen = std::char_traits<char>::length(scheme);
+        // Two forward-only pointers to EOS: libpq keeps space, tab, '/',
+        // '\n', and '\r' inside a URI password. Never rescan. No '@'
+        // remaining: redact after the scheme to EOL (DuckDB LINE 1: cut)
+        // and keep scanning later lines.
+        size_t at_ptr = 0;
+        size_t colon_ptr = 0;
+        bool at_init = false;
+        bool colon_init = false;
         while (i < s.size()) {
             if (CiEq(s, i, scheme)) {
                 size_t user = i + slen;
-                // libpq keeps raw whitespace in a URI password
-                // (password='pass word'). '/' is also inside userinfo
-                // (standard base64). One forward scan records the first
-                // ':' and stops at '@', a line terminator, or EOS —
-                // never find() to the end, never rescan, never stop at
-                // ' ' / '\t' / '/'. i and p only move forward.
-                // No '@' before EOL/EOS: DuckDB LINE 1: excerpt cut
-                // inside the password; redact after the scheme.
-                size_t colon = std::string::npos;
-                size_t at = std::string::npos;
-                size_t p = user;
-                while (p < s.size() && s[p] != '\n' && s[p] != '\r') {
-                    if (s[p] == '@') {
-                        at = p;
-                        break;
+                if (!at_init || at_ptr < user) {
+                    at_ptr = user;
+                    at_init = true;
+                    while (at_ptr < s.size() && s[at_ptr] != '@') {
+                        at_ptr++;
                     }
-                    if (s[p] == ':' && colon == std::string::npos) {
-                        colon = p;
-                    }
-                    p++;
                 }
-                if (at == std::string::npos) {
+                if (at_ptr >= s.size()) {
+                    size_t eol = user;
+                    while (eol < s.size() && s[eol] != '\n' && s[eol] != '\r') {
+                        eol++;
+                    }
                     if (!any) {
                         out.reserve(s.size());
                         any = true;
                     }
                     out.append(s, copy_from, user - copy_from);
                     out.append(kRedactedMarker);
-                    copy_from = p;
-                    break;
+                    copy_from = eol;
+                    i = (eol > i) ? eol : i + 1;
+                    continue;
                 }
-                if (colon != std::string::npos && colon < at) {
+                size_t at = at_ptr;
+                if (!colon_init || colon_ptr < user) {
+                    colon_ptr = user;
+                    colon_init = true;
+                    while (colon_ptr < s.size() && s[colon_ptr] != ':') {
+                        colon_ptr++;
+                    }
+                }
+                if (colon_ptr < at) {
                     if (!any) {
                         out.reserve(s.size());
                         any = true;
                     }
-                    out.append(s, copy_from, (colon + 1) - copy_from);
+                    out.append(s, copy_from, (colon_ptr + 1) - copy_from);
                     out.append(kRedactedMarker);
                     copy_from = at;
-                    i = at;
-                    continue;
                 }
                 i = at;
                 continue;
