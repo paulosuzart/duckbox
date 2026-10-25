@@ -36,5 +36,6 @@ int main() {
     RunLakeAttachSecretTests();
     RunSecretRedactPatternTests();
     RunTempDirectoryTests();
+    RunTokenSanitizeTests();
     return ReportAndExit("unit");
 }

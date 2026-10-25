@@ -36,6 +36,7 @@ void RunDuckLakeAttachSqlTests();
 void RunLakeAttachSecretTests();
 void RunSecretRedactPatternTests();
 void RunTempDirectoryTests();
+void RunTokenSanitizeTests();
 
 } // namespace test
 } // namespace duckbox
