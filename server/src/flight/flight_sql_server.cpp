@@ -51,6 +51,9 @@
 #include <thread>
 #include <vector>
 
+#include <google/protobuf/any.pb.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <grpc/grpc.h>
 #include <grpcpp/grpcpp.h>
 
@@ -146,31 +149,27 @@ std::vector<ddb::Value> RowToValues(const ::arrow::RecordBatch &batch) {
     return out;
 }
 
-void AppendLenDelimited(std::string &s, int field, const std::string &v) {
-    s.push_back(static_cast<char>((field << 3) | 2));
-    auto n = static_cast<uint32_t>(v.size());
-    while (n > 0x7F) {
-        s.push_back(static_cast<char>((n & 0x7F) | 0x80));
-        n >>= 7;
+// Field 1 LENGTH_DELIMITED bytes (CommandPreparedStatementQuery.handle and
+// DoPutPreparedStatementResult.handle).
+std::string EncodeBytesField1(const std::string &v) {
+    std::string out;
+    {
+        google::protobuf::io::StringOutputStream os(&out);
+        google::protobuf::io::CodedOutputStream cos(&os);
+        cos.WriteTag((1 << 3) | 2);
+        cos.WriteVarint32(static_cast<uint32_t>(v.size()));
+        cos.WriteString(v);
     }
-    s.push_back(static_cast<char>(n));
-    s.append(v);
-}
-
-std::string EncodeDoPutHandle(const std::string &handle) {
-    std::string inner;
-    AppendLenDelimited(inner, 1, handle);
-    return inner;
+    return out;
 }
 
 // Flight SQL CommandPreparedStatementQuery packed as google.protobuf.Any so a
 // non-owner can forward the re-signed handle (bind parameters included).
 FlightDescriptor PreparedStatementDescriptor(const std::string &handle) {
-    std::string any;
-    AppendLenDelimited(
-        any, 1, "type.googleapis.com/arrow.flight.protocol.sql.CommandPreparedStatementQuery");
-    AppendLenDelimited(any, 2, EncodeDoPutHandle(handle));
-    return FlightDescriptor::Command(any);
+    google::protobuf::Any any;
+    any.set_type_url("type.googleapis.com/arrow.flight.protocol.sql.CommandPreparedStatementQuery");
+    any.set_value(EncodeBytesField1(handle));
+    return FlightDescriptor::Command(any.SerializeAsString());
 }
 
 Status FromEx(const std::exception &e) {
@@ -1354,7 +1353,7 @@ Status DuckboxFlightSqlServer::DoPutPreparedStatementQuery(
         auto token = signer_->Sign(h);
         RememberBind(command.prepared_statement_handle, h.params_ipc);
         RememberBind(token, h.params_ipc);
-        auto packed = EncodeDoPutHandle(token);
+        auto packed = EncodeBytesField1(token);
         auto md = std::make_shared<::arrow::Buffer>(
             reinterpret_cast<const uint8_t *>(packed.data()), static_cast<int64_t>(packed.size()));
         return writer->WriteMetadata(*md);

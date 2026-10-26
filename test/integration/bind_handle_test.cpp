@@ -18,6 +18,9 @@
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
+#include <google/protobuf/any.pb.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 
 #include <cctype>
 #include <chrono>
@@ -55,29 +58,29 @@ using duckbox::test::MemoryAnalystPath;
 using duckbox::test::MemorySpecDir;
 using duckbox::test::TestDaemon;
 
-void AppendLenDelimited(std::string &s, int field, const std::string &v) {
-    s.push_back(static_cast<char>((field << 3) | 2));
-    auto n = static_cast<uint32_t>(v.size());
-    while (n > 0x7F) {
-        s.push_back(static_cast<char>((n & 0x7F) | 0x80));
-        n >>= 7;
+std::string EncodeBytesField1(const std::string &v) {
+    std::string out;
+    {
+        google::protobuf::io::StringOutputStream os(&out);
+        google::protobuf::io::CodedOutputStream cos(&os);
+        cos.WriteTag((1 << 3) | 2);
+        cos.WriteVarint32(static_cast<uint32_t>(v.size()));
+        cos.WriteString(v);
     }
-    s.push_back(static_cast<char>(n));
-    s.append(v);
+    return out;
 }
 
 std::string PackAny(const std::string &type_url, const std::string &value) {
-    std::string any;
-    AppendLenDelimited(any, 1, type_url);
-    AppendLenDelimited(any, 2, value);
-    return any;
+    google::protobuf::Any any;
+    any.set_type_url(type_url);
+    any.set_value(value);
+    return any.SerializeAsString();
 }
 
 FlightDescriptor PreparedDescriptor(const std::string &handle) {
-    std::string cmd;
-    AppendLenDelimited(cmd, 1, handle);
-    return FlightDescriptor::Command(PackAny(
-        "type.googleapis.com/arrow.flight.protocol.sql.CommandPreparedStatementQuery", cmd));
+    return FlightDescriptor::Command(
+        PackAny("type.googleapis.com/arrow.flight.protocol.sql.CommandPreparedStatementQuery",
+                EncodeBytesField1(handle)));
 }
 
 std::string ExtractDbx4(const std::string &bytes) {
@@ -180,8 +183,7 @@ std::shared_ptr<FlightClient> Connect(int port) {
 
 std::string CreatePrepared(FlightClient &client, const FlightCallOptions &opt,
                            const std::string &sql) {
-    std::string req;
-    AppendLenDelimited(req, 1, sql);
+    std::string req = EncodeBytesField1(sql);
     Action action;
     action.type = "CreatePreparedStatement";
     action.body = ::arrow::Buffer::FromString(PackAny(
@@ -330,6 +332,8 @@ void duckbox::test::RunBindHandleTests() {
     {
         auto info = client_a->GetFlightInfo(opt, desc_orig);
         Expect(info.ok(), "GetFlightInfo on A with the original handle");
+        Expect(info.ok() && !(*info)->endpoints().empty(),
+               "GetFlightInfo on A (original handle) returns an endpoint");
         if (info.ok() && !(*info)->endpoints().empty()) {
             auto ticket = (*info)->endpoints()[0].ticket;
             auto th = TicketHandle(ticket);
@@ -346,6 +350,8 @@ void duckbox::test::RunBindHandleTests() {
         auto desc_doput = PreparedDescriptor(doput_handle);
         auto info = client_a->GetFlightInfo(opt, desc_doput);
         Expect(info.ok(), "GetFlightInfo on A with the DoPut handle");
+        Expect(info.ok() && !(*info)->endpoints().empty(),
+               "GetFlightInfo on A (DoPut handle) returns an endpoint");
         if (info.ok() && !(*info)->endpoints().empty()) {
             auto ticket = (*info)->endpoints()[0].ticket;
             auto th = TicketHandle(ticket);
@@ -361,6 +367,8 @@ void duckbox::test::RunBindHandleTests() {
         // Owner B never saw DoPut; its bind_cache_ is empty. The handle params win.
         auto info = client_b->GetFlightInfo(opt, PreparedDescriptor(doput_handle));
         Expect(info.ok(), "GetFlightInfo on owner B with DoPut handle (cache miss)");
+        Expect(info.ok() && !(*info)->endpoints().empty(),
+               "GetFlightInfo on owner B (cache miss) returns an endpoint");
         if (info.ok() && !(*info)->endpoints().empty()) {
             auto h = signer->Verify(TicketHandle((*info)->endpoints()[0].ticket));
             Expect(!h.params_ipc.empty(), "owner cache miss keeps handle params");
@@ -413,6 +421,37 @@ void duckbox::test::RunBindHandleTests() {
                        err.find(daemon_a.handle_secret) == std::string::npos,
                    "tamper error does not echo the handle secret");
         }
+    }
+
+    {
+        // Handle params are authoritative; bind_cache_ is only a fallback (#95 C3).
+        // Re-bind the DoPut handle on the owner: put1 seals id=1 (visible row)
+        // while bind_cache_[put1] now holds id=3 (tenant 22, filtered to 0 rows).
+        auto orig = CreatePrepared(*client_b, opt, "SELECT id, title FROM deals WHERE id = ?");
+        auto put1 = DoPutBind(*client_b, opt, PreparedDescriptor(orig), BindId(1));
+        auto put3 = DoPutBind(*client_b, opt, PreparedDescriptor(put1), BindId(3));
+        Expect(put1.starts_with("DBX4.") && put3.starts_with("DBX4."), "re-bind returns handles");
+        std::string err;
+        auto info = client_b->GetFlightInfo(opt, PreparedDescriptor(put1));
+        Expect(info.ok() && !(*info)->endpoints().empty(), "GetFlightInfo with re-bound handle");
+        if (info.ok() && !(*info)->endpoints().empty()) {
+            auto rows = DoGetRowCount(*client_b, opt, (*info)->endpoints()[0].ticket, &err);
+            Expect(rows == 1, "GetFlightInfo prefers handle params over bind_cache_: rows=" +
+                                  std::to_string(rows) + " " + err);
+        }
+        auto packed = ::arrow::flight::sql::CreateStatementQueryTicket(put1);
+        Expect(packed.ok(), "pack re-bound handle");
+        if (packed.ok()) {
+            auto rows = DoGetRowCount(*client_b, opt, Ticket{*packed}, &err);
+            Expect(rows == 1, "DoGetStatement prefers handle params over bind_cache_: rows=" +
+                                  std::to_string(rows) + " " + err);
+        }
+        auto rows = DoGetRowCount(*client_b, opt, Ticket{PreparedDescriptor(put1).cmd}, &err);
+        Expect(rows == 1, "DoGetPreparedStatement prefers handle params over bind_cache_: rows=" +
+                              std::to_string(rows) + " " + err);
+        auto rows3 = DoGetRowCount(*client_a, opt, Ticket{PreparedDescriptor(put3).cmd}, &err);
+        Expect(rows3 == 0, "re-bound handle via non-owner uses the new value: rows=" +
+                               std::to_string(rows3) + " " + err);
     }
 
     na.Stop();
