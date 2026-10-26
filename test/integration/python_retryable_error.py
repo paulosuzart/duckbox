@@ -123,6 +123,7 @@ def _adbc_query(url: str, sandbox: str, sql: str) -> None:
 def _adbc_expect_unavailable(url: str, sandbox: str, sql: str, prefix: str, what: str) -> None:
     try:
         import adbc_driver_flightsql  # noqa: F401
+        from adbc_driver_manager import AdbcStatusCode
     except ImportError:
         print(f"skip ADBC {what} (adbc_driver_flightsql not installed)")
         return
@@ -130,9 +131,13 @@ def _adbc_expect_unavailable(url: str, sandbox: str, sql: str, prefix: str, what
         _adbc_query(url, sandbox, sql)
     except Exception as exc:  # noqa: BLE001
         text = str(exc)
-        low = text.lower()
-        if prefix not in text and "unavailable" not in low:
-            _fail(f"ADBC {what} is not UNAVAILABLE / {prefix}: {text}")
+        status = getattr(exc, "status_code", None)
+        if prefix not in text:
+            _fail(f"ADBC {what} message does not contain {prefix!r}: {text}")
+        if "(Unavailable;" not in text:
+            _fail(f"ADBC {what} message does not contain '(Unavailable;': {text}")
+        if status != AdbcStatusCode.IO:
+            _fail(f"ADBC {what} status_code is {status!r}, want AdbcStatusCode.IO: {text}")
         print(f"ok ADBC {what}")
         return
     _fail(f"ADBC {what} did not fail")
@@ -148,11 +153,8 @@ def _adbc_expect_policy(url: str, sandbox: str, sql: str) -> None:
         _adbc_query(url, sandbox, sql)
     except Exception as exc:  # noqa: BLE001
         text = str(exc)
-        low = text.lower()
-        if "unavailable" in low and "owner_moved" not in text and "no_owner" not in text:
-            # connect() retries on transport unavailable; a query-time
-            # UNAVAILABLE would be a mapping regression.
-            _fail(f"ADBC policy violation looks Unavailable: {text}")
+        if "(Unavailable;" in text or "no_owner:" in text or "owner_moved:" in text:
+            _fail(f"ADBC policy violation looks retryable/Unavailable: {text}")
         print("ok ADBC policy violation keeps a non-retryable status")
         return
     _fail("ADBC policy violation did not fail")
