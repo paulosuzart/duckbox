@@ -465,8 +465,9 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
     if (policy_.resources.query_timeout_ms > 0) {
         watchdog = std::thread([&]() {
             std::unique_lock<std::mutex> lk(wait_mu);
-            if (!cv.wait_for(lk, std::chrono::milliseconds(policy_.resources.query_timeout_ms),
-                             [&] { return finished; })) {
+            const auto until = SaturatingDeadlineMs(std::chrono::steady_clock::now(),
+                                                    policy_.resources.query_timeout_ms);
+            if (!cv.wait_until(lk, until, [&] { return finished; })) {
                 timed_out = true;
                 con_->Interrupt();
             }
