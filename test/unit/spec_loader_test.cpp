@@ -727,6 +727,19 @@ void duckbox::test::RunSpecLoaderTests() {
             expect_userinfo_rejected("grpc+tls://leakuser:s3cretLeak@node-a.example:4984",
                                      {"leakuser", "s3cretLeak"},
                                      "user:password advertised_address is refused");
+            expect_userinfo_rejected("grpc+tls://:s3cretLeak@node-a.example:4984", {"s3cretLeak"},
+                                     "empty-user password advertised_address is refused");
+            expect_userinfo_rejected("leakuser:s3cretLeak@node-a.example:4984",
+                                     {"leakuser", "s3cretLeak"},
+                                     "scheme-less userinfo advertised_address is refused");
+            expect_userinfo_rejected("grpc://leakuser:1234/s3cretLeak@node-a.example:4984",
+                                     {"s3cretLeak"}, "credential after '/' is refused");
+            expect_userinfo_rejected("grpc://leakuser:12#s3cretLeak@node-a.example:4984",
+                                     {"s3cretLeak"}, "credential in fragment is refused");
+            expect_userinfo_rejected("grpc://node-a.example:4984/?tok=s3cretLeak", {"s3cretLeak"},
+                                     "credential in query is refused");
+            expect_userinfo_rejected("http://node-a.example:4984", {},
+                                     "non-grpc scheme is refused");
             DaemonConfig ok = TestDaemon();
             ok.advertised_address = "grpc+tls://node-a.example:4984";
             ValidateDaemonOrThrow(ok);

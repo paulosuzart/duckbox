@@ -48,8 +48,21 @@ void ValidateAdvertisedAddressOrThrow(const std::string &address, const char *wh
         spec = "grpc://" + spec;
     }
     auto uri = ::arrow::util::Uri::FromString(spec);
-    if (uri.ok() && (!uri->username().empty() || !uri->password().empty())) {
+    if (!uri.ok()) {
+        throw PolicyError(std::string(what) + ": invalid Flight URL (grpc://host:port or "
+                                              "grpc+tls://host:port)");
+    }
+    if (!uri->username().empty() || !uri->password().empty()) {
         throw PolicyError(std::string(what) + ": Flight URL must not contain userinfo");
+    }
+    auto scheme = absl::AsciiStrToLower(uri->scheme());
+    if (scheme != "grpc" && scheme != "grpc+tls") {
+        throw PolicyError(std::string(what) + ": scheme must be grpc:// or grpc+tls://");
+    }
+    // arrow::util::Uri has no fragment accessor; '#' is never valid in a host:port URL.
+    if (!(uri->path().empty() || uri->path() == "/") || !uri->query_string().empty() ||
+        spec.find('#') != std::string::npos) {
+        throw PolicyError(std::string(what) + ": Flight URL must be scheme://host:port only");
     }
 }
 
