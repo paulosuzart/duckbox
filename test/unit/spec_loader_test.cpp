@@ -714,6 +714,8 @@ void duckbox::test::RunSpecLoaderTests() {
                     std::string w = e.what();
                     Expect(w.find("advertised_address") != std::string::npos,
                            std::string(msg) + " names advertised_address");
+                    Expect(w.find("advertised_address: advertised_address:") == std::string::npos,
+                           std::string(msg) + " does not double advertised_address prefix");
                     Expect(w.find(url) == std::string::npos,
                            std::string(msg) + " does not echo the full address");
                     for (auto &s : secrets) {
@@ -729,6 +731,8 @@ void duckbox::test::RunSpecLoaderTests() {
                                      "user:password advertised_address is refused");
             expect_userinfo_rejected("grpc+tls://:s3cretLeak@node-a.example:4984", {"s3cretLeak"},
                                      "empty-user password advertised_address is refused");
+            expect_userinfo_rejected("grpc://:@node-a.example:4984", {":@"},
+                                     "empty userinfo advertised_address is refused");
             expect_userinfo_rejected("leakuser:s3cretLeak@node-a.example:4984",
                                      {"leakuser", "s3cretLeak"},
                                      "scheme-less userinfo advertised_address is refused");

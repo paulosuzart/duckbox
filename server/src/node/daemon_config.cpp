@@ -52,7 +52,9 @@ void ValidateAdvertisedAddressOrThrow(const std::string &address, const char *wh
         throw PolicyError(std::string(what) + ": invalid Flight URL (grpc://host:port or "
                                               "grpc+tls://host:port)");
     }
-    if (!uri->username().empty() || !uri->password().empty()) {
+    // Empty userinfo (":@") leaves username() and password() empty; '@' still marks it.
+    if (!uri->username().empty() || !uri->password().empty() ||
+        spec.find('@') != std::string::npos) {
         throw PolicyError(std::string(what) + ": Flight URL must not contain userinfo");
     }
     auto scheme = absl::AsciiStrToLower(uri->scheme());
@@ -542,7 +544,12 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
         try {
             ValidateAdvertisedAddressOrThrow(cfg.advertised_address, "advertised_address");
         } catch (const std::exception &e) {
-            add("advertised_address", e.what());
+            std::string w = e.what();
+            const std::string prefix = "advertised_address: ";
+            if (w.rfind(prefix, 0) == 0) {
+                w = w.substr(prefix.size());
+            }
+            add("advertised_address", w);
         }
     }
     if (cfg.max_sandboxes == 0) {
