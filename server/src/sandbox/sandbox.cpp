@@ -2,6 +2,7 @@
 #include "arrow/arrow_ipc.hpp"
 #include "arrow/arrow_types.hpp"
 #include "cluster/lease.hpp"
+#include "common/deadline.hpp"
 #include "common/error.hpp"
 #include "common/json.hpp"
 #include "config/spec_validator.hpp"
@@ -207,7 +208,7 @@ void TenantSandbox::Passivate(const char *reason) {
     con_.reset();
     db_.reset();
     if (!managed_temp_directory_.empty()) {
-        RemoveSandboxTempDirectory(managed_temp_directory_);
+        RemoveSandboxTempDirectory(managed_temp_directory_, daemon_.temp_directory);
         managed_temp_directory_.clear();
     }
     if (was_warm) {
@@ -432,7 +433,7 @@ void TenantSandbox::WarmupLocked(bool validate_lake) {
         con_.reset();
         db_.reset();
         if (!managed_temp_directory_.empty()) {
-            RemoveSandboxTempDirectory(managed_temp_directory_);
+            RemoveSandboxTempDirectory(managed_temp_directory_, daemon_.temp_directory);
             managed_temp_directory_.clear();
         }
         throw;
@@ -464,8 +465,9 @@ QueryOutput TenantSandbox::RunTimed(const std::string &sql, std::vector<ddb::Val
     if (policy_.resources.query_timeout_ms > 0) {
         watchdog = std::thread([&]() {
             std::unique_lock<std::mutex> lk(wait_mu);
-            if (!cv.wait_for(lk, std::chrono::milliseconds(policy_.resources.query_timeout_ms),
-                             [&] { return finished; })) {
+            const auto until = SaturatingDeadlineMs(std::chrono::steady_clock::now(),
+                                                    policy_.resources.query_timeout_ms);
+            if (!cv.wait_until(lk, until, [&] { return finished; })) {
                 timed_out = true;
                 con_->Interrupt();
             }
@@ -797,7 +799,7 @@ std::shared_ptr<::arrow::Schema> TenantSandbox::DescribeHandleArrow(const std::s
     const int64_t bound_ms = policy_.resources.query_timeout_ms > 0
                                  ? policy_.resources.query_timeout_ms
                                  : daemon_.lease.proxy_first_message_max_ms;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(bound_ms);
+    const auto deadline = SaturatingDeadlineMs(std::chrono::steady_clock::now(), bound_ms);
     std::unique_lock<std::timed_mutex> hold(mu_, std::defer_lock);
     if (!hold.try_lock_until(deadline)) {
         throw UnavailableError("sandbox describe timed out");
