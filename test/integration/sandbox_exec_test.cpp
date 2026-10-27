@@ -15,14 +15,20 @@
 
 #include "httplib.h"
 
+#include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <memory>
+#include <netinet/in.h>
 #include <sstream>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 
 void duckbox::test::RunSandboxExecTests() {
     using namespace duckbox;
@@ -468,8 +474,9 @@ void duckbox::test::RunSandboxExecTests() {
     {
         // Exact B1 repro: ATTACH a .db that contains macro total_all, plus a
         // duckdb_functions() shadow, with functions: [total_all].
-        auto evil = std::string("/tmp/duckbox-attach-macro.db");
-        std::filesystem::remove(evil);
+        char dir_tmpl[] = "/tmp/duckbox-attach-macro-XXXXXX";
+        Expect(mkdtemp(dir_tmpl) != nullptr, "unique attach-macro temp dir");
+        auto evil = std::string(dir_tmpl) + "/attach-macro.db";
         {
             ddb::DuckDB db(evil.c_str());
             ddb::Connection con(db);
@@ -505,6 +512,7 @@ void duckbox::test::RunSandboxExecTests() {
         ExpectThrowContains(
             [&] { box_mac.Execute("SELECT CAST(ext.main.total_all() AS INTEGER)"); }, "",
             "ext.main.total_all() is not reachable after ATTACH deny");
+        std::filesystem::remove_all(dir_tmpl);
     }
     {
         auto pg = policy;
@@ -667,15 +675,17 @@ void duckbox::test::RunSandboxExecTests() {
     }
 
     {
+        char dir_tmpl[] = "/tmp/duckbox-a4-paths-XXXXXX";
+        Expect(mkdtemp(dir_tmpl) != nullptr, "unique A4 allowed_paths temp dir");
         auto paths = policy;
-        paths.lake.data_path = "/tmp/duckbox-a4-allowed-paths";
-        std::filesystem::create_directories(paths.lake.data_path);
+        paths.lake.data_path = dir_tmpl;
         TenantSandbox box_paths(daemon, paths, key_a, spec_dir);
         box_paths.Warmup(false);
         Expect(box_paths.Warm(), "A4 allowed_paths applied before enable_external_access=false");
         auto still = box_paths.Execute("SELECT id FROM deals ORDER BY id");
         Expect(still.row_count == 1,
                "A4 lake still readable after allowed_paths + disable external access");
+        std::filesystem::remove_all(dir_tmpl);
     }
 
     {
@@ -703,6 +713,55 @@ void duckbox::test::RunSandboxExecTests() {
     }
 
     {
+        // I2: Stop() before listen used to hang (httplib stop() is a no-op
+        // until is_running_). No /health warm-up — Start then destroy.
+        ServerOptions opt;
+        opt.daemon = daemon;
+        for (int i = 0; i < 50; i++) {
+            DebugHttpServer s;
+            Expect(s.Start(opt, nullptr, nullptr) > 0,
+                   "DebugHttpServer Start/destroy without /health");
+        }
+    }
+    {
+        // I5: production StartDebugHttp (listen(host, port)). Reserve the
+        // port with a raw socket so httplib is not left listening on it.
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        Expect(fd >= 0, "StartDebugHttp port socket");
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        Expect(::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0,
+               "StartDebugHttp bind port 0");
+        socklen_t len = sizeof(addr);
+        Expect(::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) == 0,
+               "StartDebugHttp getsockname");
+        const int port = ntohs(addr.sin_port);
+        ::close(fd);
+        Expect(port > 0, "StartDebugHttp reserved port");
+        auto owned = std::make_shared<ServerOptions>();
+        owned->daemon = daemon;
+        owned->daemon.debug_http = "127.0.0.1:" + std::to_string(port);
+        std::thread th([owned] { StartDebugHttp(*owned, nullptr, nullptr); });
+        th.detach();
+        httplib::Client cli("127.0.0.1", port);
+        cli.set_connection_timeout(1, 0);
+        cli.set_read_timeout(2, 0);
+        cli.set_write_timeout(2, 0);
+        httplib::Result health;
+        for (int i = 0; i < 50; i++) {
+            health = cli.Get("/health");
+            if (health) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        Expect(health && health->status == 200 &&
+                   health->body.find("\"healthy\":true") != std::string::npos,
+               "production StartDebugHttp /health");
+    }
+    {
         auto defs = std::make_shared<MemorySandboxRegistry>();
         auto rec = RecordFromSpec(loaded, spec_dir);
         rec.id = "http-a";
@@ -712,15 +771,17 @@ void duckbox::test::RunSandboxExecTests() {
         rec.spec.lake.catalog = "ducklake:postgres:dbname=lake password=sandbox-a-secret-yy";
         defs->Create(rec);
         DaemonConfig cfg = daemon;
-        cfg.debug_http = "127.0.0.1:18481";
         auto leases = std::make_shared<SingleNodeLeaseManager>();
         auto runtime = std::make_shared<SandboxRuntime>(cfg, leases, defs);
         ServerOptions opt;
         opt.daemon = cfg;
-        std::thread th([&] { StartDebugHttp(opt, defs, runtime); });
-        th.detach();
-        httplib::Client cli("127.0.0.1", 18481);
+        DebugHttpServer http;
+        const int http_port = http.Start(opt, defs, runtime);
+        Expect(http_port > 0, "ephemeral debug HTTP port");
+        httplib::Client cli("127.0.0.1", http_port);
         cli.set_connection_timeout(1, 0);
+        cli.set_read_timeout(2, 0);
+        cli.set_write_timeout(2, 0);
         httplib::Result health;
         for (int i = 0; i < 50; i++) {
             health = cli.Get("/health");
@@ -754,14 +815,15 @@ void duckbox::test::RunSandboxExecTests() {
             std::string fence_h;
             runtime_h->SetFenceHook([&](const std::string &r) { fence_h = r; });
             runtime_h->TickLeases();
-            DaemonConfig cfg_h = cfg;
-            cfg_h.debug_http = "127.0.0.1:18482";
             ServerOptions opt_h;
-            opt_h.daemon = cfg_h;
-            std::thread th_h([&] { StartDebugHttp(opt_h, defs_h, runtime_h); });
-            th_h.detach();
-            httplib::Client cli_h("127.0.0.1", 18482);
+            opt_h.daemon = cfg;
+            DebugHttpServer http_h;
+            const int http_port_h = http_h.Start(opt_h, defs_h, runtime_h);
+            Expect(http_port_h > 0, "ephemeral fenced debug HTTP port");
+            httplib::Client cli_h("127.0.0.1", http_port_h);
             cli_h.set_connection_timeout(1, 0);
+            cli_h.set_read_timeout(2, 0);
+            cli_h.set_write_timeout(2, 0);
             httplib::Result okh;
             for (int i = 0; i < 50; i++) {
                 okh = cli_h.Get("/health");

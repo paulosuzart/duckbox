@@ -29,8 +29,8 @@ std::string ResolveSandboxTempDirectory(const std::string &base, const std::stri
 std::string CreateSandboxTempDirectory(const std::string &base, const std::string &sandbox_id,
                                        int version);
 
-// remove_all of the instance directory, then std::filesystem::remove of the
-// empty `{base}/{id}` parent when `base` is set. Never follows a symlink out
+// remove_all of the instance directory, then POSIX rmdir of the empty
+// `{base}/{id}` parent when `base` is set. Never follows a symlink out
 // of `base`, never deletes outside `base`, and never removes `base` itself.
 // A missing or non-empty parent is ignored (debug). Other refusals and
 // unexpected errors log at warn. No-op when path is empty. Teardown never
