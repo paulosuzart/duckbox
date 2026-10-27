@@ -743,6 +743,9 @@ void duckbox::test::RunSpecLoaderTests() {
             DaemonConfig ok = TestDaemon();
             ok.advertised_address = "grpc+tls://node-a.example:4984";
             ValidateDaemonOrThrow(ok);
+            DaemonConfig bare = TestDaemon();
+            bare.advertised_address = "node-a.example:4984";
+            ValidateDaemonOrThrow(bare);
             {
                 auto leakp = "/tmp/duckbox-advertised-userinfo.yaml";
                 {
