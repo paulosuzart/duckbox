@@ -18,6 +18,8 @@ int main() {
     RunCliAuthTests();
     RunPythonClientAuthTests();
     RunClusterTests();
+    std::cerr << "integration suite bind_handle\n" << std::flush;
+    RunBindHandleTests();
     std::cerr << "integration suite proxy_timeout\n" << std::flush;
     RunProxyTimeoutTests();
     std::cerr << "integration suite after_proxy_timeout\n" << std::flush;
