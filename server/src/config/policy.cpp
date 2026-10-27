@@ -1,5 +1,6 @@
 #include "config/policy.hpp"
 #include "common/crypto.hpp"
+#include "common/deadline.hpp"
 #include "common/duckdb_layer.hpp"
 #include "common/yaml.hpp"
 #include "lake/lake.hpp"
@@ -164,6 +165,9 @@ SandboxSpec SpecFromYaml(const YamlNode &root, const std::string &path, const st
         p.resources.threads = res->GetInt("threads", p.resources.threads);
         p.resources.query_timeout_ms =
             res->GetInt("query_timeout_ms", p.resources.query_timeout_ms);
+        if (p.resources.query_timeout_ms > kMaxSteadyClockTimeoutMs) {
+            throw PolicyError(SteadyClockTimeoutMaxMessage("resources.query_timeout_ms"));
+        }
         p.resources.max_result_rows = res->GetInt("max_result_rows", p.resources.max_result_rows);
     }
     if (auto *lake = root.Get("lake")) {
