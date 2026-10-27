@@ -1450,13 +1450,13 @@ Status DuckboxFlightSqlServer::DoPutPreparedStatementQuery(
         ARROW_ASSIGN_OR_RAISE(auto in_schema, reader->GetSchema());
         ::arrow::RecordBatchVector batches;
         int64_t streamed = 0;
-        last_doput_batches_ = 0;
+        last_doput_batches_.store(0, std::memory_order_relaxed);
         while (true) {
             ARROW_ASSIGN_OR_RAISE(auto chunk, reader->Next());
             if (!chunk.data) {
                 break;
             }
-            last_doput_batches_++;
+            last_doput_batches_.fetch_add(1, std::memory_order_relaxed);
             streamed += ::arrow::util::TotalBufferSize(*chunk.data);
             if (static_cast<size_t>(streamed) > kMaxBindParamsBytes) {
                 throw Error("bind parameters exceed the maximum size");

@@ -84,7 +84,7 @@ public:
 	size_t BindCacheBytes() const { return bind_cache_.bytes(); }
 	size_t BindCacheSize() const { return bind_cache_.size(); }
 	// Batches consumed by the last DoPutPreparedStatementQuery (tests).
-	size_t LastDoPutBatches() const { return last_doput_batches_; }
+	size_t LastDoPutBatches() const { return last_doput_batches_.load(std::memory_order_relaxed); }
 	DuckboxFlightSqlServer(node::DaemonConfig daemon, std::shared_ptr<sandbox::SandboxRegistry> defs,
 	                       std::shared_ptr<sandbox::SandboxRuntime> runtime, std::shared_ptr<IHandleSigner> signer,
 	                       std::shared_ptr<rewriter::ISqlRewriter> rewriter, node::ListenerPlane plane = node::ListenerPlane::Public,
@@ -189,7 +189,8 @@ private:
 	void RememberBind(const std::string &key, const std::string &ipc) const;
 
 	mutable BindCache bind_cache_;
-	size_t last_doput_batches_ = 0;
+	// Written by concurrent DoPut handlers; atomic so the test seam is not a data race.
+	std::atomic<size_t> last_doput_batches_{0};
 };
 
 // FlightSqlServerBase::DoAction is final; this wrapper intercepts sandbox CRUD

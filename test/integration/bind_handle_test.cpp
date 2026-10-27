@@ -695,6 +695,8 @@ void duckbox::test::RunBindHandleTests() {
         auto large_cli = ConnectLargeSend(nb.pub_port);
         auto cap_err = DoPutStatus(*large_cli, opt, PreparedDescriptor(cap_h), huge);
         Expect(!cap_err.empty(), "public listener rejects a gRPC message over 4 MiB");
+        Expect(cap_err.find("larger than max") != std::string::npos,
+               "4 MiB refusal comes from gRPC max receive size: " + cap_err);
         Expect(cap_err.find("bind parameters exceed the maximum size") == std::string::npos,
                "4 MiB refusal is the public gRPC cap, not the bind stream cap: " + cap_err);
         Expect(cap_err.find(pmarker) == std::string::npos,
