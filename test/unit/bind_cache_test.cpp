@@ -105,9 +105,13 @@ void duckbox::test::RunBindCacheTests() {
             auto ipc = sink->Finish().ValueOrDie();
             return static_cast<size_t>(ipc->size());
         };
-        constexpr int kIters = 200;
-        auto t0 = std::chrono::steady_clock::now();
+        constexpr int kWarm = 50;
+        constexpr int kIters = 400;
         size_t last = 0;
+        for (int i = 0; i < kWarm; i++) {
+            last = encode();
+        }
+        auto t0 = std::chrono::steady_clock::now();
         for (int i = 0; i < kIters; i++) {
             last = encode();
         }
@@ -126,8 +130,19 @@ void duckbox::test::RunBindCacheTests() {
                            std::chrono::steady_clock::now() - t0)
                            .count();
         Expect(accepted == kIters, "measured binds are under the max params size");
+        constexpr int kCmpIters = 5000000;
+        t0 = std::chrono::steady_clock::now();
+        size_t rejects = 0;
+        for (int i = 0; i < kCmpIters; i++) {
+            rejects += static_cast<size_t>(last > kMaxBindParamsBytes);
+        }
+        auto cmp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+        Expect(rejects == 0, "measured ipc is under the max params size");
         std::cout << "doput_encode_without_size_check_us=" << without_us
-                  << " doput_encode_with_size_check_us=" << with_us << " iters=" << kIters
-                  << " ipc_bytes=" << last << "\n";
+                  << " doput_encode_with_size_check_us=" << with_us << " encode_iters=" << kIters
+                  << " ipc_bytes=" << last << " size_check_only_ns=" << cmp_ns
+                  << " size_check_iters=" << kCmpIters << "\n";
     }
 }
