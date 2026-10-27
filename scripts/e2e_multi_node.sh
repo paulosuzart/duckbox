@@ -614,23 +614,12 @@ wait_port 4747
 wait_port 4748
 wait_port 4749
 "$PY" - <<'PY'
-import time
 from duckbox_client import connect
-deadline = time.time() + 20
-last = None
-while time.time() < deadline:
-    try:
-        db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=1)
-        df = db.query("SELECT id FROM deals ORDER BY id")
-        assert len(df) >= 1, df
-        print("cluster recovered after S3 outage > TTL", list(df["id"]))
-        db.close()
-        break
-    except Exception as e:  # noqa: BLE001
-        last = e
-        time.sleep(0.5)
-else:
-    raise SystemExit(f"query after S3 outage recovery did not succeed: {last}")
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=10)
+df = db.query("SELECT id FROM deals ORDER BY id")
+assert len(df) >= 1, df
+print("cluster recovered after S3 outage > TTL", list(df["id"]))
+db.close()
 PY
 
 echo "multi-node e2e ok"
