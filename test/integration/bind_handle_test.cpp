@@ -36,6 +36,7 @@ namespace {
 using ::arrow::flight::Action;
 using ::arrow::flight::FlightCallOptions;
 using ::arrow::flight::FlightClient;
+using ::arrow::flight::FlightClientOptions;
 using ::arrow::flight::FlightDescriptor;
 using ::arrow::flight::FlightServerOptions;
 using ::arrow::flight::Location;
@@ -48,6 +49,7 @@ using duckbox::flight::DuckboxFlightSqlServer;
 using duckbox::flight::HandshakeAuthHandler;
 using duckbox::flight::HmacHandleSigner;
 using duckbox::flight::kMaxBindParamsBytes;
+using duckbox::flight::kMaxPublicMessageBytes;
 using duckbox::flight::PeerFlight;
 using duckbox::node::CallerRule;
 using duckbox::node::DaemonConfig;
@@ -162,6 +164,7 @@ FlightPair StartPair(const DaemonConfig &cfg, const std::shared_ptr<S3SandboxReg
     auto loc = Location::ForGrpcTcp("127.0.0.1", 0);
     FlightServerOptions fopt(*loc);
     fopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Public);
+    duckbox::flight::ApplyPublicListenerMessageCap(fopt);
     Expect(p.pub->Init(fopt).ok(), "bind-handle public init");
     FlightServerOptions iopt(*loc);
     iopt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
@@ -184,6 +187,17 @@ std::shared_ptr<FlightClient> Connect(int port) {
     auto loc = Location::ForGrpcTcp("127.0.0.1", port);
     auto cli = FlightClient::Connect(*loc);
     Expect(cli.ok(), "flight client connect");
+    return std::shared_ptr<FlightClient>(std::move(cli).ValueOrDie());
+}
+
+// Client send must exceed kMaxPublicMessageBytes so I3b hits the server cap.
+std::shared_ptr<FlightClient> ConnectLargeSend(int port) {
+    auto loc = Location::ForGrpcTcp("127.0.0.1", port);
+    auto opts = FlightClientOptions::Defaults();
+    opts.generic_options.emplace_back("grpc.max_send_message_length",
+                                      static_cast<int>(kMaxPublicMessageBytes * 4));
+    auto cli = FlightClient::Connect(*loc, opts);
+    Expect(cli.ok(), "flight client connect (large send)");
     return std::shared_ptr<FlightClient>(std::move(cli).ValueOrDie());
 }
 
@@ -235,6 +249,46 @@ std::string DoPutStatus(FlightClient &client, const FlightCallOptions &opt,
         return put.status().ToString();
     }
     auto st = put->writer->WriteRecordBatch(*batch);
+    if (st.ok()) {
+        st = put->writer->DoneWriting();
+    }
+    if (st.ok()) {
+        std::shared_ptr<::arrow::Buffer> md;
+        st = put->reader->ReadMetadata(&md);
+    }
+    auto close = put->writer->Close();
+    if (!st.ok()) {
+        return st.ToString();
+    }
+    if (!close.ok()) {
+        return close.ToString();
+    }
+    return "";
+}
+
+std::string FlightStatusMessage(const std::string &err) {
+    auto msg = err;
+    const auto dbg = msg.find(". gRPC client debug context");
+    if (dbg != std::string::npos) {
+        msg.resize(dbg);
+    }
+    return msg;
+}
+
+std::string DoPutManyStatus(FlightClient &client, const FlightCallOptions &opt,
+                            const FlightDescriptor &desc,
+                            const std::shared_ptr<::arrow::RecordBatch> &batch, int n) {
+    auto put = client.DoPut(opt, desc, batch->schema());
+    if (!put.ok()) {
+        return put.status().ToString();
+    }
+    ::arrow::Status st;
+    for (int i = 0; i < n; i++) {
+        st = put->writer->WriteRecordBatch(*batch);
+        if (!st.ok()) {
+            break;
+        }
+    }
     if (st.ok()) {
         st = put->writer->DoneWriting();
     }
@@ -438,13 +492,37 @@ void duckbox::test::RunBindHandleTests() {
     }
 
     {
-        // S6: a cache hit on the non-owner must not re-sign. Proxy forwards the
-        // original handle; the owner has no params and cannot apply the bind.
+        // Non-owner cache hit: the redirect carries the cache-sourced params to the owner.
         std::string err_a;
         auto rows_a = DoGetRowCount(*client_a, opt, Ticket{desc_orig.cmd}, &err_a);
-        Expect(rows_a != 1,
-               "DoGetPreparedStatement on non-owner does not re-sign a cache hit: rows=" +
-                   std::to_string(rows_a) + " " + err_a);
+        Expect(rows_a == 1, "DoGetPreparedStatement on A uses bind_cache fallback: " + err_a);
+        // The cache path is still verified + authorized: another caller or another
+        // tenant key with the same original handle gets nothing.
+        auto other_c = opt;
+        for (auto &hdr : other_c.headers) {
+            if (hdr.first == "x-duckbox-caller") {
+                hdr.second = "other";
+            }
+        }
+        std::string err_o;
+        auto rows_o = DoGetRowCount(*client_a, other_c, Ticket{desc_orig.cmd}, &err_o);
+        Expect(rows_o < 0 && err_o.find("not authorized") != std::string::npos,
+               "cache hit is not served to an unauthorized caller: " + err_o);
+        auto other_k = opt;
+        for (auto &hdr : other_k.headers) {
+            if (hdr.first == "x-duckbox-key") {
+                hdr.second = "tenant_21:user_other";
+            }
+        }
+        std::string err_k;
+        auto rows_k = DoGetRowCount(*client_a, other_k, Ticket{desc_orig.cmd}, &err_k);
+        Expect(rows_k < 0 && err_k.find("does not match statement handle") != std::string::npos,
+               "cache hit is not served to another tenant key: " + err_k);
+        auto tampered = desc_orig.cmd;
+        tampered[tampered.size() / 2] ^= 0x01;
+        std::string err_t;
+        auto rows_t = DoGetRowCount(*client_a, opt, Ticket{tampered}, &err_t);
+        Expect(rows_t < 0, "tampered original handle is rejected before the cache: " + err_t);
         std::string err_b;
         auto rows_b =
             DoGetRowCount(*client_b, opt, Ticket{PreparedDescriptor(doput_handle).cmd}, &err_b);
@@ -524,12 +602,7 @@ void duckbox::test::RunBindHandleTests() {
         auto huge = BindString(marker + std::string(kMaxBindParamsBytes, 'X'));
         auto err = DoPutStatus(*client_b, opt, desc_orig, huge);
         Expect(!err.empty(), "oversize bind params are rejected");
-        auto msg = err;
-        const auto dbg = msg.find(". gRPC client debug context");
-        if (dbg != std::string::npos) {
-            msg.resize(dbg);
-        }
-        Expect(msg == "Invalid: bind parameters exceed the maximum size",
+        Expect(FlightStatusMessage(err) == "Invalid: bind parameters exceed the maximum size",
                "oversize DoPut is InvalidArgument: " + err);
         Expect(err.find(marker) == std::string::npos, "oversize error does not echo the params");
     }
@@ -541,8 +614,12 @@ void duckbox::test::RunBindHandleTests() {
                 hdr.second = "other";
             }
         }
+        // Fresh handle never bound: an overwrite of desc_orig with the same
+        // params would leave BindCacheBytes() unchanged and hide a write.
+        auto fresh = PreparedDescriptor(
+            CreatePrepared(*client_a, opt, "SELECT id, title FROM deals WHERE id = ?"));
         const auto bytes_before = na.pub_sql->BindCacheBytes();
-        auto err_put = DoPutStatus(*client_a, other, desc_orig, batch);
+        auto err_put = DoPutStatus(*client_a, other, fresh, batch);
         Expect(!err_put.empty(), "cross-tenant caller is rejected at DoPut");
         Expect(err_put.find("not authorized") != std::string::npos ||
                    err_put.find("Unauthenticated") != std::string::npos,
@@ -585,9 +662,59 @@ void duckbox::test::RunBindHandleTests() {
         Expect(ipc_size(exact) == kMaxBindParamsBytes, "boundary bind encodes to exactly 1 MiB");
         Expect(DoPutStatus(*client_b, opt, desc_orig, exact).empty(),
                "bind IPC of exactly 1 MiB is accepted");
-        auto over = BindString(std::string(len + 8, 'b'));
-        Expect(!DoPutStatus(*client_b, opt, desc_orig, over).empty(),
-               "bind IPC one step over 1 MiB is rejected");
+        const std::string bmarker = "BOUNDARY_OVER_MARKER";
+        auto over = BindString(bmarker + std::string(len + 8, 'b'));
+        auto over_err = DoPutStatus(*client_b, opt, desc_orig, over);
+        Expect(FlightStatusMessage(over_err) == "Invalid: bind parameters exceed the maximum size",
+               "boundary oversize is InvalidArgument: " + over_err);
+        Expect(over_err.find(bmarker) == std::string::npos,
+               "boundary oversize does not echo the params");
+    }
+
+    {
+        // I3a: reject while streaming — D3 (check only after the loop) reads every batch.
+        auto stream_h = CreatePrepared(*client_b, opt, "SELECT id, title FROM deals WHERE id = ?");
+        auto chunk = BindString(std::string(64 * 1024, 'S'));
+        constexpr int kChunks = 24;
+        auto stream_err =
+            DoPutManyStatus(*client_b, opt, PreparedDescriptor(stream_h), chunk, kChunks);
+        Expect(FlightStatusMessage(stream_err) ==
+                   "Invalid: bind parameters exceed the maximum size",
+               "multi-batch oversize stream is rejected: " + stream_err);
+        const auto got = nb.pub_sql->LastDoPutBatches();
+        Expect(got > 0 && got < static_cast<size_t>(kChunks),
+               "stream cap stops Next() before the client finishes: batches=" +
+                   std::to_string(got));
+    }
+
+    {
+        // I3b: public listener refuses one gRPC message over 4 MiB (mutant P2).
+        auto cap_h = CreatePrepared(*client_b, opt, "SELECT id, title FROM deals WHERE id = ?");
+        const std::string pmarker = "PUBLIC_CAP_MARKER";
+        auto huge = BindString(pmarker + std::string(kMaxPublicMessageBytes + 256 * 1024, 'P'));
+        auto large_cli = ConnectLargeSend(nb.pub_port);
+        auto cap_err = DoPutStatus(*large_cli, opt, PreparedDescriptor(cap_h), huge);
+        Expect(!cap_err.empty(), "public listener rejects a gRPC message over 4 MiB");
+        Expect(cap_err.find("bind parameters exceed the maximum size") == std::string::npos,
+               "4 MiB refusal is the public gRPC cap, not the bind stream cap: " + cap_err);
+        Expect(cap_err.find(pmarker) == std::string::npos,
+               "4 MiB refusal does not echo the payload");
+    }
+
+    {
+        // I3c: one DoPut stores exactly one cache entry (original handle). Mutant R1
+        // also RememberBind(token) and would count a second key.
+        auto orig = CreatePrepared(*client_a, opt, "SELECT id, title FROM deals WHERE id = ?");
+        const auto bytes_before = na.pub_sql->BindCacheBytes();
+        const auto size_before = na.pub_sql->BindCacheSize();
+        auto token = DoPutBind(*client_a, opt, PreparedDescriptor(orig), batch);
+        Expect(token.starts_with("DBX4."), "I3c DoPut returns a handle");
+        auto sealed = signer->Verify(token);
+        Expect(na.pub_sql->BindCacheSize() == size_before + 1,
+               "one DoPut writes exactly one cache entry");
+        Expect(na.pub_sql->BindCacheBytes() ==
+                   bytes_before + orig.size() + sealed.params_ipc.size(),
+               "one DoPut counts original handle + ipc only");
     }
 
     {

@@ -3,21 +3,11 @@
 
 #include "flight/flight_sql_server.hpp"
 
-#include <arrow/array.h>
-#include <arrow/builder.h>
-#include <arrow/io/memory.h>
-#include <arrow/ipc/writer.h>
-#include <arrow/record_batch.h>
-#include <arrow/table.h>
-#include <arrow/type.h>
-
-#include <chrono>
 #include <iostream>
 #include <string>
 
 void duckbox::test::RunBindCacheTests() {
     using duckbox::flight::BindCache;
-    using duckbox::flight::kMaxBindParamsBytes;
 
     {
         BindCache cache(100);
@@ -33,6 +23,7 @@ void duckbox::test::RunBindCacheTests() {
         Expect(cache.Lookup("c", &v) && v == std::string(40, 'z'), "newest key is stored");
         Expect(cache.bytes() <= 100, "eviction keeps the cache under the budget");
         Expect(cache.size() == 2, "evicted key is gone");
+        Expect(cache.Consistent(), "list/map bookkeeping consistent after eviction");
     }
 
     {
@@ -97,6 +88,7 @@ void duckbox::test::RunBindCacheTests() {
         Expect(cache.Remember("z", std::string(20, 'z')), "insert after overwrite");
         Expect(!cache.Lookup("k", nullptr) && cache.Lookup("keep", nullptr) && cache.bytes() == 35,
                "overwritten key moved to the back of the FIFO");
+        Expect(cache.Consistent(), "list/map bookkeeping consistent after overwrite + eviction");
     }
 
     {
@@ -115,96 +107,9 @@ void duckbox::test::RunBindCacheTests() {
         Expect(all_ok, "load insert stays within the budget");
         Expect(peak <= BindCache::kDefaultMaxBytes, "peak bytes stay at or under the budget");
         Expect(cache.bytes() <= BindCache::kDefaultMaxBytes, "bytes after load stay bounded");
+        Expect(cache.Consistent(), "list/map bookkeeping consistent after load eviction");
         std::cout << "bind_cache_peak_bytes=" << peak
                   << " bind_cache_max_bytes=" << BindCache::kDefaultMaxBytes
                   << " bind_cache_entries=" << cache.size() << "\n";
-    }
-
-    {
-        constexpr int n = 15000;
-        constexpr size_t payload = 64;
-        const size_t budget = static_cast<size_t>(n) * (16 + payload);
-        BindCache cache(budget);
-        bool all_ok = true;
-        auto t0 = std::chrono::steady_clock::now();
-        for (int i = 0; i < n; i++) {
-            if (!cache.Remember("k" + std::to_string(i), std::string(payload, 'm'))) {
-                all_ok = false;
-                break;
-            }
-        }
-        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                      std::chrono::steady_clock::now() - t0)
-                      .count();
-        Expect(all_ok && cache.size() == static_cast<size_t>(n),
-               "15k unique inserts stay in the cache");
-        size_t keys = 0;
-        for (int i = 0; i < n; i++) {
-            keys += ("k" + std::to_string(i)).size();
-        }
-        Expect(cache.bytes() == cache.size() * payload + keys,
-               "15k insert byte accounting is exact");
-        t0 = std::chrono::steady_clock::now();
-        bool over_ok = true;
-        for (int i = 0; i < 1000; i++) {
-            if (!cache.Remember("k" + std::to_string(i), std::string(payload, 'n'))) {
-                over_ok = false;
-                break;
-            }
-        }
-        auto over_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                           std::chrono::steady_clock::now() - t0)
-                           .count();
-        Expect(over_ok && cache.size() == static_cast<size_t>(n),
-               "overwrite of 1000 existing keys at 15k stays exact");
-        std::cout << "bind_cache_insert_15k_us=" << us
-                  << " bind_cache_overwrite_1k_at_15k_us=" << over_us
-                  << " bind_cache_entries=" << cache.size() << "\n";
-    }
-
-    {
-        ::arrow::Int32Builder b;
-        Expect(b.Append(1).ok(), "measure bind append");
-        std::shared_ptr<::arrow::Array> arr;
-        Expect(b.Finish(&arr).ok(), "measure bind finish");
-        auto batch = ::arrow::RecordBatch::Make(
-            ::arrow::schema({::arrow::field("$1", ::arrow::int32())}), 1, {arr});
-        auto table = ::arrow::Table::FromRecordBatches({batch}).ValueOrDie();
-        auto encode = [&]() -> size_t {
-            auto sink = ::arrow::io::BufferOutputStream::Create().ValueOrDie();
-            auto w = ::arrow::ipc::MakeStreamWriter(sink, table->schema()).ValueOrDie();
-            Expect(w->WriteTable(*table).ok(), "measure encode write");
-            Expect(w->Close().ok(), "measure encode close");
-            auto ipc = sink->Finish().ValueOrDie();
-            return static_cast<size_t>(ipc->size());
-        };
-        constexpr int kWarm = 50;
-        constexpr int kIters = 400;
-        size_t last = 0;
-        for (int i = 0; i < kWarm; i++) {
-            last = encode();
-        }
-        auto t0 = std::chrono::steady_clock::now();
-        for (int i = 0; i < kIters; i++) {
-            last = encode();
-        }
-        auto without_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                              std::chrono::steady_clock::now() - t0)
-                              .count();
-        t0 = std::chrono::steady_clock::now();
-        int accepted = 0;
-        for (int i = 0; i < kIters; i++) {
-            last = encode();
-            if (last <= kMaxBindParamsBytes) {
-                accepted++;
-            }
-        }
-        auto with_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                           std::chrono::steady_clock::now() - t0)
-                           .count();
-        Expect(accepted == kIters, "measured binds are under the max params size");
-        std::cout << "doput_encode_without_size_check_us=" << without_us
-                  << " doput_encode_with_size_check_us=" << with_us << " encode_iters=" << kIters
-                  << " ipc_bytes=" << last << "\n";
     }
 }

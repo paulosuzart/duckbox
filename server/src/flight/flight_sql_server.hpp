@@ -54,6 +54,8 @@ public:
 	size_t bytes() const;
 	size_t size() const;
 	size_t max_bytes() const;
+	// cache_, order_ and pos_ hold the same keys (tests).
+	bool Consistent() const;
 
 private:
 	void EraseLocked(const std::string &key);
@@ -80,6 +82,9 @@ class DuckboxFlightSqlServer : public ::arrow::flight::sql::FlightSqlServerBase 
 public:
 	// Same-node bind fallback bytes (tests / observability).
 	size_t BindCacheBytes() const { return bind_cache_.bytes(); }
+	size_t BindCacheSize() const { return bind_cache_.size(); }
+	// Batches consumed by the last DoPutPreparedStatementQuery (tests).
+	size_t LastDoPutBatches() const { return last_doput_batches_; }
 	DuckboxFlightSqlServer(node::DaemonConfig daemon, std::shared_ptr<sandbox::SandboxRegistry> defs,
 	                       std::shared_ptr<sandbox::SandboxRuntime> runtime, std::shared_ptr<IHandleSigner> signer,
 	                       std::shared_ptr<rewriter::ISqlRewriter> rewriter, node::ListenerPlane plane = node::ListenerPlane::Public,
@@ -184,6 +189,7 @@ private:
 	void RememberBind(const std::string &key, const std::string &ipc) const;
 
 	mutable BindCache bind_cache_;
+	size_t last_doput_batches_ = 0;
 };
 
 // FlightSqlServerBase::DoAction is final; this wrapper intercepts sandbox CRUD

@@ -1065,6 +1065,20 @@ size_t BindCache::size() const {
     return cache_.size();
 }
 
+bool BindCache::Consistent() const {
+    std::lock_guard<std::mutex> g(mu_);
+    if (cache_.size() != order_.size() || pos_.size() != order_.size()) {
+        return false;
+    }
+    for (auto it = order_.begin(); it != order_.end(); ++it) {
+        auto p = pos_.find(*it);
+        if (p == pos_.end() || p->second != it || cache_.find(*it) == cache_.end()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 size_t BindCache::max_bytes() const {
     return max_bytes_;
 }
@@ -1324,9 +1338,10 @@ DuckboxFlightSqlServer::DoGetVerified(const ServerCallContext &context, Statemen
     }
     // Params come from the verified handle. bind_cache_ is a same-node
     // fallback for clients that reuse the original handle on this node.
-    // A cache hit must not re-sign: the cache is local-only.
+    // Local execution uses the cache directly; only the redirect below re-signs.
+    bool params_from_cache = false;
     if (h.params_ipc.empty()) {
-        bind_cache_.Lookup(cache_key, &h.params_ipc);
+        params_from_cache = bind_cache_.Lookup(cache_key, &h.params_ipc) && !h.params_ipc.empty();
     }
     SandboxRuntime::RequestGuard inflight(*runtime_);
     std::shared_ptr<TenantSandbox> box;
@@ -1334,7 +1349,12 @@ DuckboxFlightSqlServer::DoGetVerified(const ServerCallContext &context, Statemen
         box = runtime_->Get(rec);
     } catch (const RedirectError &re) {
         Ticket ticket;
-        ARROW_ASSIGN_OR_RAISE(auto packed, sql::CreateStatementQueryTicket(cache_key));
+        // Only the redirect needs a ticket that carries cache-sourced params
+        // (the owner has no copy of this node's cache). The caller was already
+        // verified and authorized above; the token stays bound to the same
+        // tenant/sandbox/version/handle_gen and keeps its expiry.
+        ARROW_ASSIGN_OR_RAISE(auto packed, sql::CreateStatementQueryTicket(
+                                               params_from_cache ? signer_->Sign(h) : cache_key));
         ticket.ticket = packed;
         return MaybeProxyDoGet(re, ticket, rec.id, rec.key, context,
                                rec.spec.resources.query_timeout_ms);
@@ -1430,11 +1450,13 @@ Status DuckboxFlightSqlServer::DoPutPreparedStatementQuery(
         ARROW_ASSIGN_OR_RAISE(auto in_schema, reader->GetSchema());
         ::arrow::RecordBatchVector batches;
         int64_t streamed = 0;
+        last_doput_batches_ = 0;
         while (true) {
             ARROW_ASSIGN_OR_RAISE(auto chunk, reader->Next());
             if (!chunk.data) {
                 break;
             }
+            last_doput_batches_++;
             streamed += ::arrow::util::TotalBufferSize(*chunk.data);
             if (static_cast<size_t>(streamed) > kMaxBindParamsBytes) {
                 throw Error("bind parameters exceed the maximum size");
