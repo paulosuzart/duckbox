@@ -1,5 +1,6 @@
 #include "flight/flight_sql_server.hpp"
 #include "cluster/lease.hpp"
+#include "common/deadline.hpp"
 #include "common/json.hpp"
 #include "common/yaml.hpp"
 #include "config/spec_validator.hpp"
@@ -328,8 +329,7 @@ void AddPeerKeepalive(::arrow::flight::FlightClientOptions &opt) {
 using Deadline = std::chrono::steady_clock::time_point;
 
 Deadline DeadlineAfterMs(int64_t ms) {
-    const int64_t bound = ms > 0 ? ms : 0;
-    return std::chrono::steady_clock::now() + std::chrono::milliseconds(bound);
+    return common::SaturatingDeadlineMs(std::chrono::steady_clock::now(), ms);
 }
 
 bool DeadlineReached(Deadline deadline) {

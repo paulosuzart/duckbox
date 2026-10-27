@@ -3,6 +3,7 @@
 
 #include "arrow/arrow_ipc.hpp"
 #include "cluster/lease.hpp"
+#include "common/deadline.hpp"
 #include "config/spec_validator.hpp"
 #include "flight/http_server.hpp"
 #include "lake/lake.hpp"
@@ -971,6 +972,64 @@ void duckbox::test::RunSandboxExecTests() {
                    "DescribeHandleArrow lock wait is proxy_first_message_max_ms when "
                    "query_timeout_ms is 0");
         });
+    }
+    {
+        // kMaxSteadyClockTimeoutMs is accepted at load. now()+ms overflows, so
+        // DescribeHandleArrow and RunTimed must use SaturatingDeadlineMs.
+        using duckbox::common::kMaxSteadyClockTimeoutMs;
+        auto d = TestDaemon();
+        auto pol = TestPolicy();
+        pol.resources.query_timeout_ms = kMaxSteadyClockTimeoutMs;
+        TenantSandbox box(d, pol, key_a, spec_dir);
+        box.Warmup(false);
+        std::atomic<bool> locked{false};
+        std::atomic<bool> release{false};
+        std::thread holder([&] {
+            DescribeLockHold hold(box);
+            locked.store(true, std::memory_order_release);
+            while (!release.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        });
+        while (!locked.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::thread releaser([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            release.store(true, std::memory_order_release);
+        });
+        auto t0 = std::chrono::steady_clock::now();
+        std::shared_ptr<::arrow::Schema> schema;
+        std::string describe_err;
+        try {
+            schema = box.DescribeHandleArrow("SELECT 1");
+        } catch (const std::exception &e) {
+            describe_err = e.what();
+            release.store(true, std::memory_order_release);
+        }
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        releaser.join();
+        holder.join();
+        Expect(describe_err.empty() && schema != nullptr,
+               describe_err.empty()
+                   ? "DescribeHandleArrow at kMaxSteadyClockTimeoutMs succeeds"
+                   : std::string("DescribeHandleArrow at kMaxSteadyClockTimeoutMs succeeds, got ") +
+                         describe_err);
+        if (describe_err.empty()) {
+            Expect(elapsed_ms >= 150 && elapsed_ms < 2000,
+                   "DescribeHandleArrow waits ~200ms for DescribeLockHold, not 0ms overflow "
+                   "(elapsed_ms=" +
+                       std::to_string(elapsed_ms) + ")");
+            try {
+                auto out = box.Execute("SELECT 1");
+                Expect(out.row_count == 1, "Execute at kMaxSteadyClockTimeoutMs succeeds");
+            } catch (const std::exception &e) {
+                Expect(false, std::string("Execute at kMaxSteadyClockTimeoutMs succeeds, got ") +
+                                  e.what());
+            }
+        }
     }
 #ifdef DUCKBOX_BIN_PATH
     {
