@@ -128,6 +128,8 @@ int DebugHttpServer::Start(const ServerOptions &opt, std::shared_ptr<SandboxRegi
     }
     std::clog << "debug HTTP listening on 127.0.0.1:" << impl_->port << "\n";
     impl_->th = std::thread([this] { impl_->svr.listen_after_bind(); });
+    // stop() is a no-op until listen sets is_running_; wait so Stop() cannot race.
+    impl_->svr.wait_until_ready();
     return impl_->port;
 }
 

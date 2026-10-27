@@ -764,23 +764,23 @@ void TestSigstopPeerDoGet() {
     const pid_t w = waitpid(child.pid, &wst, WNOHANG);
     Expect(w == 0, "owner is alive before dial (waitpid=" + std::to_string(w) +
                        (w > 0 ? " status=" + std::to_string(wst) : std::string()) + ")");
-    FakeCallContext ctx;
     using StreamRes = ::arrow::Result<std::unique_ptr<FlightDataStream>>;
-    std::promise<StreamRes> done;
-    auto fut = done.get_future();
+    // Everything the worker touches is owned by the worker (shared_ptr / by
+    // value): on a budget overrun it is detached and may still return later.
+    auto done = std::make_shared<std::promise<StreamRes>>();
+    auto fut = done->get_future();
+    auto ctx = std::make_shared<FakeCallContext>();
     auto t0 = std::chrono::steady_clock::now();
-    std::thread worker([&] {
-        done.set_value(
-            fx.peers_a->ForwardDoGet(url, Ticket{"proxy-timeout"}, fx.rec.id, fx.rec.key, ctx));
+    std::thread worker([done, ctx, peers = fx.peers_a, url, id = fx.rec.id, key = fx.rec.key] {
+        done->set_value(peers->ForwardDoGet(url, Ticket{"proxy-timeout"}, id, key, *ctx));
     });
     const auto budget = std::chrono::milliseconds(kProxyTimeoutMs + 4000);
     if (fut.wait_for(budget) != std::future_status::ready) {
-        static auto *leak = new std::vector<std::shared_ptr<PeerFlight>>();
-        leak->push_back(std::move(fx.peers_a));
         worker.detach();
         child.Reap();
         Expect(false, "DoGet right after SIGSTOP exceeded the deadline budget");
-        return;
+        // Detached worker may still hold leak_mu; do not continue the suite.
+        _exit(1);
     }
     worker.join();
     auto stream = fut.get();
@@ -812,29 +812,27 @@ void TestSigstopHandshakeClose() {
     int wst = 0;
     Expect(waitpid(child.pid, &wst, WNOHANG) == 0, "graveyard owner is alive before dial");
 
-    const int threads0 = SelfThreadCount();
-    const int fds0 = SelfFdCount();
     int64_t max_ms = 0;
     int failed = 0;
     FakeCallContext ctx;
     using StreamRes = ::arrow::Result<std::unique_ptr<FlightDataStream>>;
     const auto call_budget = std::chrono::milliseconds(kShortMs + 2000);
-    for (int i = 0; i < kN; i++) {
-        std::promise<StreamRes> done;
-        auto fut = done.get_future();
+    auto one_frozen = [&](int idx) -> StreamRes {
+        auto done = std::make_shared<std::promise<StreamRes>>();
+        auto fut = done->get_future();
+        auto call_ctx = std::make_shared<FakeCallContext>();
         auto t0 = std::chrono::steady_clock::now();
-        std::thread worker([&] {
-            done.set_value(fx.peers_a->ForwardDoGet(frozen, Ticket{"proxy-timeout"}, fx.rec.id,
-                                                    fx.rec.key, ctx));
-        });
+        std::thread worker(
+            [done, call_ctx, peers = fx.peers_a, frozen, id = fx.rec.id, key = fx.rec.key] {
+                done->set_value(
+                    peers->ForwardDoGet(frozen, Ticket{"proxy-timeout"}, id, key, *call_ctx));
+            });
         if (fut.wait_for(call_budget) != std::future_status::ready) {
-            static auto *leak = new std::vector<std::shared_ptr<PeerFlight>>();
-            leak->push_back(std::move(fx.peers_a));
             worker.detach();
             child.Reap();
-            Expect(false, "frozen handshake DoGet " + std::to_string(i) +
+            Expect(false, "frozen handshake DoGet " + std::to_string(idx) +
                               " exceeded the per-call budget (Close hang?)");
-            return;
+            _exit(1);
         }
         worker.join();
         auto stream = fut.get();
@@ -844,6 +842,18 @@ void TestSigstopHandshakeClose() {
         if (ms > max_ms) {
             max_ms = ms;
         }
+        return stream;
+    };
+    // gRPC's thread pool starts lazily. Baseline after warm-up so the test
+    // does not depend on earlier suites leaving threads/fds behind.
+    constexpr int kWarm = 5;
+    for (int i = 0; i < kWarm; i++) {
+        (void)one_frozen(-1 - i);
+    }
+    const int threads0 = SelfThreadCount();
+    const int fds0 = SelfFdCount();
+    for (int i = 0; i < kN; i++) {
+        auto stream = one_frozen(i);
         if (!stream.ok()) {
             ++failed;
         }
