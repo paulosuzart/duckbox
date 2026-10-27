@@ -744,6 +744,34 @@ void duckbox::test::RunSpecLoaderTests() {
                                      "credential in query is refused");
             expect_userinfo_rejected("http://node-a.example:4984", {},
                                      "non-grpc scheme is refused");
+            expect_userinfo_rejected("grpc://node-a.example:4984/s3cretLeak", {"s3cretLeak"},
+                                     "credential in path without '@' is refused");
+            expect_userinfo_rejected("grpc://node-a.example:4984#s3cretLeak", {"s3cretLeak"},
+                                     "credential in fragment without '@' is refused");
+            expect_userinfo_rejected("grpc://node-a.example;tok=s3cretLeak:4984", {"s3cretLeak"},
+                                     "credential in host sub-delims is refused");
+            expect_userinfo_rejected("grpc://leakuser%40s3cretLeak:4984", {"s3cretLeak"},
+                                     "percent-encoded '@' in host is refused");
+            for (const char *good : {"GRPC+TLS://node-a.example:4984", "grpc://[2001:db8::1]:4984",
+                                     "grpc://node-a.example:4984/", "grpc://10.0.0.7:4984",
+                                     "grpc://duckbox_node-1.svc.cluster.local:4984"}) {
+                DaemonConfig g = TestDaemon();
+                g.advertised_address = good;
+                try {
+                    ValidateDaemonOrThrow(g);
+                } catch (const std::exception &) {
+                    Expect(false, std::string("valid advertised_address accepted: ") + good);
+                }
+            }
+            {
+                DaemonConfig sch = TestDaemon();
+                sch.listen = "http://127.0.0.1:4747";
+                sch.advertised_address.clear();
+                FinalizeDaemonListen(sch);
+                Expect(sch.advertised_address == "grpc://127.0.0.1:4747",
+                       "schemed listen falls back to grpc://host:port");
+                ValidateDaemonOrThrow(sch);
+            }
             DaemonConfig ok = TestDaemon();
             ok.advertised_address = "grpc+tls://node-a.example:4984";
             ValidateDaemonOrThrow(ok);

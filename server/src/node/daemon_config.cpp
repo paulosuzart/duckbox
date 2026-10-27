@@ -14,6 +14,8 @@
 #include "arrow/result.h"
 #include "arrow/util/uri.h"
 
+#include <algorithm>
+#include <arpa/inet.h>
 #include <cctype>
 #include <cstdlib>
 #include <fnmatch.h>
@@ -65,6 +67,16 @@ void ValidateAdvertisedAddressOrThrow(const std::string &address, const char *wh
     if (!(uri->path().empty() || uri->path() == "/") || !uri->query_string().empty() ||
         spec.find('#') != std::string::npos) {
         throw PolicyError(std::string(what) + ": Flight URL must be scheme://host:port only");
+    }
+    // Host is an IPv6 literal or a DNS/IPv4 name; '%', ';', '=' etc. would smuggle a secret.
+    const std::string host = uri->host();
+    in6_addr v6{};
+    const bool dns = !host.empty() && std::all_of(host.begin(), host.end(), [](char c) {
+        return absl::ascii_isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' ||
+               c == '_';
+    });
+    if (!dns && ::inet_pton(AF_INET6, host.c_str(), &v6) != 1) {
+        throw PolicyError(std::string(what) + ": Flight URL host must be a DNS name or IP address");
     }
 }
 
@@ -126,7 +138,10 @@ void FinalizeDaemonListen(DaemonConfig &cfg) {
         if (LeaseEndpointConfigured(cfg) && IsWildcardHost(lp.first)) {
             // Multi-node cannot publish a wildcard; ValidateDaemonOrThrow names the option.
         } else {
-            cfg.advertised_address = "grpc://" + cfg.listen;
+            // listen may carry a scheme (ParseListenAddress accepts one); publish host:port only.
+            const auto sep = cfg.listen.find("://");
+            cfg.advertised_address =
+                "grpc://" + (sep == std::string::npos ? cfg.listen : cfg.listen.substr(sep + 3));
         }
     }
 }
