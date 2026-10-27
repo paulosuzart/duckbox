@@ -45,7 +45,9 @@ using duckbox::flight::DuckboxFlightServer;
 using duckbox::flight::DuckboxFlightSqlServer;
 using duckbox::flight::HandshakeAuthHandler;
 using duckbox::flight::HmacHandleSigner;
+using duckbox::flight::kMaxBindParamsBytes;
 using duckbox::flight::PeerFlight;
+using duckbox::node::CallerRule;
 using duckbox::node::DaemonConfig;
 using duckbox::node::ListenerPlane;
 using duckbox::rewriter::SqlRewriter;
@@ -212,6 +214,40 @@ std::shared_ptr<::arrow::RecordBatch> BindId(int32_t id) {
                                       {arr});
 }
 
+std::shared_ptr<::arrow::RecordBatch> BindString(const std::string &value) {
+    ::arrow::StringBuilder b;
+    Expect(b.Append(value).ok(), "bind string append");
+    std::shared_ptr<::arrow::Array> arr;
+    Expect(b.Finish(&arr).ok(), "bind string finish");
+    return ::arrow::RecordBatch::Make(::arrow::schema({::arrow::field("$1", ::arrow::utf8())}), 1,
+                                      {arr});
+}
+
+std::string DoPutStatus(FlightClient &client, const FlightCallOptions &opt,
+                        const FlightDescriptor &desc,
+                        const std::shared_ptr<::arrow::RecordBatch> &batch) {
+    auto put = client.DoPut(opt, desc, batch->schema());
+    if (!put.ok()) {
+        return put.status().ToString();
+    }
+    auto st = put->writer->WriteRecordBatch(*batch);
+    if (st.ok()) {
+        st = put->writer->DoneWriting();
+    }
+    if (st.ok()) {
+        std::shared_ptr<::arrow::Buffer> md;
+        st = put->reader->ReadMetadata(&md);
+    }
+    auto close = put->writer->Close();
+    if (!st.ok()) {
+        return st.ToString();
+    }
+    if (!close.ok()) {
+        return close.ToString();
+    }
+    return "";
+}
+
 std::string DoPutBind(FlightClient &client, const FlightCallOptions &opt,
                       const FlightDescriptor &desc,
                       const std::shared_ptr<::arrow::RecordBatch> &batch) {
@@ -278,6 +314,8 @@ void duckbox::test::RunBindHandleTests() {
     daemon_a.name = "node-a";
     daemon_a.peer_secret = "peer-secret-value";
     daemon_a.listen = "127.0.0.1:0";
+    daemon_a.callers.push_back(CallerRule{"local", {"tenant_21:*"}});
+    daemon_a.callers.push_back(CallerRule{"other", {"tenant_22:*"}});
     auto daemon_b = daemon_a;
     daemon_b.name = "node-b";
     auto leases_a = std::make_shared<S3ConditionalLeaseManager>(
@@ -452,6 +490,47 @@ void duckbox::test::RunBindHandleTests() {
         auto rows3 = DoGetRowCount(*client_a, opt, Ticket{PreparedDescriptor(put3).cmd}, &err);
         Expect(rows3 == 0, "re-bound handle via non-owner uses the new value: rows=" +
                                std::to_string(rows3) + " " + err);
+    }
+
+    {
+        auto t0 = std::chrono::steady_clock::now();
+        auto timed = DoPutBind(*client_b, opt, desc_orig, batch);
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
+        Expect(timed.starts_with("DBX4."), "timed DoPut (with size check) succeeds");
+        std::cout << "doput_latency_with_size_check_us=" << us << "\n";
+    }
+
+    {
+        const std::string marker = "OVERSIZE_BIND_MARKER";
+        auto huge = BindString(marker + std::string(kMaxBindParamsBytes, 'X'));
+        auto err = DoPutStatus(*client_b, opt, desc_orig, huge);
+        Expect(!err.empty(), "oversize bind params are rejected");
+        Expect(err.find("maximum size") != std::string::npos ||
+                   err.find("Invalid") != std::string::npos,
+               "oversize DoPut is InvalidArgument: " + err);
+        Expect(err.find(marker) == std::string::npos, "oversize error does not echo the params");
+    }
+
+    {
+        auto other = QueryOpt();
+        for (auto &hdr : other.headers) {
+            if (hdr.first == "x-duckbox-caller") {
+                hdr.second = "other";
+            }
+        }
+        auto err_put = DoPutStatus(*client_a, other, desc_orig, batch);
+        Expect(!err_put.empty(), "cross-tenant caller is rejected at DoPut");
+        Expect(err_put.find("not authorized") != std::string::npos ||
+                   err_put.find("Unauthenticated") != std::string::npos,
+               "cross-tenant DoPut names authorization: " + err_put);
+        auto info = client_a->GetFlightInfo(other, desc_orig);
+        Expect(!info.ok(), "cross-tenant caller is rejected at GetFlightInfo");
+        auto gerr = info.status().ToString();
+        Expect(gerr.find("not authorized") != std::string::npos ||
+                   gerr.find("Unauthenticated") != std::string::npos,
+               "cross-tenant GetFlightInfo names authorization: " + gerr);
     }
 
     na.Stop();

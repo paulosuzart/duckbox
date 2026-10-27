@@ -982,17 +982,79 @@ DuckboxFlightSqlServer::DuckboxFlightSqlServer(
                     static_cast<int32_t>(sql::SqlInfoOptions::SQL_SUPPORTED_TRANSACTION_NONE));
 }
 
+BindCache::BindCache(size_t max_bytes) : max_bytes_(max_bytes) {}
+
+void BindCache::EraseLocked(const std::string &key) {
+    auto it = cache_.find(key);
+    if (it == cache_.end()) {
+        return;
+    }
+    bytes_ -= key.size() + it->second.size();
+    cache_.erase(it);
+    std::erase(order_, key);
+}
+
+void BindCache::EvictOldestLocked() {
+    if (order_.empty()) {
+        return;
+    }
+    auto old = order_.front();
+    order_.erase(order_.begin());
+    auto it = cache_.find(old);
+    if (it == cache_.end()) {
+        return;
+    }
+    bytes_ -= old.size() + it->second.size();
+    cache_.erase(it);
+}
+
+bool BindCache::Remember(const std::string &key, const std::string &ipc) {
+    const size_t entry = key.size() + ipc.size();
+    if (entry > max_bytes_) {
+        return false;
+    }
+    std::lock_guard<std::mutex> g(mu_);
+    EraseLocked(key);
+    while (!order_.empty() && bytes_ + entry > max_bytes_) {
+        EvictOldestLocked();
+    }
+    if (bytes_ + entry > max_bytes_) {
+        return false;
+    }
+    order_.push_back(key);
+    cache_[key] = ipc;
+    bytes_ += entry;
+    return true;
+}
+
+bool BindCache::Lookup(const std::string &key, std::string *ipc) const {
+    std::lock_guard<std::mutex> g(mu_);
+    auto it = cache_.find(key);
+    if (it == cache_.end()) {
+        return false;
+    }
+    if (ipc) {
+        *ipc = it->second;
+    }
+    return true;
+}
+
+size_t BindCache::bytes() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return bytes_;
+}
+
+size_t BindCache::size() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return cache_.size();
+}
+
+size_t BindCache::max_bytes() const {
+    return max_bytes_;
+}
+
 void DuckboxFlightSqlServer::RememberBind(const std::string &key, const std::string &ipc) const {
-    std::lock_guard<std::mutex> g(bind_mu_);
-    if (bind_cache_.find(key) == bind_cache_.end()) {
-        bind_order_.push_back(key);
-    }
-    bind_cache_[key] = ipc;
-    while (bind_cache_.size() > kMaxBindCache && !bind_order_.empty()) {
-        auto old = bind_order_.front();
-        bind_order_.erase(bind_order_.begin());
-        bind_cache_.erase(old);
-    }
+    bind_cache_.Remember(key, ipc);
 }
 
 std::string DuckboxFlightSqlServer::CallerOf(const ServerCallContext &context) const {
@@ -1220,6 +1282,64 @@ DuckboxFlightSqlServer::GetSchemaStatement(const ServerCallContext &context,
 }
 
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
+DuckboxFlightSqlServer::DoGetVerified(const ServerCallContext &context, StatementHandle h,
+                                      const std::string &cache_key) {
+    auto current = defs_->Get(h.sandbox_id);
+    if (IsExpired(current)) {
+        defs_->Delete(h.sandbox_id);
+        runtime_->PassivateId(h.sandbox_id, "ttl");
+        Metrics().IncExpiration(current.spec.lifecycle.ttl_ms > 0 ? "ttl" : "expires_at");
+        throw NotFoundError("sandbox '" + h.sandbox_id + "' expired");
+    }
+    if (h.handle_gen != current.handle_gen) {
+        throw StaleHandleError("sandbox '" + h.sandbox_id + "' handles were expired; re-prepare");
+    }
+    auto rec = ResolveHandleVersion(*defs_, current, h.version);
+    auto caller = CallerOf(context);
+    RequirePeerQuery(caller);
+    AuthorizeCaller(daemon_, caller, rec.key);
+    (void)ParseTenantKey(h.tenant_raw, rec.spec.key);
+    auto hdr_key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
+    if (!hdr_key.empty() && hdr_key != h.tenant_raw && hdr_key != rec.key) {
+        throw AuthError("tenant key does not match statement handle");
+    }
+    // Params come from the verified handle. bind_cache_ is a same-node
+    // fallback for clients that reuse the original handle on this node.
+    std::string ticket_handle = cache_key;
+    if (h.params_ipc.empty() && bind_cache_.Lookup(cache_key, &h.params_ipc) &&
+        !h.params_ipc.empty()) {
+        ticket_handle = signer_->Sign(h);
+    }
+    SandboxRuntime::RequestGuard inflight(*runtime_);
+    std::shared_ptr<TenantSandbox> box;
+    try {
+        box = runtime_->Get(rec);
+    } catch (const RedirectError &re) {
+        Ticket ticket;
+        ARROW_ASSIGN_OR_RAISE(auto packed, sql::CreateStatementQueryTicket(ticket_handle));
+        ticket.ticket = packed;
+        return MaybeProxyDoGet(re, ticket, rec.id, rec.key, context,
+                               rec.spec.resources.query_timeout_ms);
+    }
+    std::vector<ddb::Value> params;
+    const std::string &params_ipc = h.params_ipc;
+    if (!params_ipc.empty()) {
+        auto buf =
+            std::make_shared<::arrow::Buffer>(reinterpret_cast<const uint8_t *>(params_ipc.data()),
+                                              static_cast<int64_t>(params_ipc.size()));
+        auto rdr = std::make_shared<::arrow::io::BufferReader>(buf);
+        ARROW_ASSIGN_OR_RAISE(auto br, ::arrow::ipc::RecordBatchStreamReader::Open(rdr));
+        ARROW_ASSIGN_OR_RAISE(auto batch, br->Next());
+        if (batch) {
+            params = RowToValues(*batch);
+        }
+    }
+    QueryInterruptWatch watch(context, box);
+    auto out = box->ExecuteHandle(h.rewritten_sql, std::move(params));
+    return StreamIpc(out.arrow_ipc);
+}
+
+::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::DoGetStatement(const ServerCallContext &context,
                                        const sql::StatementQueryTicket &command) {
     try {
@@ -1230,63 +1350,7 @@ DuckboxFlightSqlServer::DoGetStatement(const ServerCallContext &context,
             ObserveFailure(Metrics(), nullptr, nullptr, e, false, 0);
             throw;
         }
-        auto current = defs_->Get(h.sandbox_id);
-        if (IsExpired(current)) {
-            defs_->Delete(h.sandbox_id);
-            runtime_->PassivateId(h.sandbox_id, "ttl");
-            Metrics().IncExpiration(current.spec.lifecycle.ttl_ms > 0 ? "ttl" : "expires_at");
-            throw NotFoundError("sandbox '" + h.sandbox_id + "' expired");
-        }
-        if (h.handle_gen != current.handle_gen) {
-            throw StaleHandleError("sandbox '" + h.sandbox_id +
-                                   "' handles were expired; re-prepare");
-        }
-        auto rec = ResolveHandleVersion(*defs_, current, h.version);
-        auto caller = CallerOf(context);
-        RequirePeerQuery(caller);
-        AuthorizeCaller(daemon_, caller, rec.key);
-        (void)ParseTenantKey(h.tenant_raw, rec.spec.key);
-        auto hdr_key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
-        if (!hdr_key.empty() && hdr_key != h.tenant_raw && hdr_key != rec.key) {
-            throw AuthError("tenant key does not match statement handle");
-        }
-        SandboxRuntime::RequestGuard inflight(*runtime_);
-        std::shared_ptr<TenantSandbox> box;
-        try {
-            box = runtime_->Get(rec);
-        } catch (const RedirectError &re) {
-            Ticket ticket;
-            ARROW_ASSIGN_OR_RAISE(auto packed,
-                                  sql::CreateStatementQueryTicket(command.statement_handle));
-            ticket.ticket = packed;
-            return MaybeProxyDoGet(re, ticket, rec.id, rec.key, context,
-                                   rec.spec.resources.query_timeout_ms);
-        }
-        // Params come from the signed handle. bind_cache_ is a same-node
-        // fallback for clients that reuse the original handle on this node.
-        std::vector<ddb::Value> params;
-        std::string params_ipc = h.params_ipc;
-        if (params_ipc.empty()) {
-            std::lock_guard<std::mutex> g(bind_mu_);
-            auto it = bind_cache_.find(command.statement_handle);
-            if (it != bind_cache_.end()) {
-                params_ipc = it->second;
-            }
-        }
-        if (!params_ipc.empty()) {
-            auto buf = std::make_shared<::arrow::Buffer>(
-                reinterpret_cast<const uint8_t *>(params_ipc.data()),
-                static_cast<int64_t>(params_ipc.size()));
-            auto rdr = std::make_shared<::arrow::io::BufferReader>(buf);
-            ARROW_ASSIGN_OR_RAISE(auto br, ::arrow::ipc::RecordBatchStreamReader::Open(rdr));
-            ARROW_ASSIGN_OR_RAISE(auto batch, br->Next());
-            if (batch) {
-                params = RowToValues(*batch);
-            }
-        }
-        QueryInterruptWatch watch(context, box);
-        auto out = box->ExecuteHandle(h.rewritten_sql, std::move(params));
-        return StreamIpc(out.arrow_ipc);
+        return DoGetVerified(context, std::move(h), command.statement_handle);
     } catch (const std::exception &e) {
         return FromEx(e);
     }
@@ -1335,10 +1399,14 @@ DuckboxFlightSqlServer::ClosePreparedStatement(const ServerCallContext &,
 }
 
 Status DuckboxFlightSqlServer::DoPutPreparedStatementQuery(
-    const ServerCallContext &, const sql::PreparedStatementQuery &command,
+    const ServerCallContext &context, const sql::PreparedStatementQuery &command,
     ::arrow::flight::FlightMessageReader *reader, ::arrow::flight::FlightMetadataWriter *writer) {
     try {
         auto h = signer_->Verify(command.prepared_statement_handle);
+        auto current = defs_->Get(h.sandbox_id);
+        auto caller = CallerOf(context);
+        RequirePeerQuery(caller);
+        AuthorizeCaller(daemon_, caller, current.key);
         ARROW_ASSIGN_OR_RAISE(auto table, reader->ToTable());
         std::shared_ptr<::arrow::Buffer> ipc_buf;
         {
@@ -1347,6 +1415,9 @@ Status DuckboxFlightSqlServer::DoPutPreparedStatementQuery(
             ARROW_RETURN_NOT_OK(w->WriteTable(*table));
             ARROW_RETURN_NOT_OK(w->Close());
             ARROW_ASSIGN_OR_RAISE(ipc_buf, sink->Finish());
+        }
+        if (static_cast<size_t>(ipc_buf->size()) > kMaxBindParamsBytes) {
+            throw Error("bind parameters exceed the maximum size");
         }
         h.params_ipc.assign(reinterpret_cast<const char *>(ipc_buf->data()),
                             static_cast<size_t>(ipc_buf->size()));
@@ -1368,16 +1439,6 @@ DuckboxFlightSqlServer::GetFlightInfoPreparedStatement(const ServerCallContext &
                                                        const FlightDescriptor &descriptor) {
     try {
         auto h = signer_->Verify(command.prepared_statement_handle);
-        // A cache miss must not erase parameters already sealed in the handle.
-        if (h.params_ipc.empty()) {
-            std::lock_guard<std::mutex> g(bind_mu_);
-            auto it = bind_cache_.find(command.prepared_statement_handle);
-            if (it != bind_cache_.end()) {
-                h.params_ipc = it->second;
-            }
-        }
-        auto token = signer_->Sign(h);
-        RememberBind(token, h.params_ipc);
         auto current = defs_->Get(h.sandbox_id);
         if (h.handle_gen != current.handle_gen) {
             throw StaleHandleError("sandbox '" + h.sandbox_id +
@@ -1386,6 +1447,12 @@ DuckboxFlightSqlServer::GetFlightInfoPreparedStatement(const ServerCallContext &
         auto caller = CallerOf(context);
         RequirePeerQuery(caller);
         AuthorizeCaller(daemon_, caller, current.key);
+        // A cache miss must not erase parameters already sealed in the handle.
+        if (h.params_ipc.empty()) {
+            bind_cache_.Lookup(command.prepared_statement_handle, &h.params_ipc);
+        }
+        auto token = signer_->Sign(h);
+        RememberBind(token, h.params_ipc);
         auto rec = ResolveHandleVersion(*defs_, current, h.version);
         SandboxRuntime::RequestGuard inflight(*runtime_);
         try {
@@ -1411,21 +1478,18 @@ DuckboxFlightSqlServer::GetSchemaPreparedStatement(const ServerCallContext &cont
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::DoGetPreparedStatement(const ServerCallContext &context,
                                                const sql::PreparedStatementQuery &command) {
-    sql::StatementQueryTicket t;
-    t.statement_handle = command.prepared_statement_handle;
     try {
-        auto h = signer_->Verify(command.prepared_statement_handle);
-        if (h.params_ipc.empty()) {
-            std::lock_guard<std::mutex> g(bind_mu_);
-            auto it = bind_cache_.find(command.prepared_statement_handle);
-            if (it != bind_cache_.end()) {
-                h.params_ipc = it->second;
-                t.statement_handle = signer_->Sign(h);
-            }
+        StatementHandle h;
+        try {
+            h = signer_->Verify(command.prepared_statement_handle);
+        } catch (const std::exception &e) {
+            ObserveFailure(Metrics(), nullptr, nullptr, e, false, 0);
+            throw;
         }
-    } catch (...) {
+        return DoGetVerified(context, std::move(h), command.prepared_statement_handle);
+    } catch (const std::exception &e) {
+        return FromEx(e);
     }
-    return DoGetStatement(context, t);
 }
 
 ::arrow::Result<std::unique_ptr<FlightInfo>>
