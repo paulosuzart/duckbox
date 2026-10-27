@@ -1,10 +1,12 @@
 #pragma once
 
 // Signed opaque prepared-statement handle. Carries rewritten SQL, tenant,
-// named sandbox id + version, and optional bound parameter IPC. A handle
-// whose version is not current is rejected with a re-prepare error unless
-// the current spec's handles.stale_version_grace still covers the immediately
-// previous version (until updated_at + grace; default 0s).
+// named sandbox id + version, and optional bound parameter IPC. The AEAD
+// payload includes params_ipc, so a tampered bind is rejected before
+// execution. A handle whose version is not current is rejected with a
+// re-prepare error unless the current spec's handles.stale_version_grace
+// still covers the immediately previous version (until updated_at + grace;
+// default 0s).
 
 #include <cstdint>
 #include <string>

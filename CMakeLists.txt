@@ -522,6 +522,7 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/cli_auth_test.cpp
   test/integration/python_client_auth_test.cpp
   test/integration/cluster_test.cpp
+  test/integration/bind_handle_test.cpp
   test/integration/proxy_timeout_test.cpp
   test/integration/proxy_hang_test.cpp
   test/integration/signal_shutdown_test.cpp
