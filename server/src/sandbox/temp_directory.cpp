@@ -121,7 +121,7 @@ void LogTempCleanup(const char *level, const std::string &path, const std::strin
     if (!error.empty()) {
         log["error"] = error;
     }
-    std::clog << log.dump() << "\n";
+    std::clog << log.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
 }
 
 // Lexical only: parent must be exactly one component under the configured
@@ -150,31 +150,15 @@ void RemoveEmptySandboxParent(const fs::path &parent, const fs::path &root) {
         return;
     }
     std::lock_guard<std::mutex> hold(g_parent_mu);
-    struct stat st {};
-    if (lstat(parent.c_str(), &st) != 0) {
-        if (errno == ENOENT) {
-            LogTempCleanup("debug", parent.string(), "already gone");
-        } else {
-            LogTempCleanup("warn", parent.string(), ErrnoMessage());
-        }
+    // rmdir never deletes a non-directory (ENOTDIR), so a file or symlink at
+    // {base}/{id} is left in place. fs::remove would unlink first.
+    if (::rmdir(parent.c_str()) == 0) {
         return;
     }
-    if (S_ISLNK(st.st_mode) || !S_ISDIR(st.st_mode)) {
-        LogTempCleanup("warn", parent.string(), "parent is not a directory");
-        return;
-    }
-    std::error_code rec;
-    bool removed = fs::remove(parent, rec);
-    if (rec) {
-        if (rec == std::errc::directory_not_empty) {
-            LogTempCleanup("debug", parent.string(), rec.message());
-        } else {
-            LogTempCleanup("warn", parent.string(), rec.message());
-        }
-        return;
-    }
-    if (!removed) {
-        LogTempCleanup("debug", parent.string(), "already gone");
+    if (errno == ENOENT || errno == ENOTEMPTY) {
+        LogTempCleanup("debug", parent.string(), ErrnoMessage());
+    } else {
+        LogTempCleanup("warn", parent.string(), ErrnoMessage());
     }
 }
 
