@@ -841,8 +841,10 @@ PeerFlight::DialTransport(const std::string &url, Deadline deadline) {
     auto st = transport->Authenticate(auth_opt, std::move(auth));
     if (!st.ok()) {
         // Destroying a transport whose Handshake failed against a SIGSTOP'd
-        // peer can block past the deadline (Arrow #31235). Leak it.
-        LeakGrpcObject(std::move(transport));
+        // peer blocks in pthread_cond_destroy (Arrow #31235) unless it is
+        // closed first. Close (no leak: a leaked transport pins a thread and
+        // an fd, and evicting it from the bounded graveyard hangs again).
+        (void)transport->Close();
         return AsProxyTimeoutIfDue(st, deadline);
     }
     return transport;

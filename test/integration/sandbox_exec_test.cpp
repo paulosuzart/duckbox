@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <thread>
 
@@ -712,15 +713,17 @@ void duckbox::test::RunSandboxExecTests() {
         rec.spec.lake.catalog = "ducklake:postgres:dbname=lake password=sandbox-a-secret-yy";
         defs->Create(rec);
         DaemonConfig cfg = daemon;
-        cfg.debug_http = "127.0.0.1:18481";
         auto leases = std::make_shared<SingleNodeLeaseManager>();
         auto runtime = std::make_shared<SandboxRuntime>(cfg, leases, defs);
         ServerOptions opt;
         opt.daemon = cfg;
-        std::thread th([&] { StartDebugHttp(opt, defs, runtime); });
-        th.detach();
-        httplib::Client cli("127.0.0.1", 18481);
+        DebugHttpServer http;
+        const int http_port = http.Start(opt, defs, runtime);
+        Expect(http_port > 0, "ephemeral debug HTTP port");
+        httplib::Client cli("127.0.0.1", http_port);
         cli.set_connection_timeout(1, 0);
+        cli.set_read_timeout(2, 0);
+        cli.set_write_timeout(2, 0);
         httplib::Result health;
         for (int i = 0; i < 50; i++) {
             health = cli.Get("/health");
@@ -754,14 +757,15 @@ void duckbox::test::RunSandboxExecTests() {
             std::string fence_h;
             runtime_h->SetFenceHook([&](const std::string &r) { fence_h = r; });
             runtime_h->TickLeases();
-            DaemonConfig cfg_h = cfg;
-            cfg_h.debug_http = "127.0.0.1:18482";
             ServerOptions opt_h;
-            opt_h.daemon = cfg_h;
-            std::thread th_h([&] { StartDebugHttp(opt_h, defs_h, runtime_h); });
-            th_h.detach();
-            httplib::Client cli_h("127.0.0.1", 18482);
+            opt_h.daemon = cfg;
+            DebugHttpServer http_h;
+            const int http_port_h = http_h.Start(opt_h, defs_h, runtime_h);
+            Expect(http_port_h > 0, "ephemeral fenced debug HTTP port");
+            httplib::Client cli_h("127.0.0.1", http_port_h);
             cli_h.set_connection_timeout(1, 0);
+            cli_h.set_read_timeout(2, 0);
+            cli_h.set_write_timeout(2, 0);
             httplib::Result okh;
             for (int i = 0; i < 50; i++) {
                 okh = cli_h.Get("/health");

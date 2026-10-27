@@ -9,6 +9,8 @@
 #include "httplib.h"
 
 #include <iostream>
+#include <thread>
+#include <utility>
 
 namespace duckbox {
 namespace flight {
@@ -28,11 +30,9 @@ std::string JsonGetString(const std::string &body, const std::string &key) {
     return j.at(key).get<std::string>();
 }
 
-} // namespace
-
-void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
-                    std::shared_ptr<SandboxRuntime> runtime) {
-    httplib::Server svr;
+void InstallDebugHttpRoutes(httplib::Server &svr, ServerOptions opt,
+                            std::shared_ptr<SandboxRegistry> defs,
+                            std::shared_ptr<SandboxRuntime> runtime) {
     svr.Get("/health", [runtime](const httplib::Request &, httplib::Response &res) {
         bool healthy = runtime ? runtime->Serving() : true;
         bool draining = runtime && runtime->Leases() && runtime->Leases()->draining();
@@ -45,7 +45,10 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
         res.status = healthy ? 200 : 503;
         res.set_content(j.dump(), "application/json");
     });
-    svr.Post("/v1/query", [&](const httplib::Request &req, httplib::Response &res) {
+    // Capture by value: DebugHttpServer's thread outlives the Start() frame,
+    // and a detached StartDebugHttp caller must not leave [&] dangling either.
+    svr.Post("/v1/query", [opt = std::move(opt), defs, runtime](const httplib::Request &req,
+                                                                httplib::Response &res) {
         try {
             auto sandbox_id = req.get_header_value("X-Duckbox-Sandbox");
             if (sandbox_id.empty()) {
@@ -88,9 +91,58 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
             res.set_content(err.dump(), "application/json");
         }
     });
+}
+
+} // namespace
+
+void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
+                    std::shared_ptr<SandboxRuntime> runtime) {
+    httplib::Server svr;
+    InstallDebugHttpRoutes(svr, opt, std::move(defs), std::move(runtime));
     auto [host, port] = ParseListenAddress(opt.daemon.debug_http, 4748);
     std::clog << "debug HTTP listening on " << host << ":" << port << "\n";
     svr.listen(host, port);
+}
+
+struct DebugHttpServer::Impl {
+    httplib::Server svr;
+    std::thread th;
+    int port = 0;
+};
+
+DebugHttpServer::DebugHttpServer() : impl_(std::make_unique<Impl>()) {}
+
+DebugHttpServer::~DebugHttpServer() {
+    Stop();
+}
+
+int DebugHttpServer::Start(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> defs,
+                           std::shared_ptr<SandboxRuntime> runtime) {
+    if (impl_->th.joinable()) {
+        return impl_->port;
+    }
+    InstallDebugHttpRoutes(impl_->svr, opt, std::move(defs), std::move(runtime));
+    impl_->port = impl_->svr.bind_to_any_port("127.0.0.1");
+    if (impl_->port <= 0) {
+        return 0;
+    }
+    std::clog << "debug HTTP listening on 127.0.0.1:" << impl_->port << "\n";
+    impl_->th = std::thread([this] { impl_->svr.listen_after_bind(); });
+    return impl_->port;
+}
+
+void DebugHttpServer::Stop() {
+    if (!impl_) {
+        return;
+    }
+    impl_->svr.stop();
+    if (impl_->th.joinable()) {
+        impl_->th.join();
+    }
+}
+
+int DebugHttpServer::port() const {
+    return impl_ ? impl_->port : 0;
 }
 
 } // namespace flight

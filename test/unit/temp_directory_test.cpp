@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -137,9 +138,16 @@ void duckbox::test::RunTempDirectoryTests() {
         auto parent = root / "gone-a";
         RemoveSandboxTempDirectory(inst, root.string());
         Expect(!fs::exists(parent), "first remove deletes the empty parent");
+        std::ostringstream log;
+        auto *old = std::clog.rdbuf(log.rdbuf());
         RemoveSandboxTempDirectory(inst, root.string());
+        std::clog.rdbuf(old);
         Expect(true, "second remove tolerates an already-gone parent");
         Expect(fs::is_directory(root), "already-gone parent cleanup does not touch the base");
+        Expect(log.str().find("\"level\":\"debug\"") != std::string::npos,
+               "ENOENT empty-parent cleanup logs at debug");
+        Expect(log.str().find("\"level\":\"warn\"") == std::string::npos,
+               "ENOENT is not a warn (always-warn mutant)");
     }
 
     {
@@ -149,14 +157,23 @@ void duckbox::test::RunTempDirectoryTests() {
             std::ofstream o(parent / "keep-me");
             o << "planted\n";
         }
+        std::ostringstream log;
+        auto *old = std::clog.rdbuf(log.rdbuf());
         RemoveSandboxTempDirectory(inst, root.string());
+        std::clog.rdbuf(old);
         Expect(!fs::exists(inst), "instance dir is still removed when a file is planted");
         Expect(fs::is_directory(parent), "non-empty parent is not removed");
         Expect(fs::exists(parent / "keep-me"), "planted file is left in place");
+        Expect(log.str().find("\"level\":\"debug\"") != std::string::npos,
+               "ENOTEMPTY empty-parent cleanup logs at debug");
+        Expect(log.str().find("\"level\":\"warn\"") == std::string::npos,
+               "ENOTEMPTY is not a warn (always-warn mutant)");
         fs::remove_all(parent);
     }
 
     {
+        // rmdir never deletes a non-directory. fs::remove / unlink-first
+        // would remove this file (mutant: replace ::rmdir with fs::remove).
         auto inst = CreateSandboxTempDirectory(root.string(), "file-id", 1);
         auto parent = root / "file-id";
         fs::remove_all(inst);
@@ -165,8 +182,13 @@ void duckbox::test::RunTempDirectoryTests() {
             std::ofstream o(parent);
             o << "not-a-dir\n";
         }
+        std::ostringstream log;
+        auto *old = std::clog.rdbuf(log.rdbuf());
         RemoveSandboxTempDirectory(inst, root.string());
+        std::clog.rdbuf(old);
         Expect(fs::is_regular_file(parent), "file at {base}/{id} is not removed");
+        Expect(log.str().find("\"level\":\"warn\"") != std::string::npos,
+               "ENOTDIR on a file parent logs at warn");
         fs::remove(parent);
     }
 
@@ -177,9 +199,14 @@ void duckbox::test::RunTempDirectoryTests() {
         auto link = root / "sym-id";
         fs::create_directory_symlink(real, link);
         auto fake = link / "1-aaa";
+        std::ostringstream log;
+        auto *old = std::clog.rdbuf(log.rdbuf());
         RemoveSandboxTempDirectory(fake.string(), root.string());
+        std::clog.rdbuf(old);
         Expect(fs::is_symlink(link), "symlink at {base}/{id} is not removed");
         Expect(fs::is_directory(real), "symlink target outside the instance dir is not removed");
+        Expect(log.str().find("\"level\":\"warn\"") != std::string::npos,
+               "ENOTDIR on a symlink parent logs at warn");
         fs::remove(link);
         fs::remove_all(real);
     }
@@ -227,16 +254,22 @@ void duckbox::test::RunTempDirectoryTests() {
     {
         // Non-UTF-8 byte in the instance path. LogTempCleanup must not throw
         // (header: teardown never throws; dump uses error_handler_t::replace).
+        // ignore would drop 0xFF; replace emits U+FFFD.
         std::string bad = (root / "utf8").string();
         bad.push_back('\xff');
         bad += "/1-aaa";
+        std::ostringstream log;
+        auto *old = std::clog.rdbuf(log.rdbuf());
         try {
             RemoveSandboxTempDirectory(bad, root.string());
             Expect(true, "non-UTF-8 path teardown does not throw");
         } catch (const std::exception &e) {
             Expect(false, std::string("non-UTF-8 path teardown must not throw: ") + e.what());
         }
+        std::clog.rdbuf(old);
         Expect(fs::is_directory(root), "non-UTF-8 path cleanup does not touch the base");
+        Expect(log.str().find("\xEF\xBF\xBD") != std::string::npos,
+               "non-UTF-8 path dump uses U+FFFD (replace; ignore would drop it)");
     }
 
     {
@@ -276,9 +309,16 @@ void duckbox::test::RunTempDirectoryTests() {
         auto saved = fs::status(root).permissions();
         fs::permissions(root, fs::perms::owner_read | fs::perms::owner_exec,
                         fs::perm_options::replace);
+        std::ostringstream log;
+        auto *old = std::clog.rdbuf(log.rdbuf());
         RemoveSandboxTempDirectory(inst, root.string());
+        std::clog.rdbuf(old);
         fs::permissions(root, saved, fs::perm_options::replace);
         Expect(fs::is_directory(parent), "empty parent is left when rmdir is denied");
+        Expect(log.str().find("\"level\":\"warn\"") != std::string::npos,
+               "EACCES/EPERM empty-parent cleanup logs at warn");
+        Expect(log.str().find("\"level\":\"debug\"") == std::string::npos,
+               "denied rmdir is not debug (always-debug mutant)");
         fs::remove_all(parent);
     }
 

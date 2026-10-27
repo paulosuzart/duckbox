@@ -150,21 +150,8 @@ void RemoveEmptySandboxParent(const fs::path &parent, const fs::path &root) {
         return;
     }
     std::lock_guard<std::mutex> hold(g_parent_mu);
-    struct stat st {};
-    if (lstat(parent.c_str(), &st) != 0) {
-        if (errno == ENOENT) {
-            LogTempCleanup("debug", parent.string(), "already gone");
-        } else {
-            LogTempCleanup("warn", parent.string(), ErrnoMessage());
-        }
-        return;
-    }
-    if (S_ISLNK(st.st_mode) || !S_ISDIR(st.st_mode)) {
-        LogTempCleanup("warn", parent.string(), "parent is not a directory");
-        return;
-    }
-    // rmdir never deletes a non-directory (ENOTDIR), so a symlink/file swap
-    // between lstat and here is harmless. fs::remove would unlink first.
+    // rmdir never deletes a non-directory (ENOTDIR), so a file or symlink at
+    // {base}/{id} is left in place. fs::remove would unlink first.
     if (::rmdir(parent.c_str()) == 0) {
         return;
     }
