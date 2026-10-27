@@ -15,6 +15,8 @@
 #include <arrow/flight/client.h>
 #include <arrow/flight/sql/client.h>
 #include <arrow/flight/sql/server.h>
+#include <arrow/io/memory.h>
+#include <arrow/ipc/writer.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
@@ -115,6 +117,7 @@ std::string ExtractDbx4(const std::string &bytes) {
 
 struct FlightPair {
     std::unique_ptr<DuckboxFlightServer> pub;
+    DuckboxFlightSqlServer *pub_sql = nullptr;
     std::unique_ptr<DuckboxFlightServer> intern;
     std::thread pub_th;
     std::thread int_th;
@@ -151,6 +154,7 @@ FlightPair StartPair(const DaemonConfig &cfg, const std::shared_ptr<S3SandboxReg
     FlightPair p;
     auto pub_sql = std::make_unique<DuckboxFlightSqlServer>(cfg, defs, rt, signer, rewriter,
                                                             ListenerPlane::Public, peers);
+    p.pub_sql = pub_sql.get();
     p.pub = std::make_unique<DuckboxFlightServer>(std::move(pub_sql));
     auto int_sql = std::make_unique<DuckboxFlightSqlServer>(cfg, defs, rt, signer, rewriter,
                                                             ListenerPlane::Internal, peers);
@@ -434,14 +438,27 @@ void duckbox::test::RunBindHandleTests() {
     }
 
     {
-        // DoGetPreparedStatement: original handle on A (cache) and DoPut handle on B (no cache).
+        // S6: a cache hit on the non-owner must not re-sign. Proxy forwards the
+        // original handle; the owner has no params and cannot apply the bind.
         std::string err_a;
         auto rows_a = DoGetRowCount(*client_a, opt, Ticket{desc_orig.cmd}, &err_a);
-        Expect(rows_a == 1, "DoGetPreparedStatement on A uses bind_cache fallback: " + err_a);
+        Expect(rows_a != 1,
+               "DoGetPreparedStatement on non-owner does not re-sign a cache hit: rows=" +
+                   std::to_string(rows_a) + " " + err_a);
         std::string err_b;
         auto rows_b =
             DoGetRowCount(*client_b, opt, Ticket{PreparedDescriptor(doput_handle).cmd}, &err_b);
         Expect(rows_b == 1, "DoGetPreparedStatement on B uses handle params: " + err_b);
+        auto orig_local =
+            CreatePrepared(*client_b, opt, "SELECT id, title FROM deals WHERE id = ?");
+        Expect(
+            DoPutBind(*client_b, opt, PreparedDescriptor(orig_local), batch).starts_with("DBX4."),
+            "DoPut on owner B for local DoGetPreparedStatement");
+        std::string err_local;
+        auto rows_local =
+            DoGetRowCount(*client_b, opt, Ticket{PreparedDescriptor(orig_local).cmd}, &err_local);
+        Expect(rows_local == 1,
+               "DoGetPreparedStatement on owner uses bind_cache_ without re-sign: " + err_local);
     }
 
     {
@@ -507,8 +524,7 @@ void duckbox::test::RunBindHandleTests() {
         auto huge = BindString(marker + std::string(kMaxBindParamsBytes, 'X'));
         auto err = DoPutStatus(*client_b, opt, desc_orig, huge);
         Expect(!err.empty(), "oversize bind params are rejected");
-        Expect(err.find("maximum size") != std::string::npos ||
-                   err.find("Invalid") != std::string::npos,
+        Expect(err == "Invalid: bind parameters exceed the maximum size",
                "oversize DoPut is InvalidArgument: " + err);
         Expect(err.find(marker) == std::string::npos, "oversize error does not echo the params");
     }
@@ -520,6 +536,7 @@ void duckbox::test::RunBindHandleTests() {
                 hdr.second = "other";
             }
         }
+        const auto bytes_before = na.pub_sql->BindCacheBytes();
         auto err_put = DoPutStatus(*client_a, other, desc_orig, batch);
         Expect(!err_put.empty(), "cross-tenant caller is rejected at DoPut");
         Expect(err_put.find("not authorized") != std::string::npos ||
@@ -531,6 +548,82 @@ void duckbox::test::RunBindHandleTests() {
         Expect(gerr.find("not authorized") != std::string::npos ||
                    gerr.find("Unauthenticated") != std::string::npos,
                "cross-tenant GetFlightInfo names authorization: " + gerr);
+        Expect(na.pub_sql->BindCacheBytes() == bytes_before,
+               "unauthorized DoPut/GetFlightInfo do not touch bind_cache_");
+        auto okinfo = client_a->GetFlightInfo(opt, desc_orig);
+        Expect(okinfo.ok() && !(*okinfo)->endpoints().empty(),
+               "authorized ticket for the cross-tenant DoGet check");
+        if (okinfo.ok() && !(*okinfo)->endpoints().empty()) {
+            std::string derr;
+            auto drows = DoGetRowCount(*client_b, other, (*okinfo)->endpoints()[0].ticket, &derr);
+            Expect(drows < 0 && (derr.find("not authorized") != std::string::npos ||
+                                 derr.find("Unauthenticated") != std::string::npos),
+                   "cross-tenant caller with a valid ticket is rejected at DoGet: " + derr);
+        }
+    }
+
+    {
+        // DoPut size cap boundary: IPC of exactly kMaxBindParamsBytes is accepted, +8 rejected.
+        auto ipc_size = [](const std::shared_ptr<::arrow::RecordBatch> &b) -> size_t {
+            auto table = ::arrow::Table::FromRecordBatches({b}).ValueOrDie();
+            auto sink = ::arrow::io::BufferOutputStream::Create().ValueOrDie();
+            auto w = ::arrow::ipc::MakeStreamWriter(sink, table->schema()).ValueOrDie();
+            (void)w->WriteTable(*table);
+            (void)w->Close();
+            return static_cast<size_t>(sink->Finish().ValueOrDie()->size());
+        };
+        // utf8 data is 8-byte padded: one probe gives the fixed overhead.
+        const size_t probe_len = kMaxBindParamsBytes - 4096;
+        const size_t probe = ipc_size(BindString(std::string(probe_len, 'b')));
+        const size_t len = probe_len + (kMaxBindParamsBytes - probe);
+        auto exact = BindString(std::string(len, 'b'));
+        Expect(ipc_size(exact) == kMaxBindParamsBytes, "boundary bind encodes to exactly 1 MiB");
+        Expect(DoPutStatus(*client_b, opt, desc_orig, exact).empty(),
+               "bind IPC of exactly 1 MiB is accepted");
+        auto over = BindString(std::string(len + 8, 'b'));
+        Expect(!DoPutStatus(*client_b, opt, desc_orig, over).empty(),
+               "bind IPC one step over 1 MiB is rejected");
+    }
+
+    {
+        // DoGetVerified error paths (moved out of DoGetStatement in #109).
+        auto info = client_b->GetFlightInfo(opt, PreparedDescriptor(doput_handle));
+        Expect(info.ok() && !(*info)->endpoints().empty(), "ticket for DoGet error paths");
+        if (info.ok() && !(*info)->endpoints().empty()) {
+            auto ticket = (*info)->endpoints()[0].ticket;
+            auto wrong = opt;
+            for (auto &hdr : wrong.headers) {
+                if (hdr.first == "x-duckbox-key") {
+                    hdr.second = "tenant_21:user_other";
+                }
+            }
+            std::string err;
+            auto rows = DoGetRowCount(*client_b, wrong, ticket, &err);
+            Expect(rows < 0 && err.find("does not match statement handle") != std::string::npos,
+                   "DoGet with a mismatched x-duckbox-key is rejected: " + err);
+
+            (void)defs->Expire(rec.id);
+            err.clear();
+            rows = DoGetRowCount(*client_b, opt, ticket, &err);
+            Expect(rows < 0 && err.find("re-prepare") != std::string::npos,
+                   "DoGet with a stale handle_gen is rejected: " + err);
+
+            // Fresh ticket (current handle_gen), then expire the sandbox by TTL.
+            auto fresh = CreatePrepared(*client_b, opt, "SELECT id, title FROM deals WHERE id = 1");
+            auto finfo = client_b->GetFlightInfo(opt, PreparedDescriptor(fresh));
+            Expect(finfo.ok() && !(*finfo)->endpoints().empty(), "fresh ticket after Expire");
+            if (finfo.ok() && !(*finfo)->endpoints().empty()) {
+                auto fticket = (*finfo)->endpoints()[0].ticket;
+                auto cur = defs->Get(rec.id);
+                cur.spec.lifecycle.ttl_ms = 1;
+                (void)defs->Update(cur);
+                err.clear();
+                rows = DoGetRowCount(*client_b, opt, fticket, &err);
+                Expect(rows < 0 && err.find("' expired") != std::string::npos &&
+                           err.find("re-prepare") == std::string::npos,
+                       "DoGet on an expired sandbox is rejected as expired: " + err);
+            }
+        }
     }
 
     na.Stop();

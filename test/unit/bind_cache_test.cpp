@@ -38,12 +38,14 @@ void duckbox::test::RunBindCacheTests() {
     {
         BindCache cache(100);
         const std::string ipc(20, 'p');
-        Expect(cache.Remember("k1", ipc), "bind key 1");
-        Expect(cache.Remember("k2", ipc), "bind key 2");
-        Expect(cache.Remember("k3", ipc), "bind key 3");
-        Expect(cache.size() == 3, "up to three keys per bind are stored");
-        const size_t want = (2 + ipc.size()) * 3;
-        Expect(cache.bytes() == want, "byte budget counts every stored key, not one copy");
+        Expect(cache.Remember("orig", ipc), "original handle is cached");
+        Expect(cache.size() == 1, "one key per bind is stored");
+        const size_t want = std::string("orig").size() + ipc.size();
+        Expect(cache.bytes() == want, "byte budget counts the single stored key");
+        Expect(cache.Remember("other", ipc), "a second bind is a separate key");
+        Expect(cache.size() == 2, "independent binds are stored separately");
+        Expect(cache.bytes() == want + std::string("other").size() + ipc.size(),
+               "byte budget counts every stored key, not one copy");
     }
 
     {
@@ -69,6 +71,35 @@ void duckbox::test::RunBindCacheTests() {
     }
 
     {
+        BindCache cache(100);
+        Expect(cache.Remember("a", std::string(49, 'x')), "boundary entry a");
+        Expect(cache.Remember("b", std::string(49, 'y')), "entry that fills the budget exactly");
+        Expect(cache.size() == 2 && cache.bytes() == 100,
+               "bytes == max_bytes keeps both keys (no eviction at the boundary)");
+        Expect(cache.Remember("c", ""), "one more byte");
+        Expect(!cache.Lookup("a", nullptr) && cache.Lookup("b", nullptr) && cache.bytes() == 51,
+               "one byte over the budget evicts exactly the oldest key");
+    }
+
+    {
+        BindCache cache(10);
+        Expect(cache.Remember("k", std::string(9, 'x')), "entry exactly at the budget is stored");
+        Expect(cache.bytes() == 10 && cache.size() == 1, "entry at the budget is counted once");
+    }
+
+    {
+        BindCache cache(50);
+        Expect(cache.Remember("keep", std::string(10, 'a')), "overwrite seed");
+        Expect(cache.Remember("k", std::string(20, 'b')), "overwrite second");
+        Expect(cache.Remember("keep", std::string(10, 'c')), "overwrite existing key");
+        Expect(cache.bytes() == 35 && cache.size() == 2,
+               "overwrite recounts exactly (no double count)");
+        Expect(cache.Remember("z", std::string(20, 'z')), "insert after overwrite");
+        Expect(!cache.Lookup("k", nullptr) && cache.Lookup("keep", nullptr) && cache.bytes() == 35,
+               "overwritten key moved to the back of the FIFO");
+    }
+
+    {
         BindCache cache(BindCache::kDefaultMaxBytes);
         size_t peak = 0;
         bool all_ok = true;
@@ -86,6 +117,48 @@ void duckbox::test::RunBindCacheTests() {
         Expect(cache.bytes() <= BindCache::kDefaultMaxBytes, "bytes after load stay bounded");
         std::cout << "bind_cache_peak_bytes=" << peak
                   << " bind_cache_max_bytes=" << BindCache::kDefaultMaxBytes
+                  << " bind_cache_entries=" << cache.size() << "\n";
+    }
+
+    {
+        constexpr int n = 15000;
+        constexpr size_t payload = 64;
+        const size_t budget = static_cast<size_t>(n) * (16 + payload);
+        BindCache cache(budget);
+        bool all_ok = true;
+        auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < n; i++) {
+            if (!cache.Remember("k" + std::to_string(i), std::string(payload, 'm'))) {
+                all_ok = false;
+                break;
+            }
+        }
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
+        Expect(all_ok && cache.size() == static_cast<size_t>(n),
+               "15k unique inserts stay in the cache");
+        size_t keys = 0;
+        for (int i = 0; i < n; i++) {
+            keys += ("k" + std::to_string(i)).size();
+        }
+        Expect(cache.bytes() == cache.size() * payload + keys,
+               "15k insert byte accounting is exact");
+        t0 = std::chrono::steady_clock::now();
+        bool over_ok = true;
+        for (int i = 0; i < 1000; i++) {
+            if (!cache.Remember("k" + std::to_string(i), std::string(payload, 'n'))) {
+                over_ok = false;
+                break;
+            }
+        }
+        auto over_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count();
+        Expect(over_ok && cache.size() == static_cast<size_t>(n),
+               "overwrite of 1000 existing keys at 15k stays exact");
+        std::cout << "bind_cache_insert_15k_us=" << us
+                  << " bind_cache_overwrite_1k_at_15k_us=" << over_us
                   << " bind_cache_entries=" << cache.size() << "\n";
     }
 
@@ -130,19 +203,8 @@ void duckbox::test::RunBindCacheTests() {
                            std::chrono::steady_clock::now() - t0)
                            .count();
         Expect(accepted == kIters, "measured binds are under the max params size");
-        constexpr int kCmpIters = 5000000;
-        t0 = std::chrono::steady_clock::now();
-        size_t rejects = 0;
-        for (int i = 0; i < kCmpIters; i++) {
-            rejects += static_cast<size_t>(last > kMaxBindParamsBytes);
-        }
-        auto cmp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          std::chrono::steady_clock::now() - t0)
-                          .count();
-        Expect(rejects == 0, "measured ipc is under the max params size");
         std::cout << "doput_encode_without_size_check_us=" << without_us
                   << " doput_encode_with_size_check_us=" << with_us << " encode_iters=" << kIters
-                  << " ipc_bytes=" << last << " size_check_only_ns=" << cmp_ns
-                  << " size_check_iters=" << kCmpIters << "\n";
+                  << " ipc_bytes=" << last << "\n";
     }
 }
