@@ -524,7 +524,12 @@ void duckbox::test::RunBindHandleTests() {
         auto huge = BindString(marker + std::string(kMaxBindParamsBytes, 'X'));
         auto err = DoPutStatus(*client_b, opt, desc_orig, huge);
         Expect(!err.empty(), "oversize bind params are rejected");
-        Expect(err == "Invalid: bind parameters exceed the maximum size",
+        auto msg = err;
+        const auto dbg = msg.find(". gRPC client debug context");
+        if (dbg != std::string::npos) {
+            msg.resize(dbg);
+        }
+        Expect(msg == "Invalid: bind parameters exceed the maximum size",
                "oversize DoPut is InvalidArgument: " + err);
         Expect(err.find(marker) == std::string::npos, "oversize error does not echo the params");
     }
