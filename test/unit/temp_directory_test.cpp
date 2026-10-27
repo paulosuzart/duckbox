@@ -225,6 +225,21 @@ void duckbox::test::RunTempDirectoryTests() {
     }
 
     {
+        // Non-UTF-8 byte in the instance path. LogTempCleanup must not throw
+        // (header: teardown never throws; dump uses error_handler_t::replace).
+        std::string bad = (root / "utf8").string();
+        bad.push_back('\xff');
+        bad += "/1-aaa";
+        try {
+            RemoveSandboxTempDirectory(bad, root.string());
+            Expect(true, "non-UTF-8 path teardown does not throw");
+        } catch (const std::exception &e) {
+            Expect(false, std::string("non-UTF-8 path teardown must not throw: ") + e.what());
+        }
+        Expect(fs::is_directory(root), "non-UTF-8 path cleanup does not touch the base");
+    }
+
+    {
         auto inst = CreateSandboxTempDirectory(root.string(), "relbase-a", 1);
         auto parent = root / "relbase-a";
         RemoveSandboxTempDirectory(inst, "relative-base");

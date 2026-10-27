@@ -121,7 +121,7 @@ void LogTempCleanup(const char *level, const std::string &path, const std::strin
     if (!error.empty()) {
         log["error"] = error;
     }
-    std::clog << log.dump() << "\n";
+    std::clog << log.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
 }
 
 // Lexical only: parent must be exactly one component under the configured
@@ -163,18 +163,15 @@ void RemoveEmptySandboxParent(const fs::path &parent, const fs::path &root) {
         LogTempCleanup("warn", parent.string(), "parent is not a directory");
         return;
     }
-    std::error_code rec;
-    bool removed = fs::remove(parent, rec);
-    if (rec) {
-        if (rec == std::errc::directory_not_empty) {
-            LogTempCleanup("debug", parent.string(), rec.message());
-        } else {
-            LogTempCleanup("warn", parent.string(), rec.message());
-        }
+    // rmdir never deletes a non-directory (ENOTDIR), so a symlink/file swap
+    // between lstat and here is harmless. fs::remove would unlink first.
+    if (::rmdir(parent.c_str()) == 0) {
         return;
     }
-    if (!removed) {
-        LogTempCleanup("debug", parent.string(), "already gone");
+    if (errno == ENOENT || errno == ENOTEMPTY) {
+        LogTempCleanup("debug", parent.string(), ErrnoMessage());
+    } else {
+        LogTempCleanup("warn", parent.string(), ErrnoMessage());
     }
 }
 

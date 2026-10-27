@@ -827,6 +827,9 @@ PeerFlight::DialTransport(const std::string &url, Deadline deadline) {
     auth_opt.timeout = RemainingTimeout(deadline);
     auto st = transport->Authenticate(auth_opt, std::move(auth));
     if (!st.ok()) {
+        // Destroying a transport whose Handshake failed against a SIGSTOP'd
+        // peer can block past the deadline (Arrow #31235). Leak it.
+        LeakGrpcObject(std::move(transport));
         return AsProxyTimeoutIfDue(st, deadline);
     }
     return transport;
