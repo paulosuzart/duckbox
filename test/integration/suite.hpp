@@ -15,6 +15,7 @@ void RunBearerFlightTests();
 void RunCliAuthTests();
 void RunPythonClientAuthTests();
 void RunClusterTests();
+void RunBindHandleTests();
 void RunProxyTimeoutTests();
 void RunProxyHangTests();
 void RunSignalShutdownTests();
