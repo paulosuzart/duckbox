@@ -1,6 +1,7 @@
 #include "check.hpp"
 #include "suite.hpp"
 
+#include "cluster/lease.hpp"
 #include "common/crypto.hpp"
 #include "common/deadline.hpp"
 #include "common/yaml.hpp"
@@ -16,7 +17,9 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 #include <sys/stat.h>
+#include <vector>
 
 void duckbox::test::RunSpecLoaderTests() {
     using namespace duckbox;
@@ -42,6 +45,10 @@ void duckbox::test::RunSpecLoaderTests() {
     Expect(cluster_a.peer_secret == "duckbox-peer-dev", "peer secret is resolved from env ref");
     Expect(cluster_a.lease.advertise.find("5747") != std::string::npos,
            "advertise is the internal address");
+    Expect(cluster_a.advertised_address == "grpc://127.0.0.1:4747",
+           "cluster YAML sets advertised_address to the public loopback listener");
+    Expect(loaded_daemon.advertised_address == "grpc://127.0.0.1:4747",
+           "unset advertised_address falls back to grpc:// + listen");
     Expect(loaded_daemon.metrics_listen.find("9477") != std::string::npos,
            "daemon yaml metrics listen");
     Expect(loaded_daemon.metrics_policy_classes.count("analyst") == 1,
@@ -508,6 +515,7 @@ void duckbox::test::RunSpecLoaderTests() {
                  "5s\n  proxy_first_message_max: 60s\n  proxy_max_inflight: 256\n"
                  "  proxy_max_inflight_per_peer: 256\n  shutdown_watchdog: 8s\n"
                  "  advertise: grpc://127.0.0.1:5747\n"
+                 "advertised_address: grpc+tls://node-a.example:4747\n"
                  "limits:\n  idle_timeout: 30s\n  max_idle_timeout: 5m\n  max_sandboxes: 10\n";
         }
         auto d = LoadDaemonFile(path);
@@ -608,6 +616,21 @@ void duckbox::test::RunSpecLoaderTests() {
         Expect(tls.ok(), "ParseFlightLocation grpc+tls://");
         Expect(d.lease.advertise.find("5747") != std::string::npos,
                "daemon yaml lease advertise is the internal listener");
+        Expect(d.advertised_address == "grpc+tls://node-a.example:4747",
+               "daemon yaml advertised_address accepts grpc+tls://");
+        {
+            std::ostringstream log;
+            LogAdvertisedAddress(log, d.advertised_address);
+            Expect(log.str().find("grpc+tls://node-a.example:4747") != std::string::npos,
+                   "advertised_address is logged at startup");
+            Expect(log.str().find("duckbox advertised address") != std::string::npos,
+                   "startup log names advertised address");
+        }
+        {
+            auto lopt = cluster::LeaseOptionsFromDaemon(d);
+            Expect(lopt.advertised_address == "grpc+tls://node-a.example:4747",
+                   "LeaseOptionsFromDaemon copies advertised_address for the node record");
+        }
         Expect(d.idle_evict_ms == 30000, "daemon yaml idle_timeout 30s");
         ValidateDaemonOrThrow(d);
         {
@@ -671,6 +694,155 @@ void duckbox::test::RunSpecLoaderTests() {
             dashed.lease.node_id = "a-b";
             dashed.lease.skip_probe = true;
             ValidateDaemonOrThrow(dashed);
+            DaemonConfig fallback = TestDaemon();
+            fallback.advertised_address.clear();
+            FinalizeDaemonListen(fallback);
+            Expect(
+                fallback.advertised_address == "grpc://127.0.0.1:4747",
+                "FinalizeDaemonListen publishes grpc:// + listen when advertised_address is unset");
+            DaemonConfig wild = TestDaemon();
+            wild.listen = "0.0.0.0:4747";
+            wild.internal_listen = "127.0.0.1:5747";
+            wild.internal_listen_configured = true;
+            wild.lease.endpoint = "http://127.0.0.1:9";
+            wild.lease.bucket = "b";
+            wild.lease.skip_probe = true;
+            wild.peer_secret = "duckbox-peer-secret";
+            wild.advertised_address.clear();
+            FinalizeDaemonListen(wild);
+            Expect(wild.advertised_address.empty(),
+                   "wildcard listen in multi-node does not invent an advertised_address");
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(wild); }, "advertised_address",
+                                "multi-node wildcard listen without advertised_address is refused");
+            wild.advertised_address = "grpc://node-a.example:4747";
+            ValidateDaemonOrThrow(wild);
+            DaemonConfig v6 = TestDaemon();
+            v6.listen = "[::]:4747";
+            v6.internal_listen = "127.0.0.1:5747";
+            v6.internal_listen_configured = true;
+            v6.lease.endpoint = "http://127.0.0.1:9";
+            v6.lease.bucket = "b";
+            v6.lease.skip_probe = true;
+            v6.peer_secret = "duckbox-peer-secret";
+            FinalizeDaemonListen(v6);
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(v6); }, "advertised_address",
+                                "IPv6 wildcard listen in multi-node requires advertised_address");
+            DaemonConfig bad_url = TestDaemon();
+            bad_url.advertised_address = "not a uri !!!";
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(bad_url); }, "advertised_address",
+                                "invalid advertised_address fails validation naming the option");
+        }
+        {
+            auto badp = "/tmp/duckbox-bad-advertised.yaml";
+            {
+                std::ofstream o(badp);
+                o << "name: x\nlisten: 127.0.0.1:4747\nhandle_secret: duckbox-dev-secret\n"
+                     "advertised_address: not a uri !!!\n";
+            }
+            ExpectThrowContains([&] { LoadDaemonFile(badp); }, "advertised_address",
+                                "invalid advertised_address fails config load naming the option");
+        }
+        {
+            auto expect_userinfo_rejected = [&](const std::string &url,
+                                                const std::vector<std::string> &secrets,
+                                                const char *msg) {
+                DaemonConfig cfg = TestDaemon();
+                cfg.advertised_address = url;
+                try {
+                    ValidateDaemonOrThrow(cfg);
+                    Expect(false, std::string(msg) + " (no throw)");
+                } catch (const std::exception &e) {
+                    std::string w = e.what();
+                    Expect(w.find("advertised_address") != std::string::npos,
+                           std::string(msg) + " names advertised_address");
+                    Expect(w.find("advertised_address: advertised_address:") == std::string::npos,
+                           std::string(msg) + " does not double advertised_address prefix");
+                    Expect(w.find(url) == std::string::npos,
+                           std::string(msg) + " does not echo the full address");
+                    for (auto &s : secrets) {
+                        Expect(w.find(s) == std::string::npos,
+                               std::string(msg) + " does not echo credential");
+                    }
+                }
+            };
+            expect_userinfo_rejected("grpc+tls://leakuser@node-a.example:4984", {"leakuser"},
+                                     "user-only advertised_address is refused");
+            expect_userinfo_rejected("grpc+tls://leakuser:s3cretLeak@node-a.example:4984",
+                                     {"leakuser", "s3cretLeak"},
+                                     "user:password advertised_address is refused");
+            expect_userinfo_rejected("grpc+tls://:s3cretLeak@node-a.example:4984", {"s3cretLeak"},
+                                     "empty-user password advertised_address is refused");
+            expect_userinfo_rejected("grpc://:@node-a.example:4984", {":@"},
+                                     "empty userinfo advertised_address is refused");
+            expect_userinfo_rejected("leakuser:s3cretLeak@node-a.example:4984",
+                                     {"leakuser", "s3cretLeak"},
+                                     "scheme-less userinfo advertised_address is refused");
+            expect_userinfo_rejected("grpc://leakuser:1234/s3cretLeak@node-a.example:4984",
+                                     {"s3cretLeak"}, "credential after '/' is refused");
+            expect_userinfo_rejected("grpc://leakuser:12#s3cretLeak@node-a.example:4984",
+                                     {"s3cretLeak"}, "credential in fragment is refused");
+            expect_userinfo_rejected("grpc://node-a.example:4984/?tok=s3cretLeak", {"s3cretLeak"},
+                                     "credential in query is refused");
+            expect_userinfo_rejected("http://node-a.example:4984", {},
+                                     "non-grpc scheme is refused");
+            expect_userinfo_rejected("grpc://node-a.example:4984/s3cretLeak", {"s3cretLeak"},
+                                     "credential in path without '@' is refused");
+            expect_userinfo_rejected("grpc://node-a.example:4984#s3cretLeak", {"s3cretLeak"},
+                                     "credential in fragment without '@' is refused");
+            expect_userinfo_rejected("grpc://node-a.example;tok=s3cretLeak:4984", {"s3cretLeak"},
+                                     "credential in host sub-delims is refused");
+            expect_userinfo_rejected("grpc://leakuser%40s3cretLeak:4984", {"s3cretLeak"},
+                                     "percent-encoded '@' in host is refused");
+            for (const char *good : {"GRPC+TLS://node-a.example:4984", "grpc://[2001:db8::1]:4984",
+                                     "grpc://node-a.example:4984/", "grpc://10.0.0.7:4984",
+                                     "grpc://duckbox_node-1.svc.cluster.local:4984"}) {
+                DaemonConfig g = TestDaemon();
+                g.advertised_address = good;
+                try {
+                    ValidateDaemonOrThrow(g);
+                } catch (const std::exception &) {
+                    Expect(false, std::string("valid advertised_address accepted: ") + good);
+                }
+            }
+            {
+                DaemonConfig sch = TestDaemon();
+                sch.listen = "http://127.0.0.1:4747";
+                sch.advertised_address.clear();
+                FinalizeDaemonListen(sch);
+                Expect(sch.advertised_address == "grpc://127.0.0.1:4747",
+                       "schemed listen falls back to grpc://host:port");
+                ValidateDaemonOrThrow(sch);
+            }
+            DaemonConfig ok = TestDaemon();
+            ok.advertised_address = "grpc+tls://node-a.example:4984";
+            ValidateDaemonOrThrow(ok);
+            DaemonConfig bare = TestDaemon();
+            bare.advertised_address = "node-a.example:4984";
+            ValidateDaemonOrThrow(bare);
+            {
+                auto leakp = "/tmp/duckbox-advertised-userinfo.yaml";
+                {
+                    std::ofstream o(leakp);
+                    o << "name: x\nlisten: 127.0.0.1:4747\nhandle_secret: duckbox-dev-secret\n"
+                         "advertised_address: grpc+tls://leakuser:s3cretLeak@node-a.example:4984\n";
+                }
+                try {
+                    LoadDaemonFile(leakp);
+                    Expect(false, "LoadDaemonFile userinfo advertised_address (no throw)");
+                } catch (const std::exception &e) {
+                    std::string w = e.what();
+                    Expect(w.find("advertised_address") != std::string::npos,
+                           "LoadDaemonFile userinfo names advertised_address");
+                    Expect(w.find("leakuser") == std::string::npos &&
+                               w.find("s3cretLeak") == std::string::npos,
+                           "LoadDaemonFile userinfo does not echo credential");
+                }
+            }
+        }
+        {
+            std::ostringstream empty_log;
+            LogAdvertisedAddress(empty_log, "");
+            Expect(empty_log.str().empty(), "empty advertised_address is not logged");
         }
         {
             auto loc = ParseFlightLocation("127.0.0.1:5747");

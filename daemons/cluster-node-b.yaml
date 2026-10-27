@@ -2,6 +2,7 @@
 name: node-b
 listen: 127.0.0.1:4748
 internal_listen: 127.0.0.1:5748
+advertised_address: grpc://127.0.0.1:4748
 auth:
   mode: trusted
   allow_insecure_dev: true
