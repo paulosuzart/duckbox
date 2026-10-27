@@ -152,6 +152,7 @@ Top-level / `auth:`:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `internal_listen` | loopback, public port+1000 | Internal peer/operator bind. Required when `listen` is not loopback or `lease.advertise` is set. |
+| `advertised_address` | `grpc://` + public `listen` | Client-facing Flight URL (`grpc://` or `grpc+tls://`) published on `nodes/{node_id}.json`. Distinct from `lease.advertise` (internal peer URL). Required in multi-node when `listen` is a wildcard (`0.0.0.0` / `::`). |
 | `auth.operators` | empty (deny all) | Identities allowed to `DrainNode` / `NodeStatus`. |
 | `auth.peer_secret_ref` | required when `internal_listen` is set with a lease endpoint | `env:` or `file:` only. Never a plaintext value. Single-node S3 registry (no `internal_listen`) does not need it. |
 

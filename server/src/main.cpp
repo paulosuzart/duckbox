@@ -21,6 +21,7 @@ int main(int argc, char **argv) {
 	std::string serve_daemon;
 	std::string serve_listen;
 	std::string serve_internal_listen;
+	std::string serve_advertised_address;
 	std::string serve_debug_http;
 	std::string serve_metrics;
 	std::string serve_handle_secret;
@@ -30,6 +31,8 @@ int main(int argc, char **argv) {
 	serve->add_option("--listen", serve_listen, "Public Flight SQL listen address HOST:PORT");
 	serve->add_option("--internal-listen", serve_internal_listen,
 	                  "Internal peer/operator listen (default loopback, public port+1000)");
+	serve->add_option("--advertised-address", serve_advertised_address,
+	                  "Public Flight URL clients use to reach this node (grpc:// or grpc+tls://)");
 	serve->add_option("--debug-http", serve_debug_http, "Debug HTTP listen address HOST:PORT");
 	serve->add_option("--metrics", serve_metrics, "Prometheus /metrics listen address HOST:PORT");
 	serve->add_flag("--no-metrics", serve_no_metrics, "Disable the metrics listener");
@@ -114,6 +117,9 @@ int main(int argc, char **argv) {
 			if (!serve_internal_listen.empty()) {
 				opt.daemon.internal_listen = serve_internal_listen;
 				opt.daemon.internal_listen_configured = true;
+			}
+			if (!serve_advertised_address.empty()) {
+				opt.daemon.advertised_address = serve_advertised_address;
 			}
 			if (!serve_debug_http.empty()) {
 				opt.daemon.debug_http = serve_debug_http;

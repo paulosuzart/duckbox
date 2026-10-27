@@ -1994,6 +1994,7 @@ int RunServer(const ServerOptions &opt_in) {
               << " (DuckDB " << DUCKBOX_DUCKDB_VERSION << ", control plane only)" << std::endl;
     std::cout << "duckbox internal listener on grpc://" << ip.first << ":" << internal->port()
               << " (peer + operator; do not expose)" << std::endl;
+    LogAdvertisedAddress(std::cout, opt.daemon.advertised_address);
     if (!opt.daemon.debug_http.empty()) {
         ServerOptions dbg = opt;
         std::thread([dbg, defs, runtime]() { StartDebugHttp(dbg, defs, runtime); }).detach();
