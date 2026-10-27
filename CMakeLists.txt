@@ -267,6 +267,7 @@ set(DUCKBOX_SOURCES
   server/src/common/yaml.cpp
   server/src/common/error.cpp
   server/src/common/crypto.cpp
+  server/src/common/deadline.cpp
   server/src/common/duckdb_layer.cpp
   server/src/s3/secrets.cpp
   server/src/s3/s3.cpp
@@ -498,7 +499,8 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/lake_attach_test.cpp
   test/unit/secret_redact_test.cpp
   test/unit/temp_directory_test.cpp
-  test/unit/token_sanitize_test.cpp)
+  test/unit/token_sanitize_test.cpp
+  test/unit/deadline_test.cpp)
 
 duckbox_add_test(duckbox_guardrail_tests
   test/support/check.cpp

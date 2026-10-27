@@ -4,7 +4,9 @@
 // daemon base is never tenant-controllable. Specs cannot set a temp
 // directory (unknown key). When the base is unset, DuckDB keeps its default.
 // Each runtime instance (id@version) gets its own exclusive subdirectory
-// `{base}/{id}/{version}-{random}`; teardown removes only that directory.
+// `{base}/{id}/{version}-{random}`. Teardown removes that instance directory
+// and, when it is empty, the `{base}/{id}` parent. The configured base is
+// never removed.
 
 #include <string>
 
@@ -27,9 +29,13 @@ std::string ResolveSandboxTempDirectory(const std::string &base, const std::stri
 std::string CreateSandboxTempDirectory(const std::string &base, const std::string &sandbox_id,
                                        int version);
 
-// remove_all of the instance directory only. No-op when path is empty or
-// missing. Logs failures; teardown never throws.
-void RemoveSandboxTempDirectory(const std::string &path);
+// remove_all of the instance directory, then std::filesystem::remove of the
+// empty `{base}/{id}` parent when `base` is set. Never follows a symlink out
+// of `base`, never deletes outside `base`, and never removes `base` itself.
+// A missing or non-empty parent is ignored (debug). Other refusals and
+// unexpected errors log at warn. No-op when path is empty. Teardown never
+// throws. Empty `base` skips parent cleanup (unset option unchanged).
+void RemoveSandboxTempDirectory(const std::string &path, const std::string &base);
 
 // True when both paths name the same directory (symlink-aware when they exist).
 bool SameTempDirectory(const std::string &a, const std::string &b);

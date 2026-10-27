@@ -1,5 +1,6 @@
 #include "node/daemon_config.hpp"
 #include "common/crypto.hpp"
+#include "common/deadline.hpp"
 #include "common/error.hpp"
 #include "common/yaml.hpp"
 #include "config/policy.hpp"
@@ -506,6 +507,9 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
         if (d.lease.proxy_first_message_max_ms <= 0) {
             throw PolicyError("lease.proxy_first_message_max_ms must be > 0");
         }
+        if (d.lease.proxy_first_message_max_ms > kMaxSteadyClockTimeoutMs) {
+            throw PolicyError(SteadyClockTimeoutMaxMessage("lease.proxy_first_message_max_ms"));
+        }
         d.lease.proxy_max_inflight =
             lease->GetInt("proxy_max_inflight", d.lease.proxy_max_inflight);
         if (d.lease.proxy_max_inflight <= 0) {
@@ -603,6 +607,10 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     }
     if (cfg.handle_ttl_seconds <= 0) {
         add("limits.handle_ttl_seconds", "must be > 0");
+    }
+    if (cfg.lease.proxy_first_message_max_ms > kMaxSteadyClockTimeoutMs) {
+        add("lease.proxy_first_message_max_ms",
+            SteadyClockTimeoutMaxMessage("lease.proxy_first_message_max_ms"));
     }
     try {
         auto lp = ParseListenAddress(cfg.listen, 4747);

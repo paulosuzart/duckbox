@@ -3,6 +3,7 @@
 
 #include "cluster/lease.hpp"
 #include "common/crypto.hpp"
+#include "common/deadline.hpp"
 #include "common/yaml.hpp"
 #include "config/policy.hpp"
 #include "config/spec_validator.hpp"
@@ -189,6 +190,25 @@ void duckbox::test::RunSpecLoaderTests() {
         s.replace(pos, std::string("threads: 2").size(), "threads: 9223372036854775808");
         ExpectThrowContains([&] { LoadSpecString(s, "<i64>"); }, "int64 range",
                             "integer overflow is rejected");
+    }
+    {
+        std::string s = mini;
+        auto pos = s.find("threads: 2");
+        s.replace(pos, std::string("threads: 2").size(),
+                  "threads: 2\n  query_timeout_ms: 9300000000000");
+        ExpectThrowContains([&] { LoadSpecString(s, "<qto>"); },
+                            "resources.query_timeout_ms must be <= " +
+                                std::to_string(kMaxSteadyClockTimeoutMs),
+                            "huge query_timeout_ms is refused at load");
+    }
+    {
+        std::string s = mini;
+        auto pos = s.find("threads: 2");
+        s.replace(pos, std::string("threads: 2").size(),
+                  "threads: 2\n  query_timeout_ms: " + std::to_string(kMaxSteadyClockTimeoutMs));
+        auto ok = LoadSpecString(s, "<qto-max>");
+        Expect(ok.resources.query_timeout_ms == kMaxSteadyClockTimeoutMs,
+               "query_timeout_ms at the documented maximum is accepted");
     }
     ExpectThrowContains(
         [&] { LoadSpecString(std::string(mini) + "lifecycle:\n  nope: 1s\n", "<life>"); },
@@ -537,6 +557,27 @@ void duckbox::test::RunSpecLoaderTests() {
             }
             ExpectThrowContains([&] { LoadDaemonFile(badp); }, "proxy_first_message_max_ms",
                                 "proxy_first_message_max_ms 0 is refused");
+        }
+        {
+            auto badp = "/tmp/duckbox-proxy-first-max-huge.yaml";
+            {
+                std::ofstream o(badp);
+                o << "name: x\nlisten: 127.0.0.1:9\nhandle_secret: duckbox-dev-secret\n"
+                     "auth:\n  allow_insecure_dev: true\n"
+                     "lease:\n  skip_probe: true\n  proxy_first_message_max_ms: 9300000000000\n";
+            }
+            ExpectThrowContains([&] { LoadDaemonFile(badp); },
+                                "lease.proxy_first_message_max_ms must be <= " +
+                                    std::to_string(kMaxSteadyClockTimeoutMs),
+                                "huge proxy_first_message_max_ms is refused at load");
+        }
+        {
+            DaemonConfig cfg = TestDaemon();
+            cfg.lease.proxy_first_message_max_ms = 9'300'000'000'000;
+            ExpectThrowContains([&] { ValidateDaemonOrThrow(cfg); },
+                                "lease.proxy_first_message_max_ms must be <= " +
+                                    std::to_string(kMaxSteadyClockTimeoutMs),
+                                "ValidateDaemonOrThrow names the key and the maximum");
         }
         {
             auto badp = "/tmp/duckbox-proxy-max-inflight.yaml";
