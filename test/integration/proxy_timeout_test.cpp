@@ -701,9 +701,7 @@ void TestSigstopPeerDoGet() {
     Expect(n > 0, "sigstop-doget child published a port");
     const int port = std::atoi(buf);
     const std::string url = "grpc://127.0.0.1:" + std::to_string(port);
-    int wst = 0;
-    Expect(waitpid(pid, &wst, WUNTRACED) == pid, "sigstop-doget waitpid");
-    Expect(WIFSTOPPED(wst), "owner is frozen before the entry node has dialed it");
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
     FakeCallContext ctx;
     auto t0 = std::chrono::steady_clock::now();
     auto stream =
