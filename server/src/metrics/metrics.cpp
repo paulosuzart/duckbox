@@ -600,7 +600,7 @@ void StartMetricsHttp(const std::string &listen, std::shared_ptr<IMetrics> metri
         return;
     }
     StopMetricsHttp();
-    auto [host, port] = ParseListenAddress(listen, "metrics.listen");
+    auto [host, port] = ParseListenAddress(listen, "metrics.listen", node::AddressUse::Bind, 9477);
     g_metrics_http = std::make_shared<httplib::Server>();
     auto m = metrics;
     g_metrics_http->Get("/metrics", [m](const httplib::Request &, httplib::Response &res) {

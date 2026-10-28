@@ -11,18 +11,13 @@
 
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
-#include "absl/strings/str_split.h"
 
 #include "arrow/result.h"
 #include "arrow/util/uri.h"
 
-#include <algorithm>
-#include <arpa/inet.h>
-#include <cctype>
 #include <cstdlib>
 #include <fnmatch.h>
 #include <iostream>
-#include <netinet/in.h>
 #include <ostream>
 #include <sstream>
 #include <sys/stat.h>
@@ -52,64 +47,21 @@ std::string AddressIssueMessage(const char *what, const std::exception &e) {
     return w;
 }
 
-constexpr size_t kMaxListenAddressBytes = 512;
-
-std::string UnbracketHost(const std::string &host) {
-    if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
-        return host.substr(1, host.size() - 2);
-    }
-    return host;
-}
-
-bool IsDnsHostname(const std::string &host) {
-    if (host.empty() || host.size() > 253) {
-        return false;
-    }
-    for (absl::string_view label : absl::StrSplit(host, '.')) {
-        // RFC 1123 2.1: 1-63 chars, letters/digits/hyphen, no leading or trailing hyphen.
-        if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-') {
-            return false;
-        }
-        if (!std::all_of(label.begin(), label.end(), [](char c) {
-                return absl::ascii_isalnum(static_cast<unsigned char>(c)) || c == '-';
-            })) {
-            return false;
-        }
-    }
-    // RFC 1123 2.1: an all-numeric top label is not a DNS name. Numeric hosts must be IP
-    // literals (checked by IsIpLiteral first), so 1.2.3.999 / 256.1.1.1 / 999 are refused.
-    const auto dot = host.rfind('.');
-    const absl::string_view top = dot == std::string::npos
-                                      ? absl::string_view(host)
-                                      : absl::string_view(host).substr(dot + 1);
-    return !std::all_of(top.begin(), top.end(),
-                        [](char c) { return absl::ascii_isdigit(static_cast<unsigned char>(c)); });
-}
-
-bool IsIpLiteral(const std::string &host) {
-    in_addr v4{};
-    return ::inet_aton(host.c_str(), &v4) != 0;
-}
-
 } // namespace
 
 std::pair<std::string, int> ParseListenAddress(const std::string &listen, const char *what,
                                                AddressUse use, int default_port) {
-    if (listen.empty() || listen.size() > kMaxListenAddressBytes) {
+    if (listen.empty()) {
         throw PolicyError(std::string(what) + ": HOST:PORT is required");
     }
     const auto scheme_end = listen.find("://");
-    if (scheme_end != std::string::npos) {
-        const auto scheme = listen.substr(0, scheme_end);
-        if (scheme != absl::AsciiStrToLower(scheme)) {
-            throw PolicyError(std::string(what) + ": scheme is invalid / not accepted");
+    if (use == AddressUse::FlightUrl) {
+        if (scheme_end == std::string::npos) {
+            throw PolicyError(std::string(what) + ": scheme must be grpc:// or grpc+tls://");
         }
-        if (use == AddressUse::FlightUrl) {
-            if (scheme != "grpc" && scheme != "grpc+tls") {
-                throw PolicyError(std::string(what) + ": scheme must be grpc:// or grpc+tls://");
-            }
-        } else {
-            throw PolicyError(std::string(what) + ": scheme is invalid / not accepted");
+        const auto scheme = absl::AsciiStrToLower(listen.substr(0, scheme_end));
+        if (scheme != "grpc" && scheme != "grpc+tls") {
+            throw PolicyError(std::string(what) + ": scheme must be grpc:// or grpc+tls://");
         }
     }
     std::string spec = listen;
@@ -124,10 +76,9 @@ std::pair<std::string, int> ParseListenAddress(const std::string &listen, const 
     if (!uri->username().empty() || !uri->password().empty() || absl::StrContains(spec, '@')) {
         throw PolicyError(std::string(what) + ": must not contain userinfo");
     }
-    // arrow::util::Uri has no fragment accessor; '#' is never valid in a host:port URL.
-    // A lone trailing '?' leaves query_string empty and would otherwise be published as-is.
-    if (!(uri->path().empty() || uri->path() == "/") || !uri->query_string().empty() ||
-        absl::StrContains(spec, '#') || absl::StrContains(listen, '?')) {
+    if (use == AddressUse::FlightUrl &&
+        (!(uri->path().empty() || uri->path() == "/") || !uri->query_string().empty() ||
+         absl::StrContains(spec, '#'))) {
         throw PolicyError(std::string(what) + ": must be HOST:PORT only");
     }
     const std::string host = uri->host();
@@ -142,19 +93,6 @@ std::pair<std::string, int> ParseListenAddress(const std::string &listen, const 
             throw PolicyError(std::string(what) + ": HOST:PORT is required");
         }
     }
-    if (port == 0) {
-        throw PolicyError(std::string(what) + ": port 0 is not accepted");
-    }
-    // uri->host() is percent-decoded (canonical). '%' in the input means the host
-    // was not written in canonical form. A bracketed host must be IPv6 (no IPvFuture).
-    // Unbracketed hosts are an IPv4 literal (inet_aton) or a DNS name.
-    const bool bracketed = absl::StrContains(spec, '[');
-    const bool encoded = absl::StrContains(spec, '%');
-    in6_addr v6{};
-    if (encoded || (bracketed && ::inet_pton(AF_INET6, host.c_str(), &v6) != 1) ||
-        (!bracketed && !IsIpLiteral(host) && !IsDnsHostname(host))) {
-        throw PolicyError(std::string(what) + ": host must be a DNS name or IP address");
-    }
     return {host, port};
 }
 
@@ -168,19 +106,7 @@ bool IsLoopbackHost(const std::string &host) {
 }
 
 bool IsWildcardHost(const std::string &host) {
-    // Classify by address, not spelling: 0, 0x0, 0.0, 000.000.000.000, ::0,
-    // and ::ffff:0.0.0.0 are the same unspecified bind as 0.0.0.0 / ::.
-    const std::string h = UnbracketHost(host);
-    in6_addr v6{};
-    if (::inet_pton(AF_INET6, h.c_str(), &v6) == 1) {
-        if (IN6_IS_ADDR_UNSPECIFIED(&v6)) {
-            return true;
-        }
-        return IN6_IS_ADDR_V4MAPPED(&v6) && v6.s6_addr[12] == 0 && v6.s6_addr[13] == 0 &&
-               v6.s6_addr[14] == 0 && v6.s6_addr[15] == 0;
-    }
-    in_addr v4{};
-    return ::inet_aton(h.c_str(), &v4) != 0 && v4.s_addr == htonl(INADDR_ANY);
+    return host == "0.0.0.0" || host == "::" || host == "[::]";
 }
 
 std::string DefaultInternalListen(const std::string &listen) {
@@ -189,11 +115,6 @@ std::string DefaultInternalListen(const std::string &listen) {
 }
 
 void FinalizeDaemonListen(DaemonConfig &cfg) {
-    // A bare HOST:PORT advertised_address is published as a Flight URL clients can dial.
-    if (!cfg.advertised_address.empty() &&
-        cfg.advertised_address.find("://") == std::string::npos) {
-        cfg.advertised_address = "grpc://" + cfg.advertised_address;
-    }
     if (cfg.internal_listen.empty()) {
         auto lp = ParseListenAddress(cfg.listen, "listen");
         if (IsLoopbackHost(lp.first)) {
@@ -208,8 +129,10 @@ void FinalizeDaemonListen(DaemonConfig &cfg) {
         if (LeaseEndpointConfigured(cfg) && IsWildcardHost(lp.first)) {
             // Multi-node cannot publish a wildcard; ValidateDaemonOrThrow names the option.
         } else {
-            // Bind listen is HOST:PORT (no scheme). Publish the Flight URL from that bind.
-            cfg.advertised_address = "grpc://" + cfg.listen;
+            // listen may carry a scheme (ParseListenAddress accepts one); publish host:port only.
+            const auto sep = cfg.listen.find("://");
+            cfg.advertised_address =
+                "grpc://" + (sep == std::string::npos ? cfg.listen : cfg.listen.substr(sep + 3));
         }
     }
 }
@@ -617,17 +540,14 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     auto add = [&](const std::string &path, const std::string &msg) {
         issues.push_back({path, msg});
     };
-    std::pair<std::string, int> listen_hp;
-    bool listen_ok = false;
     try {
-        listen_hp = ParseListenAddress(cfg.listen, "listen");
-        listen_ok = true;
-        if (LeaseEndpointConfigured(cfg) && IsWildcardHost(listen_hp.first) &&
+        auto lp = ParseListenAddress(cfg.listen, "listen");
+        if (lp.second <= 0 || lp.second > 65535) {
+            add("listen", "port out of range");
+        }
+        if (LeaseEndpointConfigured(cfg) && IsWildcardHost(lp.first) &&
             cfg.advertised_address.empty()) {
-            add("advertised_address",
-                "required when listen is a wildcard (0, 0x0, 00, 0.0, 000.000.000.000, "
-                "0x00000000, 0.0.0.0, ::, [::], ::0, [::0], 0:0:0:0:0:0:0:0, "
-                "[0:0:0:0:0:0:0:0], ::ffff:0.0.0.0, or [::ffff:0.0.0.0]) in multi-node mode");
+            add("advertised_address", "required when listen is a wildcard in multi-node mode");
         }
     } catch (const std::exception &e) {
         add("listen", AddressIssueMessage("listen", e));
@@ -681,14 +601,6 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     if (!cfg.debug_http.empty() && !cfg.allow_insecure_dev) {
         add("debug_http", "requires auth.allow_insecure_dev");
     }
-    if (!cfg.debug_http.empty()) {
-        // Validate here: StartDebugHttp runs on a detached thread, where a throw is std::terminate.
-        try {
-            (void)ParseListenAddress(cfg.debug_http, "debug_http", AddressUse::Bind, 4748);
-        } catch (const std::exception &e) {
-            add("debug_http", AddressIssueMessage("debug_http", e));
-        }
-    }
     if (cfg.handle_ttl_seconds <= 0) {
         add("limits.handle_ttl_seconds", "must be > 0");
     }
@@ -697,8 +609,9 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
             SteadyClockTimeoutMaxMessage("lease.proxy_first_message_max_ms"));
     }
     try {
-        if (listen_ok && !cfg.internal_listen_configured) {
-            if (!IsLoopbackHost(listen_hp.first)) {
+        auto lp = ParseListenAddress(cfg.listen, "listen");
+        if (!cfg.internal_listen_configured) {
+            if (!IsLoopbackHost(lp.first)) {
                 add("internal_listen",
                     "required when listen is not loopback (never expose the internal listener)");
             } else if (!cfg.lease.advertise.empty()) {
@@ -709,7 +622,11 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
             }
         }
         if (!cfg.internal_listen.empty()) {
-            (void)ParseListenAddress(cfg.internal_listen, "internal_listen");
+            auto ip =
+                ParseListenAddress(cfg.internal_listen, "internal_listen", AddressUse::Bind, 5747);
+            if (ip.second <= 0 || ip.second > 65535) {
+                add("internal_listen", "port out of range");
+            }
         }
     } catch (const std::exception &e) {
         add("internal_listen", AddressIssueMessage("internal_listen", e));
@@ -726,7 +643,11 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     if (!cfg.metrics_listen.empty() && cfg.metrics_listen != "off" &&
         cfg.metrics_listen != "false") {
         try {
-            (void)ParseListenAddress(cfg.metrics_listen, "metrics.listen");
+            auto mp =
+                ParseListenAddress(cfg.metrics_listen, "metrics.listen", AddressUse::Bind, 9477);
+            if (mp.second <= 0 || mp.second > 65535) {
+                add("metrics.listen", "port out of range");
+            }
         } catch (const std::exception &e) {
             add("metrics.listen", AddressIssueMessage("metrics.listen", e));
         }

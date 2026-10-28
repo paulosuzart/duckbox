@@ -134,7 +134,7 @@ std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::strin
                                        ListenerPlane plane = ListenerPlane::Public);
 
 bool IsLoopbackHost(const std::string &host);
-bool IsWildcardHost(const std::string &host);                 // unspecified IPv4/IPv6, any spelling
+bool IsWildcardHost(const std::string &host); // 0.0.0.0 / :: — cannot be advertised
 std::string DefaultInternalListen(const std::string &listen); // 127.0.0.1:<port+1000>
 void FinalizeDaemonListen(
     DaemonConfig &cfg); // fill internal_listen / advertise / advertised_address
@@ -151,11 +151,8 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg);
 bool GlobMatch(const std::string &pattern,
                const std::string &value); // POSIX fnmatch; caller key patterns
 enum class AddressUse { Bind, FlightUrl };
-// HOST:PORT. Arrow URI parser. Never echoes `listen`.
-// Bind (listen, internal_listen, metrics, debug_http): no scheme; bare HOST:PORT.
-// FlightUrl (advertised_address, lease.advertise): grpc:// or grpc+tls://, or bare HOST:PORT.
-// Rejects missing port (unless default_port > 0), port 0, userinfo, IPvFuture,
-// and non-canonical percent-encoding. DNS host: [A-Za-z0-9.-], labels 1-63, total <= 253.
+// Arrow URI parser. Never echoes the input. Bind: HOST:PORT (optional scheme).
+// FlightUrl: grpc:// or grpc+tls:// and a port. Rejects userinfo without echoing it.
 std::pair<std::string, int> ParseListenAddress(const std::string &listen,
                                                const char *what = "listen",
                                                AddressUse use = AddressUse::Bind,

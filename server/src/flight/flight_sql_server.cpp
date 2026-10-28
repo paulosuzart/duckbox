@@ -2104,7 +2104,7 @@ int RunServer(const ServerOptions &opt_in) {
         return 1;
     }
 
-    auto ip = ParseListenAddress(ilisten, "internal_listen");
+    auto ip = ParseListenAddress(ilisten, "internal_listen", AddressUse::Bind, 5747);
     std::string flight = opt.daemon.lease.advertise;
     if (flight.empty()) {
         flight = "grpc://" + ip.first + ":" + std::to_string(internal->port());

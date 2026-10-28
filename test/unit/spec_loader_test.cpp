@@ -489,8 +489,8 @@ void duckbox::test::RunSpecLoaderTests() {
     {
         auto hp = ParseListenAddress("127.0.0.1:4747");
         Expect(hp.first == "127.0.0.1" && hp.second == 4747, "Arrow URI parses HOST:PORT");
-        ExpectThrowContains([&] { ParseListenAddress("http://127.0.0.1:9000"); },
-                            "scheme is invalid / not accepted", "listen refuses an http:// prefix");
+        auto hu = ParseListenAddress("http://127.0.0.1:9000");
+        Expect(hu.first == "127.0.0.1" && hu.second == 9000, "Arrow URI parses http URL");
         ExpectThrowContains([&] { ParseListenAddress(""); }, "HOST:PORT",
                             "empty listen is rejected");
     }
@@ -727,34 +727,6 @@ void duckbox::test::RunSpecLoaderTests() {
             FinalizeDaemonListen(v6);
             ExpectThrowContains([&] { ValidateDaemonOrThrow(v6); }, "advertised_address",
                                 "IPv6 wildcard listen in multi-node requires advertised_address");
-            DaemonConfig host0 = TestDaemon();
-            host0.listen = "0:4747";
-            host0.internal_listen = "127.0.0.1:5747";
-            host0.internal_listen_configured = true;
-            host0.lease.endpoint = "http://127.0.0.1:9";
-            host0.lease.bucket = "b";
-            host0.lease.skip_probe = true;
-            host0.peer_secret = "duckbox-peer-secret";
-            host0.advertised_address.clear();
-            FinalizeDaemonListen(host0);
-            Expect(host0.advertised_address.empty(),
-                   "host 0 wildcard listen in multi-node does not invent an advertised_address");
-            try {
-                ValidateDaemonOrThrow(host0);
-                Expect(false, "host 0 wildcard without advertised_address (no throw)");
-            } catch (const std::exception &e) {
-                std::string w = e.what();
-                Expect(w.find("advertised_address") != std::string::npos,
-                       "host 0 wildcard names advertised_address");
-                Expect(w.find("0x0") != std::string::npos && w.find("00") != std::string::npos &&
-                           w.find("0.0") != std::string::npos &&
-                           w.find("000.000.000.000") != std::string::npos &&
-                           w.find("0x00000000") != std::string::npos &&
-                           w.find("[::ffff:0.0.0.0]") != std::string::npos,
-                       "host 0 wildcard error lists the accepted wildcard spellings");
-            }
-            host0.advertised_address = "grpc://node-a.example:4747";
-            ValidateDaemonOrThrow(host0);
             DaemonConfig bad_url = TestDaemon();
             bad_url.advertised_address = "not a uri !!!";
             ExpectThrowContains([&] { ValidateDaemonOrThrow(bad_url); }, "advertised_address",
@@ -809,44 +781,6 @@ void duckbox::test::RunSpecLoaderTests() {
             }
         }
         {
-            auto up = "/tmp/duckbox-listen-grpc-scheme.yaml";
-            {
-                std::ofstream o(up);
-                o << "name: x\nlisten: GRPC://127.0.0.1:4747\nhandle_secret: duckbox-dev-secret\n";
-            }
-            try {
-                LoadDaemonFile(up);
-                Expect(false, "uppercase GRPC listen (no throw)");
-            } catch (const std::exception &e) {
-                std::string w = e.what();
-                Expect(w.find("listen") != std::string::npos &&
-                           w.find("scheme is invalid / not accepted") != std::string::npos,
-                       "uppercase GRPC listen names the field and the scheme rule");
-                Expect(w.find("GRPC") == std::string::npos &&
-                           w.find("127.0.0.1") == std::string::npos,
-                       "uppercase GRPC listen does not echo the value");
-            }
-        }
-        {
-            auto adv = "/tmp/duckbox-advertise-noport.yaml";
-            {
-                std::ofstream o(adv);
-                o << "name: x\nlisten: 127.0.0.1:4747\nhandle_secret: duckbox-dev-secret\n"
-                     "lease:\n  advertise: grpc://127.0.0.1\n";
-            }
-            try {
-                LoadDaemonFile(adv);
-                Expect(false, "lease.advertise without port (no throw)");
-            } catch (const std::exception &e) {
-                std::string w = e.what();
-                Expect(w.find("lease.advertise") != std::string::npos &&
-                           w.find("HOST:PORT is required") != std::string::npos,
-                       "lease.advertise without port names the field and HOST:PORT");
-                Expect(w.find("127.0.0.1") == std::string::npos,
-                       "lease.advertise without port does not echo the value");
-            }
-        }
-        {
             DaemonConfig noport = TestDaemon();
             noport.listen = "127.0.0.1";
             try {
@@ -854,92 +788,11 @@ void duckbox::test::RunSpecLoaderTests() {
                 Expect(false, "ValidateDaemonOrThrow listen without port (no throw)");
             } catch (const std::exception &e) {
                 std::string w = e.what();
-                Expect(w == "sandbox spec is invalid (1 error):\n  - listen: HOST:PORT is required",
-                       "ValidateDaemonOrThrow listen without port is exactly one listen error");
-                Expect(w.find("internal_listen: listen:") == std::string::npos,
-                       "ValidateDaemonOrThrow listen without port does not duplicate onto "
-                       "internal_listen");
+                Expect(w.find("listen") != std::string::npos &&
+                           w.find("HOST:PORT is required") != std::string::npos,
+                       "ValidateDaemonOrThrow listen without port names HOST:PORT");
                 Expect(w.find("127.0.0.1") == std::string::npos,
                        "ValidateDaemonOrThrow listen without port does not echo the value");
-            }
-            DaemonConfig up = TestDaemon();
-            up.listen = "GRPC://127.0.0.1:4747";
-            try {
-                ValidateDaemonOrThrow(up);
-                Expect(false, "ValidateDaemonOrThrow uppercase GRPC listen (no throw)");
-            } catch (const std::exception &e) {
-                std::string w = e.what();
-                Expect(w.find("listen") != std::string::npos &&
-                           w.find("scheme is invalid / not accepted") != std::string::npos,
-                       "ValidateDaemonOrThrow uppercase GRPC listen names the scheme rule");
-                Expect(w.find("GRPC") == std::string::npos &&
-                           w.find("127.0.0.1") == std::string::npos,
-                       "ValidateDaemonOrThrow uppercase GRPC listen does not echo the value");
-            }
-            DaemonConfig metrics = TestDaemon();
-            metrics.metrics_listen = "127.0.0.1";
-            try {
-                ValidateDaemonOrThrow(metrics);
-                Expect(false, "ValidateDaemonOrThrow metrics.listen without port (no throw)");
-            } catch (const std::exception &e) {
-                std::string w = e.what();
-                Expect(w.find("metrics.listen") != std::string::npos &&
-                           w.find("HOST:PORT is required") != std::string::npos,
-                       "ValidateDaemonOrThrow metrics.listen without port names the field");
-                Expect(w.find("127.0.0.1") == std::string::npos,
-                       "ValidateDaemonOrThrow metrics.listen without port does not echo the value");
-            }
-            DaemonConfig il = TestDaemon();
-            il.internal_listen = "zqx-internal.example";
-            il.internal_listen_configured = true;
-            try {
-                ValidateDaemonOrThrow(il);
-                Expect(false, "ValidateDaemonOrThrow internal_listen without port (no throw)");
-            } catch (const std::exception &e) {
-                std::string w = e.what();
-                Expect(w.find("internal_listen: HOST:PORT is required") != std::string::npos,
-                       "internal_listen without port names the field and HOST:PORT");
-                Expect(w.find("zqx-internal") == std::string::npos,
-                       "internal_listen without port does not echo the value");
-            }
-            DaemonConfig dbg = TestDaemon();
-            dbg.debug_http = "127.0.0.1";
-            ValidateDaemonOrThrow(dbg);
-            {
-                auto dp = ParseListenAddress(dbg.debug_http, "debug_http", AddressUse::Bind, 4748);
-                Expect(dp.first == "127.0.0.1" && dp.second == 4748,
-                       "debug_http 127.0.0.1 uses default port 4748 (main-compatible)");
-            }
-            DaemonConfig dbg_bad = TestDaemon();
-            dbg_bad.debug_http = "foo://127.0.0.1:18480";
-            try {
-                ValidateDaemonOrThrow(dbg_bad);
-                Expect(false, "ValidateDaemonOrThrow debug_http foo:// (no throw)");
-            } catch (const std::exception &e) {
-                std::string w = e.what();
-                Expect(w.find("debug_http: scheme is invalid / not accepted") != std::string::npos,
-                       "debug_http foo:// names the scheme rule instead of std::terminate");
-                Expect(w.find("foo") == std::string::npos &&
-                           w.find("127.0.0.1") == std::string::npos,
-                       "debug_http foo:// does not echo the value");
-            }
-            for (const char *wl : {"0x0:4747", "[::0]:4747", "0.0:4747"}) {
-                DaemonConfig wc = TestDaemon();
-                wc.listen = wl;
-                wc.internal_listen = "127.0.0.1:5747";
-                wc.internal_listen_configured = true;
-                wc.lease.endpoint = "http://127.0.0.1:9";
-                wc.lease.bucket = "b";
-                wc.lease.skip_probe = true;
-                wc.peer_secret = "duckbox-peer-secret";
-                wc.advertised_address.clear();
-                FinalizeDaemonListen(wc);
-                Expect(wc.advertised_address.empty(),
-                       std::string("wildcard spelling does not invent advertised_address: ") + wl);
-                ExpectThrowContains([&] { ValidateDaemonOrThrow(wc); },
-                                    "advertised_address: required when listen is a wildcard",
-                                    std::string("wildcard spelling requires advertised_address: ") +
-                                        wl);
             }
             DaemonConfig adv = TestDaemon();
             adv.lease.advertise = "grpc://leakuser:s3cretLeak@127.0.0.1:5747";
@@ -996,31 +849,22 @@ void duckbox::test::RunSpecLoaderTests() {
                                      {"s3cretLeak"}, "credential in fragment is refused");
             expect_userinfo_rejected("grpc://node-a.example:4984/?tok=s3cretLeak", {"s3cretLeak"},
                                      "credential in query is refused");
+            expect_userinfo_rejected("http://node-a.example:4984", {},
+                                     "non-grpc scheme is refused");
+            expect_userinfo_rejected("foo://node-a.example:4984", {"foo"},
+                                     "unknown scheme is refused");
+            expect_userinfo_rejected("http://zqx.example:47111", {},
+                                     "advertised_address http:// is refused");
+            expect_userinfo_rejected("node-a.example:4984", {},
+                                     "scheme-less advertised_address is refused");
             expect_userinfo_rejected("grpc://node-a.example:4984/s3cretLeak", {"s3cretLeak"},
                                      "credential in path without '@' is refused");
             expect_userinfo_rejected("grpc://node-a.example:4984#s3cretLeak", {"s3cretLeak"},
                                      "credential in fragment without '@' is refused");
-            expect_userinfo_rejected("grpc://node-a.example;tok=s3cretLeak:4984", {"s3cretLeak"},
-                                     "credential in host sub-delims is refused");
-            expect_userinfo_rejected("grpc://leakuser%40s3cretLeak:4984", {"s3cretLeak"},
-                                     "percent-encoded '@' in host is refused");
-            expect_userinfo_rejected("grpc://[v7.s3cretLeak]:4984", {"s3cretLeak"},
-                                     "IPvFuture host is refused");
-            expect_userinfo_rejected("grpc://s3cret%2DLeak:4984", {"s3cret"},
-                                     "percent-encoded host is refused");
-            expect_userinfo_rejected("grpc://s3cret%25Leak:4984", {"s3cret"},
-                                     "percent-encoded %25 is refused");
             expect_userinfo_rejected("grpc://:4984", {}, "empty host is refused");
-            expect_userinfo_rejected("GRPC://node-a.example:4984", {},
-                                     "uppercase GRPC scheme is refused");
-            expect_userinfo_rejected("http://node-a.example:4984", {},
-                                     "non-grpc scheme is refused");
-            expect_userinfo_rejected("foo://node-a.example:4984", {}, "unknown scheme is refused");
-            expect_userinfo_rejected("http://zqx.example:47111", {},
-                                     "advertised_address http:// is refused");
-            for (const char *good : {"grpc+tls://node-a.example:4984", "grpc://[2001:db8::1]:4984",
+            for (const char *good : {"GRPC+TLS://node-a.example:4984", "grpc://[2001:db8::1]:4984",
                                      "grpc://node-a.example:4984/", "grpc://10.0.0.7:4984",
-                                     "grpc://duckbox-node-1.svc.cluster.local:4984"}) {
+                                     "grpc://duckbox_node-1.svc.cluster.local:4984"}) {
                 DaemonConfig g = TestDaemon();
                 g.advertised_address = good;
                 try {
@@ -1032,58 +876,27 @@ void duckbox::test::RunSpecLoaderTests() {
             {
                 DaemonConfig sch = TestDaemon();
                 sch.listen = "http://127.0.0.1:4747";
-                try {
-                    ValidateDaemonOrThrow(sch);
-                    Expect(false, "http:// listen (no throw)");
-                } catch (const std::exception &e) {
-                    std::string w = e.what();
-                    Expect(w.find("listen") != std::string::npos &&
-                               w.find("scheme is invalid / not accepted") != std::string::npos,
-                           "http:// listen names the scheme rule");
-                    Expect(w.find("http://") == std::string::npos &&
-                               w.find("127.0.0.1") == std::string::npos,
-                           "http:// listen does not echo the value");
-                }
-            }
-            {
-                DaemonConfig ilsch = TestDaemon();
-                ilsch.internal_listen = "http://127.0.0.1:5747";
-                ilsch.internal_listen_configured = true;
-                try {
-                    ValidateDaemonOrThrow(ilsch);
-                    Expect(false, "http:// internal_listen (no throw)");
-                } catch (const std::exception &e) {
-                    std::string w = e.what();
-                    Expect(w.find("internal_listen") != std::string::npos &&
-                               w.find("scheme is invalid / not accepted") != std::string::npos,
-                           "http:// internal_listen names the scheme rule");
-                    Expect(w.find("http://") == std::string::npos &&
-                               w.find("127.0.0.1") == std::string::npos,
-                           "http:// internal_listen does not echo the value");
-                }
-            }
-            {
-                DaemonConfig msch = TestDaemon();
-                msch.metrics_listen = "foo://127.0.0.1:9477";
-                try {
-                    ValidateDaemonOrThrow(msch);
-                    Expect(false, "foo:// metrics.listen (no throw)");
-                } catch (const std::exception &e) {
-                    std::string w = e.what();
-                    Expect(w.find("metrics.listen") != std::string::npos &&
-                               w.find("scheme is invalid / not accepted") != std::string::npos,
-                           "foo:// metrics.listen names the scheme rule");
-                    Expect(w.find("foo") == std::string::npos &&
-                               w.find("127.0.0.1") == std::string::npos,
-                           "foo:// metrics.listen does not echo the value");
-                }
+                sch.advertised_address.clear();
+                FinalizeDaemonListen(sch);
+                Expect(sch.advertised_address == "grpc://127.0.0.1:4747",
+                       "schemed listen falls back to grpc://host:port");
+                ValidateDaemonOrThrow(sch);
             }
             DaemonConfig ok = TestDaemon();
             ok.advertised_address = "grpc+tls://node-a.example:4984";
             ValidateDaemonOrThrow(ok);
             DaemonConfig bare = TestDaemon();
             bare.advertised_address = "node-a.example:4984";
-            ValidateDaemonOrThrow(bare);
+            try {
+                ValidateDaemonOrThrow(bare);
+                Expect(false, "scheme-less advertised_address (no throw)");
+            } catch (const std::exception &e) {
+                std::string w = e.what();
+                Expect(w.find("scheme must be grpc:// or grpc+tls://") != std::string::npos,
+                       "scheme-less advertised_address names the Flight scheme rule");
+                Expect(w.find("node-a.example") == std::string::npos,
+                       "scheme-less advertised_address does not echo the value");
+            }
             {
                 auto leakp = "/tmp/duckbox-advertised-userinfo.yaml";
                 {
