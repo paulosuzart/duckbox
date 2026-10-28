@@ -20,8 +20,10 @@ void ExpectReject(const std::string &addr, const std::string &needle, const char
                               std::string(msg) + " names the rule");
         duckbox::test::Expect(w.find(what) != std::string::npos,
                               std::string(msg) + " names the field");
-        duckbox::test::Expect(w.find(addr) == std::string::npos,
-                              std::string(msg) + " does not echo the address");
+        if (!addr.empty()) {
+            duckbox::test::Expect(w.find(addr) == std::string::npos,
+                                  std::string(msg) + " does not echo the address");
+        }
         for (const auto &s : secrets) {
             duckbox::test::Expect(w.find(s) == std::string::npos,
                                   std::string(msg) + " does not echo credential");
