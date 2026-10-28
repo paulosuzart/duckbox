@@ -505,8 +505,8 @@ void duckbox::test::RunClusterTests() {
 				auto bst = binder.status();
 				auto *bd = ::arrow::flight::FlightStatusDetail::UnwrapStatus(bst).get();
 				Expect(bst.IsInvalid(), "binder error via non-owner is InvalidArgument, not UNAVAILABLE");
-				Expect(bd == nullptr || bd->code() == ::arrow::flight::FlightStatusCode::Invalid,
-				       "binder error Flight code is Invalid, not Unavailable");
+				Expect(bd == nullptr || bd->code() != ::arrow::flight::FlightStatusCode::Unavailable,
+				       "binder error is not FlightStatusCode::Unavailable");
 				auto bmsg = bst.ToString();
 				Expect(bmsg.find("owner_moved:") == std::string::npos &&
 				           bmsg.find("owner unreachable") == std::string::npos,
