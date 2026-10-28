@@ -99,7 +99,7 @@ void StartDebugHttp(const ServerOptions &opt, std::shared_ptr<SandboxRegistry> d
                     std::shared_ptr<SandboxRuntime> runtime) {
     httplib::Server svr;
     InstallDebugHttpRoutes(svr, opt, std::move(defs), std::move(runtime));
-    auto [host, port] = ParseListenAddress(opt.daemon.debug_http, 4748);
+    auto [host, port] = ParseListenAddress(opt.daemon.debug_http, "debug_http");
     std::clog << "debug HTTP listening on " << host << ":" << port << "\n";
     svr.listen(host, port);
 }

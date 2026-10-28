@@ -38,6 +38,7 @@ void RunSecretRedactPatternTests();
 void RunTempDirectoryTests();
 void RunTokenSanitizeTests();
 void RunDeadlineTests();
+void RunListenAddressTests();
 
 } // namespace test
 } // namespace duckbox

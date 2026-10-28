@@ -1951,7 +1951,7 @@ int RunServer(const ServerOptions &opt_in) {
         return 1;
     }
 
-    auto ip = ParseListenAddress(ilisten, 5747);
+    auto ip = ParseListenAddress(ilisten, "internal_listen");
     std::string flight = opt.daemon.lease.advertise;
     if (flight.empty()) {
         flight = "grpc://" + ip.first + ":" + std::to_string(internal->port());
@@ -1989,7 +1989,7 @@ int RunServer(const ServerOptions &opt_in) {
         }
     });
     std::thread internal_th([&]() { (void)internal->Serve(); });
-    auto lp = ParseListenAddress(opt.daemon.listen, 4747);
+    auto lp = ParseListenAddress(opt.daemon.listen, "listen");
     std::cout << "duckbox Flight SQL listening on grpc://" << lp.first << ":" << pub->port()
               << " (DuckDB " << DUCKBOX_DUCKDB_VERSION << ", control plane only)" << std::endl;
     std::cout << "duckbox internal listener on grpc://" << ip.first << ":" << internal->port()

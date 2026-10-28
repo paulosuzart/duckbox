@@ -38,5 +38,6 @@ int main() {
     RunTempDirectoryTests();
     RunTokenSanitizeTests();
     RunDeadlineTests();
+    RunListenAddressTests();
     return ReportAndExit("unit");
 }

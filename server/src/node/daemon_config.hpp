@@ -55,10 +55,11 @@ struct LeaseSettings {
     std::string advertise; // grpc://host:port; default grpc://listen
     int64_t ttl_ms = 15000;
     int64_t heartbeat_ms = 5000;
-    int64_t skew_ms = 1000;          // steal waits this long past expiry_ms (clock skew)
-    int64_t cache_ms = 250;          // short Acquire cache; 0 disables
-    int64_t gc_ms = 86'400'000;      // tombstone GC age; 0 disables (default 24h)
-    int64_t proxy_timeout_ms = 5000; // peer connect, handshake, GetFlightInfo; added to DoGet deadline
+    int64_t skew_ms = 1000;     // steal waits this long past expiry_ms (clock skew)
+    int64_t cache_ms = 250;     // short Acquire cache; 0 disables
+    int64_t gc_ms = 86'400'000; // tombstone GC age; 0 disables (default 24h)
+    int64_t proxy_timeout_ms =
+        5000; // peer connect, handshake, GetFlightInfo; added to DoGet deadline
     // Ceiling for the proxied DoGet whole-call deadline, and for the owner
     // DescribeHandleArrow mutex wait, when query_timeout_ms is 0.
     int64_t proxy_first_message_max_ms = 60000;
@@ -67,7 +68,7 @@ struct LeaseSettings {
     // After SIGTERM, _Exit if graceful shutdown (Drain + Flight Shutdown) exceeds this.
     // Default 8s = Drain(2s) + Flight Shutdown(2s) + slack. Must be > 0.
     int64_t shutdown_watchdog_ms = 8000;
-    size_t max_leases = 0;           // 0 = unlimited
+    size_t max_leases = 0; // 0 = unlimited
 };
 
 // Trusted caller → allowed tenant-key globs. Empty list is allow-all only when
@@ -134,7 +135,7 @@ std::string AuthenticateCallerIdentity(const DaemonConfig &cfg, const std::strin
                                        ListenerPlane plane = ListenerPlane::Public);
 
 bool IsLoopbackHost(const std::string &host);
-bool IsWildcardHost(const std::string &host); // 0.0.0.0 / :: — cannot be advertised
+bool IsWildcardHost(const std::string &host);                 // 0 / 0.0.0.0 / :: — wildcard bind
 std::string DefaultInternalListen(const std::string &listen); // 127.0.0.1:<port+1000>
 void FinalizeDaemonListen(
     DaemonConfig &cfg); // fill internal_listen / advertise / advertised_address
@@ -150,8 +151,11 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg);
 
 bool GlobMatch(const std::string &pattern,
                const std::string &value); // POSIX fnmatch; caller key patterns
-// HOST:PORT (optional scheme). Arrow URI parser; default_port if the URI has none.
-std::pair<std::string, int> ParseListenAddress(const std::string &listen, int default_port);
+// HOST:PORT (optional lowercase scheme). Arrow URI parser. Never echoes `listen`.
+// Rejects missing port, port 0, userinfo, IPvFuture, and non-canonical percent-encoding.
+// `what` is the field name used in errors (listen, advertised_address, lease.advertise, …).
+std::pair<std::string, int> ParseListenAddress(const std::string &listen,
+                                               const char *what = "listen");
 // Throws AuthError if this identity may not use sandbox_key.
 void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity,
                      const std::string &sandbox_key);

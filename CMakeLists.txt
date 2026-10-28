@@ -500,7 +500,8 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/secret_redact_test.cpp
   test/unit/temp_directory_test.cpp
   test/unit/token_sanitize_test.cpp
-  test/unit/deadline_test.cpp)
+  test/unit/deadline_test.cpp
+  test/unit/listen_address_test.cpp)
 
 duckbox_add_test(duckbox_guardrail_tests
   test/support/check.cpp
