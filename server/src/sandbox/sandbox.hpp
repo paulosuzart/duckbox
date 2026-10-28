@@ -218,6 +218,10 @@ class SandboxRuntime {
 
     std::shared_ptr<TenantSandbox>
     Get(const SandboxRecord &rec); // warms on miss; respects max_sandboxes
+    // DoGet (#100): serve only if this node instance holds the lease. Never
+    // acquires or takes over. Throws OwnerMovedError (owner + public
+    // advertised_address when known) or UnavailableError (no_owner).
+    std::shared_ptr<TenantSandbox> GetOwned(const SandboxRecord &rec);
     // keep_from_version >= 0 keeps id@v for v >= that (N-1 during stale-handle grace).
     void PassivateId(const std::string &id, const char *reason = "update",
                      int keep_from_version = -1);
@@ -262,6 +266,8 @@ class SandboxRuntime {
     };
 
   private:
+    std::shared_ptr<TenantSandbox> ServeOwned(const SandboxRecord &rec,
+                                              const rewriter::TenantKey &key);
     void EvictIdleLocked();
     void PublishResidentLocked();
     const TenantSandbox *FindIdLocked(const std::string &id) const;

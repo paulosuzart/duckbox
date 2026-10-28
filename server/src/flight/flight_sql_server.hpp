@@ -174,9 +174,6 @@ private:
 	    const common::RedirectError &re, const ::arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
 	    const std::string &key, const std::string &token, const std::shared_ptr<::arrow::Schema> &schema,
 	    const char *op = "get_flight_info");
-	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> MaybeProxyDoGet(
-	    const common::RedirectError &re, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
-	    const std::string &key, const ::arrow::flight::ServerCallContext &context, int64_t query_timeout_ms);
 
 	node::DaemonConfig daemon_;
 	std::shared_ptr<sandbox::SandboxRegistry> defs_;
@@ -295,9 +292,6 @@ public:
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightInfo>> ForwardGetFlightInfo(
 	    const std::string &url, const ::arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
 	    const std::string &key);
-	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> ForwardDoGet(
-	    const std::string &url, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
-	    const std::string &key, const ::arrow::flight::ServerCallContext &context, int64_t query_timeout_ms = 0);
 
 	class InflightGuard {
 	public:

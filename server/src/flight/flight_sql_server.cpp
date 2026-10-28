@@ -249,6 +249,12 @@ Status FromEx(const std::exception &e) {
     return StatusFromException(e);
 }
 
+// Nothing relays DoGet between nodes any more (#100): the internal listener
+// serves only the unary describe and operator actions.
+Status InternalDoGetRejected() {
+    return Status::NotImplemented("DoGet is not served on the internal listener");
+}
+
 std::shared_ptr<::arrow::Buffer> BufOf(const std::string &s) {
     return ::arrow::Buffer::FromString(s);
 }
@@ -1130,56 +1136,6 @@ PeerFlight::ForwardGetFlightInfo(const std::string &url, const FlightDescriptor 
     return stripped;
 }
 
-::arrow::Result<std::unique_ptr<FlightDataStream>>
-PeerFlight::ForwardDoGet(const std::string &url, const Ticket &ticket,
-                         const std::string &sandbox_id, const std::string &key,
-                         const ServerCallContext &context, int64_t query_timeout_ms) {
-    const int64_t bound_ms = FirstMessageBoundMs(query_timeout_ms);
-    const auto deadline = DeadlineAfterMs(bound_ms);
-    ARROW_ASSIGN_OR_RAISE(auto guard, AcquireInflight(url));
-    ARROW_ASSIGN_OR_RAISE(auto transport, StreamTransport(url, deadline));
-    if (DeadlineReached(deadline)) {
-        return PeerTimeoutStatus();
-    }
-    auto opt = StreamOpt(sandbox_id, key, deadline);
-    std::unique_ptr<::arrow::flight::internal::ClientDataStream> raw;
-    auto start = transport->DoGet(opt, ticket, &raw);
-    if (!start.ok()) {
-        return ProxyStatus(AsProxyTimeoutIfDue(start, deadline), "do_get");
-    }
-    std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream(std::move(raw));
-    auto state = std::make_shared<StreamCall>();
-    state->transport = std::move(transport);
-    state->stream = stream;
-    state->ctx = &context;
-    state->inflight_hold = std::shared_ptr<void>(new InflightGuard(std::move(guard)), [](void *p) {
-        delete static_cast<InflightGuard *>(p);
-    });
-    {
-        std::lock_guard<std::mutex> hold(mu_);
-        inflight_.erase(
-            std::remove_if(inflight_.begin(), inflight_.end(),
-                           [](const std::weak_ptr<::arrow::flight::internal::ClientDataStream> &w) {
-                               return w.expired();
-                           }),
-            inflight_.end());
-        inflight_.push_back(stream);
-    }
-    // Open blocks in ReadData until schema or the whole-call deadline.
-    auto msg_reader = std::make_unique<FlightDataMessageReader>(stream, state);
-    auto opened =
-        ::arrow::ipc::RecordBatchStreamReader::Open(std::move(msg_reader), opt.read_options);
-    if (!opened.ok()) {
-        auto mapped = ProxyStatus(AsProxyTimeoutIfDue(opened.status(), deadline), "do_get");
-        AbandonStream(std::move(stream));
-        state->stream.reset();
-        return mapped;
-    }
-    std::shared_ptr<::arrow::RecordBatchReader> reader = std::move(*opened);
-    return std::make_unique<ProxiedDoGetStream>(std::make_unique<RecordBatchStream>(reader),
-                                                std::move(state));
-}
-
 DuckboxFlightSqlServer::DuckboxFlightSqlServer(
     DaemonConfig daemon, std::shared_ptr<SandboxRegistry> defs,
     std::shared_ptr<SandboxRuntime> runtime, std::shared_ptr<IHandleSigner> signer,
@@ -1441,28 +1397,6 @@ std::string DuckboxFlightSqlServer::LocalAdvertisedLocation() const {
     return rewritten;
 }
 
-::arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::MaybeProxyDoGet(
-    const RedirectError &re, const Ticket &ticket, const std::string &sandbox_id,
-    const std::string &key, const ServerCallContext &context, int64_t query_timeout_ms) {
-    if (plane_ == ListenerPlane::Internal) {
-        return Status::Invalid("not the owner");
-    }
-    if (!peers_) {
-        return Status::Invalid("peer proxy requires auth.peer_secret_ref");
-    }
-    auto t0 = std::chrono::steady_clock::now();
-    Metrics().IncProxy("do_get");
-    auto forwarded =
-        peers_->ForwardDoGet(re.flight(), ticket, sandbox_id, key, context, query_timeout_ms);
-    Metrics().ObserveProxy(
-        "do_get", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-    if (!forwarded.ok()) {
-        Metrics().IncProxyError("do_get", "error");
-        return forwarded.status();
-    }
-    return forwarded;
-}
-
 StatementHandle DuckboxFlightSqlServer::MakeHandle(const CallCtx &c, const std::string &rewritten,
                                                    int user_params) const {
     StatementHandle h;
@@ -1585,26 +1519,21 @@ DuckboxFlightSqlServer::DoGetVerified(const ServerCallContext &context, Statemen
     }
     // Params come from the verified handle. bind_cache_ is a same-node
     // fallback for clients that reuse the original handle on this node.
-    // Local execution uses the cache directly; only the redirect below re-signs.
-    bool params_from_cache = false;
     if (h.params_ipc.empty()) {
-        params_from_cache = bind_cache_.Lookup(cache_key, &h.params_ipc) && !h.params_ipc.empty();
+        (void)bind_cache_.Lookup(cache_key, &h.params_ipc);
     }
     SandboxRuntime::RequestGuard inflight(*runtime_);
+    // Ownership check before ExecuteHandle (#100, C5): no lease write, no
+    // takeover, no peer call. A non-owner answers with the retryable error.
     std::shared_ptr<TenantSandbox> box;
     try {
-        box = runtime_->Get(rec);
-    } catch (const RedirectError &re) {
-        Ticket ticket;
-        // Only the redirect needs a ticket that carries cache-sourced params
-        // (the owner has no copy of this node's cache). The caller was already
-        // verified and authorized above; the token stays bound to the same
-        // tenant/sandbox/version/handle_gen and keeps its expiry.
-        ARROW_ASSIGN_OR_RAISE(auto packed, sql::CreateStatementQueryTicket(
-                                               params_from_cache ? signer_->Sign(h) : cache_key));
-        ticket.ticket = packed;
-        return MaybeProxyDoGet(re, ticket, rec.id, rec.key, context,
-                               rec.spec.resources.query_timeout_ms);
+        box = runtime_->GetOwned(rec);
+    } catch (const OwnerMovedError &) {
+        Metrics().IncRetryableError("do_get", kRetryableOwnerMoved);
+        throw;
+    } catch (const UnavailableError &) {
+        Metrics().IncRetryableError("do_get", kRetryableNoOwner);
+        throw;
     }
     std::vector<ddb::Value> params;
     const std::string &params_ipc = h.params_ipc;
@@ -1627,6 +1556,9 @@ DuckboxFlightSqlServer::DoGetVerified(const ServerCallContext &context, Statemen
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::DoGetStatement(const ServerCallContext &context,
                                        const sql::StatementQueryTicket &command) {
+    if (plane_ == ListenerPlane::Internal) {
+        return InternalDoGetRejected();
+    }
     try {
         StatementHandle h;
         try {
@@ -1789,6 +1721,9 @@ DuckboxFlightSqlServer::GetSchemaPreparedStatement(const ServerCallContext &cont
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::DoGetPreparedStatement(const ServerCallContext &context,
                                                const sql::PreparedStatementQuery &command) {
+    if (plane_ == ListenerPlane::Internal) {
+        return InternalDoGetRejected();
+    }
     try {
         StatementHandle h;
         try {
