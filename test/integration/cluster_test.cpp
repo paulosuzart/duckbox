@@ -13,6 +13,7 @@
 
 #include <arrow/flight/client.h>
 #include <arrow/flight/sql/client.h>
+#include <arrow/ipc/dictionary.h>
 #include <arrow/table.h>
 
 #include <atomic>
@@ -316,12 +317,17 @@ void duckbox::test::RunClusterTests() {
 		oa.ttl_ms = 30'000;
 		S3LeaseOptions ob = oa;
 		ob.owner_id = "node-b";
+		const std::string kAdvA = "grpc://127.0.0.1:4747";
+		const std::string kAdvB = "grpc://127.0.0.1:4748";
 		auto daemon_pa = TestDaemon();
 		daemon_pa.name = "node-a";
 		daemon_pa.peer_secret = "peer-secret-value";
 		daemon_pa.listen = "127.0.0.1:0";
+		daemon_pa.advertised_address = kAdvA;
+		daemon_pa.lease.endpoint = "http://127.0.0.1:9";
 		auto daemon_pb = daemon_pa;
 		daemon_pb.name = "node-b";
+		daemon_pb.advertised_address = kAdvB;
 		auto leases_pa = std::make_shared<S3ConditionalLeaseManager>(s3p, oa, std::shared_ptr<IMetrics>{}, clockp);
 		auto leases_pb = std::make_shared<S3ConditionalLeaseManager>(s3p, ob, std::shared_ptr<IMetrics>{}, clockp);
 		auto rt_pa = std::make_shared<SandboxRuntime>(daemon_pa, leases_pa, defs_p);
@@ -386,6 +392,18 @@ void duckbox::test::RunClusterTests() {
 		ob.flight = "grpc://127.0.0.1:" + std::to_string(nb.int_port);
 		leases_pa->set_flight(oa.flight);
 		leases_pb->set_flight(ob.flight);
+		auto nodes_pa = std::make_shared<S3NodeDirectory>(s3p, oa, std::shared_ptr<IMetrics>{}, clockp);
+		auto nodes_pb = std::make_shared<S3NodeDirectory>(s3p, ob, std::shared_ptr<IMetrics>{}, clockp);
+		nodes_pa->set_flight(oa.flight);
+		nodes_pa->set_advertised_address(kAdvA);
+		nodes_pa->Heartbeat();
+		nodes_pb->set_flight(ob.flight);
+		nodes_pb->set_advertised_address(kAdvB);
+		nodes_pb->Heartbeat();
+		peers_a->SetNodeDirectory(nodes_pa);
+		peers_b->SetNodeDirectory(nodes_pb);
+		rt_pa->SetNodeDirectory(nodes_pa);
+		rt_pb->SetNodeDirectory(nodes_pb);
 
 		auto rec_p = RecordFromSpec(loaded, spec_dir);
 		rec_p.id = "proxy-box";
@@ -405,17 +423,83 @@ void duckbox::test::RunClusterTests() {
 		qopt.headers.emplace_back("x-duckbox-sandbox", "proxy-box");
 		qopt.headers.emplace_back("x-duckbox-caller", "local");
 		auto info_res = sql_b.Execute(qopt, "SELECT id FROM deals ORDER BY id");
-		Expect(info_res.ok(), "GetFlightInfo via non-owner proxies to the owner");
+		Expect(info_res.ok(), "GetFlightInfo via non-owner describes on the owner");
 		if (info_res.ok()) {
 			auto info = std::move(info_res).ValueOrDie();
-			Expect(info->endpoints().size() == 1 && info->endpoints()[0].locations.empty(),
-			       "client endpoint locations are empty (never a peer address)");
+			Expect(info->endpoints().size() == 1 && !info->endpoints()[0].locations.empty(),
+			       "client endpoint location is the owner's advertised address");
+			if (!info->endpoints()[0].locations.empty()) {
+				const std::string loc = info->endpoints()[0].locations[0].ToString();
+				Expect(loc == kAdvA, "statement location is node-a's advertised_address, got " + loc);
+				Expect(loc.find(std::to_string(na.int_port)) == std::string::npos,
+				       "location is never the peer-internal listener");
+			}
+			::arrow::ipc::DictionaryMemo memo;
+			auto schema = info->GetSchema(&memo);
+			Expect(schema.ok() && *schema && (*schema)->GetFieldByName("id"),
+			       "FlightInfo has the real result schema computed by the owner");
 			auto stream_res = bcli->DoGet(qopt, info->endpoints()[0].ticket);
 			Expect(stream_res.ok(), "DoGet via non-owner proxies to the owner");
 			if (stream_res.ok()) {
 				auto tbl = stream_res.ValueOrDie()->ToTable();
 				Expect(tbl.ok() && (*tbl)->num_rows() == 1, "client on a non-owner node gets query rows");
 			}
+		}
+
+		{
+			auto prepared = sql_b.Prepare(qopt, "SELECT id FROM deals ORDER BY id");
+			Expect(prepared.ok(), "CreatePreparedStatement via non-owner");
+			if (prepared.ok()) {
+				auto schema = (*prepared)->dataset_schema();
+				Expect(schema && schema->GetFieldByName("id"),
+				       "CreatePreparedStatement dataset_schema is the owner's real schema");
+				Expect(!schema->GetFieldByName("_empty"),
+				       "CreatePreparedStatement does not return a placeholder _empty schema");
+				auto prep_info = (*prepared)->Execute(qopt);
+				Expect(prep_info.ok() && !(*prep_info)->endpoints().empty() &&
+				           !(*prep_info)->endpoints()[0].locations.empty() &&
+				           (*prep_info)->endpoints()[0].locations[0].ToString() == kAdvA,
+				       "prepared GetFlightInfo location is the owner's advertised address");
+			}
+		}
+
+		{
+			auto tables = sql_b.GetTables(qopt, nullptr, nullptr, nullptr, true, nullptr);
+			Expect(tables.ok() && !(*tables)->endpoints().empty() &&
+			           !(*tables)->endpoints()[0].locations.empty() &&
+			           (*tables)->endpoints()[0].locations[0].ToString() == kAdvA,
+			       "GetTables include_schema location is the owner's advertised address");
+		}
+
+		{
+			auto aloc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", na.pub_port);
+			auto acli_res = ::arrow::flight::FlightClient::Connect(*aloc);
+			Expect(acli_res.ok(), "client connects to the owner public listener");
+			auto acli = std::shared_ptr<::arrow::flight::FlightClient>(std::move(acli_res).ValueOrDie());
+			::arrow::flight::sql::FlightSqlClient sql_a(acli);
+			auto local_info = sql_a.Execute(qopt, "SELECT id FROM deals ORDER BY id");
+			Expect(local_info.ok() && !(*local_info)->endpoints().empty() &&
+			           !(*local_info)->endpoints()[0].locations.empty() &&
+			           (*local_info)->endpoints()[0].locations[0].ToString() == kAdvA,
+			       "multi-node local GetFlightInfo sets this node's advertised address");
+		}
+
+		{
+			clockp->AdvanceMs(2000);
+			nodes_pa->set_advertised_address("");
+			nodes_pa->Heartbeat();
+			clockp->AdvanceMs(2000);
+			auto missing = sql_b.Execute(qopt, "SELECT id FROM deals");
+			Expect(!missing.ok(), "GetFlightInfo fails when the owner has no advertised address");
+			auto msg = missing.status().ToString();
+			Expect(msg.find("owner_moved:") != std::string::npos || msg.find("Unavailable") != std::string::npos,
+			       "missing advertised address is retryable UNAVAILABLE: " + msg);
+			Expect(msg.find(oa.flight) == std::string::npos &&
+			           msg.find(std::to_string(na.int_port)) == std::string::npos,
+			       "missing-address error never returns a peer-internal address: " + msg);
+			nodes_pa->set_advertised_address(kAdvA);
+			nodes_pa->Heartbeat();
+			clockp->AdvanceMs(2000);
 		}
 
 		na.Stop();

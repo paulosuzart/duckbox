@@ -43,6 +43,7 @@ using ::arrow::flight::Location;
 using ::arrow::flight::Ticket;
 using duckbox::cluster::S3ConditionalLeaseManager;
 using duckbox::cluster::S3LeaseOptions;
+using duckbox::cluster::S3NodeDirectory;
 using duckbox::config::LoadPolicyFile;
 using duckbox::flight::DuckboxFlightServer;
 using duckbox::flight::DuckboxFlightSqlServer;
@@ -405,6 +406,18 @@ void duckbox::test::RunBindHandleTests() {
     nb.Start();
     leases_a->set_flight("grpc://127.0.0.1:" + std::to_string(na.int_port));
     leases_b->set_flight("grpc://127.0.0.1:" + std::to_string(nb.int_port));
+    auto nodes_a = std::make_shared<S3NodeDirectory>(
+        s3, oa, std::shared_ptr<duckbox::metrics::IMetrics>{}, clock);
+    auto nodes_b = std::make_shared<S3NodeDirectory>(
+        s3, ob, std::shared_ptr<duckbox::metrics::IMetrics>{}, clock);
+    nodes_a->set_flight("grpc://127.0.0.1:" + std::to_string(na.int_port));
+    nodes_a->set_advertised_address("grpc://127.0.0.1:" + std::to_string(na.pub_port));
+    nodes_a->Heartbeat();
+    nodes_b->set_flight("grpc://127.0.0.1:" + std::to_string(nb.int_port));
+    nodes_b->set_advertised_address("grpc://127.0.0.1:" + std::to_string(nb.pub_port));
+    nodes_b->Heartbeat();
+    peers_a->SetNodeDirectory(nodes_a);
+    peers_b->SetNodeDirectory(nodes_b);
     auto owned = rt_b->Get(rec);
     Expect(owned && leases_b->Peek("bind-handle-box").owned_locally, "node-b owns the sandbox");
 

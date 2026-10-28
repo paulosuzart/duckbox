@@ -206,6 +206,9 @@ public:
 	void set_flight(std::string flight) {
 		opt_.flight = std::move(flight);
 	}
+	void set_advertised_address(std::string address) {
+		opt_.advertised_address = std::move(address);
+	}
 	const std::string &node_id() const {
 		return opt_.owner_id;
 	}

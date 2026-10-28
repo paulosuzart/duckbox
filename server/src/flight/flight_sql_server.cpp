@@ -177,23 +177,29 @@ FlightDescriptor PreparedStatementDescriptor(const std::string &handle) {
 } // namespace
 
 static ::arrow::Status RetryableUnavailable(const char *code, const std::string &client,
-                                            const std::string &owner, const std::string &address) {
+                                            const std::string &owner, const std::string &address,
+                                            const std::string &reason = {}) {
     // ClientFacingError already ran on `client`. Assemble the prefix and
     // optional owner/address, then run the pattern-only safety net again so
     // a leak in those fields cannot reach the tenant. Never pass owner or
-    // address as secret comparison values.
-    auto msg = FormatRetryableMessage(code, client, owner, address);
+    // address as secret comparison values. Fields longer than 256 bytes are
+    // omitted (#107 S2). When the net fires, return a generic retryable
+    // sentence instead of a redacted fragment (#107 S3).
+    std::string extra_owner = owner.size() > kMaxRetryableDetailBytes ? std::string() : owner;
+    std::string extra_address = address.size() > kMaxRetryableDetailBytes ? std::string() : address;
+    auto msg = FormatRetryableMessage(code, client, extra_owner, extra_address);
     auto safe = ClientFacingError(msg);
-    std::string extra_owner = owner;
-    std::string extra_address = address;
     if (safe != msg) {
         extra_owner.clear();
         extra_address.clear();
-        msg = ClientFacingError(FormatRetryableMessage(code, safe, {}, {}));
+        const char *generic = (code != nullptr && std::string(code) == kRetryableNoOwner)
+                                  ? "sandbox has no owner; retry"
+                                  : "sandbox owner changed; retry the query";
+        msg = FormatRetryableMessage(code, generic, {}, {});
     }
     return ::arrow::flight::MakeFlightError(
         ::arrow::flight::FlightStatusCode::Unavailable, msg,
-        FormatRetryableExtraInfo(code, extra_owner, extra_address));
+        FormatRetryableExtraInfo(code, extra_owner, extra_address, reason));
 }
 
 ::arrow::Status StatusFromException(const std::exception &e) {
@@ -214,9 +220,17 @@ static ::arrow::Status RetryableUnavailable(const char *code, const std::string 
     }
     if (auto *moved = dynamic_cast<const OwnerMovedError *>(&e)) {
         return RetryableUnavailable(kRetryableOwnerMoved, client, moved->owner_id(),
-                                    moved->address());
+                                    moved->address(), moved->reason());
     }
     if (dynamic_cast<const UnavailableError *>(&e)) {
+        // Describe timeout / unregistered peer are retryable owner-moved
+        // failures (C2), not "no owner".
+        const std::string raw = e.what();
+        if (absl::StrContains(raw, "describe timed out") ||
+            absl::StrContains(raw, "not a registered node")) {
+            return RetryableUnavailable(kRetryableOwnerMoved, client, {}, {},
+                                        kRetryableOwnerUnreachable);
+        }
         return RetryableUnavailable(kRetryableNoOwner, client, {}, {});
     }
     if (dynamic_cast<const AuthError *>(&e)) {
@@ -249,13 +263,23 @@ std::string CreateUpdateResultJson(const SandboxRecord &rec, const char *action)
     return rec.ToJson();
 }
 
+::arrow::Result<std::vector<Location>> LocationsOf(const std::string &flight_url) {
+    std::vector<Location> locs;
+    if (flight_url.empty()) {
+        return locs;
+    }
+    ARROW_ASSIGN_OR_RAISE(auto loc, ParseFlightLocation(flight_url));
+    locs.push_back(std::move(loc));
+    return locs;
+}
+
 ::arrow::Result<std::unique_ptr<FlightInfo>>
 MakeInfo(const FlightDescriptor &desc, const std::string &token,
          const std::shared_ptr<::arrow::Schema> &schema, const std::string &redirect_flight = "") {
-    (void)redirect_flight; // client locations stay empty; peers are never advertised
     ARROW_ASSIGN_OR_RAISE(auto ticket_str, sql::CreateStatementQueryTicket(token));
+    ARROW_ASSIGN_OR_RAISE(auto locs, LocationsOf(redirect_flight));
     std::vector<FlightEndpoint> endpoints;
-    endpoints.emplace_back(FlightEndpoint{Ticket{ticket_str}, {}, std::nullopt, ""});
+    endpoints.emplace_back(FlightEndpoint{Ticket{ticket_str}, std::move(locs), std::nullopt, ""});
     ARROW_ASSIGN_OR_RAISE(auto info, FlightInfo::Make(*schema, desc, endpoints, -1, -1));
     return std::make_unique<FlightInfo>(std::move(info));
 }
@@ -336,10 +360,14 @@ class PeerClientAuth : public ::arrow::flight::ClientAuthHandler {
     std::string secret_;
 };
 
-std::unique_ptr<FlightInfo> StripLocations(const FlightInfo &info) {
+// Rewrite every endpoint's locations. Empty `locs` strips (peer internal
+// addresses never leave this process). A single advertised address is what
+// clients follow (#99). Never copies locations from the peer FlightInfo.
+std::unique_ptr<FlightInfo> WithEndpointLocations(const FlightInfo &info,
+                                                  const std::vector<Location> &locs) {
     std::vector<FlightEndpoint> eps;
     for (auto &ep : info.endpoints()) {
-        eps.push_back(FlightEndpoint{ep.ticket, {}, ep.expiration_time, ep.app_metadata});
+        eps.push_back(FlightEndpoint{ep.ticket, locs, ep.expiration_time, ep.app_metadata});
     }
     ::arrow::ipc::DictionaryMemo memo;
     auto schema_res = info.GetSchema(&memo);
@@ -350,11 +378,15 @@ std::unique_ptr<FlightInfo> StripLocations(const FlightInfo &info) {
         schema = ::arrow::schema({});
     }
     auto made =
-        FlightInfo::Make(schema, info.descriptor(), eps, info.total_records(), info.total_bytes());
+        FlightInfo::Make(*schema, info.descriptor(), eps, info.total_records(), info.total_bytes());
     if (!made.ok()) {
         return nullptr;
     }
     return std::make_unique<FlightInfo>(made.MoveValueUnsafe());
+}
+
+std::unique_ptr<FlightInfo> StripLocations(const FlightInfo &info) {
+    return WithEndpointLocations(info, {});
 }
 
 using ::arrow::Status;
@@ -405,6 +437,23 @@ bool IsPeerTimeout(const Status &st) {
         return detail->code() == ::arrow::flight::FlightStatusCode::TimedOut;
     }
     return false;
+}
+
+const char *ClassifyRedirectFailure(const Status &st) {
+    if (IsPeerTimeout(st) || absl::StrContains(st.message(), "timed out")) {
+        return "timeout";
+    }
+    if (absl::StrContains(st.message(), "not a registered") ||
+        absl::StrContains(st.message(), "advertise URL is empty")) {
+        return "no_owner_address";
+    }
+    if (st.IsIOError() || absl::StrContains(st.message(), "peer proxy failed") ||
+        absl::StrContains(st.message(), "Connect") ||
+        absl::StrContains(st.message(), "Unavailable") ||
+        absl::StrContains(st.message(), "unavailable")) {
+        return "unreachable";
+    }
+    return "failed";
 }
 
 // Timed out only when the call failed AND (structured TimedOut OR now >= the
@@ -912,6 +961,10 @@ PeerFlight::StreamTransport(const std::string &url, Deadline deadline) {
     return transport;
 }
 
+std::string PeerFlight::AdvertisedAddressOf(const std::string &owner_id) const {
+    return nodes_ ? nodes_->AdvertisedAddressOf(owner_id) : std::string();
+}
+
 void PeerFlight::Shutdown() {
     std::vector<std::shared_ptr<::arrow::flight::internal::ClientDataStream>> live;
     {
@@ -1205,33 +1258,64 @@ std::shared_ptr<TenantSandbox> DuckboxFlightSqlServer::Box(const CallCtx &c) con
     return runtime_->Get(c.rec);
 }
 
-::arrow::Result<std::unique_ptr<FlightInfo>>
-DuckboxFlightSqlServer::MaybeProxyInfo(const RedirectError &re, const FlightDescriptor &descriptor,
-                                       const std::string &sandbox_id, const std::string &key,
-                                       const std::string &token,
-                                       const std::shared_ptr<::arrow::Schema> &schema) {
+std::string DuckboxFlightSqlServer::LocalAdvertisedLocation() const {
+    if (daemon_.lease.endpoint.empty() && daemon_.lease.endpoint_env.empty()) {
+        return "";
+    }
+    return daemon_.advertised_address;
+}
+
+::arrow::Result<std::unique_ptr<FlightInfo>> DuckboxFlightSqlServer::MaybeProxyInfo(
+    const RedirectError &re, const FlightDescriptor &descriptor, const std::string &sandbox_id,
+    const std::string &key, const std::string &token,
+    const std::shared_ptr<::arrow::Schema> &schema, const char *op) {
     if (plane_ == ListenerPlane::Internal) {
         return Status::Invalid("not the owner");
     }
     if (!peers_) {
         return Status::Invalid("peer proxy requires auth.peer_secret_ref");
     }
+    const char *metric_op = (op && *op) ? op : "get_flight_info";
+    // Location is the directory advertised_address, never the peer response
+    // and never lease.flight (internal listener).
+    const std::string advertised = peers_->AdvertisedAddressOf(re.owner_id());
+    if (advertised.empty()) {
+        Metrics().IncRedirectError(metric_op, "no_owner_address");
+        return StatusFromException(OwnerMovedError(re.owner_id(), {}, kRetryableNoOwnerAddress));
+    }
+    auto loc = ParseFlightLocation(advertised);
+    if (!loc.ok()) {
+        Metrics().IncRedirectError(metric_op, "no_owner_address");
+        return StatusFromException(OwnerMovedError(re.owner_id(), {}, kRetryableNoOwnerAddress));
+    }
     auto t0 = std::chrono::steady_clock::now();
     Metrics().IncProxy("get_flight_info");
     auto forwarded = peers_->ForwardGetFlightInfo(re.flight(), descriptor, sandbox_id, key);
-    Metrics().ObserveProxy(
-        "get_flight_info",
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    Metrics().ObserveProxy("get_flight_info", seconds);
+    Metrics().ObserveRedirect(metric_op, seconds);
     if (!forwarded.ok()) {
         Metrics().IncProxyError("get_flight_info", "error");
-        return ProxyStatus(forwarded.status(), "get_flight_info");
+        const char *reason = ClassifyRedirectFailure(forwarded.status());
+        Metrics().IncRedirectError(metric_op, reason);
+        // Timeout, unreachable owner, and mid-handoff "peer proxy failed"
+        // are retryable UNAVAILABLE (owner_moved / owner_unreachable).
+        return StatusFromException(
+            OwnerMovedError(re.owner_id(), advertised, kRetryableOwnerUnreachable));
     }
+    auto rewritten = WithEndpointLocations(**forwarded, {*loc});
+    if (!rewritten) {
+        Metrics().IncRedirectError(metric_op, "failed");
+        return StatusFromException(OwnerMovedError(re.owner_id(), {}, kRetryableNoOwnerAddress));
+    }
+    Metrics().IncRedirect(metric_op);
     // Prepared-statement callers pass a descriptor already rebuilt from
     // `token` (params included). Statement queries keep the original SQL
     // command; the owner re-signs.
     (void)token;
     (void)schema;
-    return forwarded;
+    return rewritten;
 }
 
 ::arrow::Result<std::unique_ptr<FlightDataStream>> DuckboxFlightSqlServer::MaybeProxyDoGet(
@@ -1281,8 +1365,10 @@ DuckboxFlightSqlServer::MetaInfo(const FlightDescriptor &descriptor,
                                  const std::shared_ptr<::arrow::Schema> &schema) const {
     // Ticket is the original Flight SQL command protobuf so DoGet dispatches to
     // DoGetCatalogs/Tables/… (not DoGetStatement).
+    ARROW_ASSIGN_OR_RAISE(auto locs, LocationsOf(LocalAdvertisedLocation()));
     std::vector<FlightEndpoint> endpoints;
-    endpoints.emplace_back(FlightEndpoint{Ticket{descriptor.cmd}, {}, std::nullopt, ""});
+    endpoints.emplace_back(
+        FlightEndpoint{Ticket{descriptor.cmd}, std::move(locs), std::nullopt, ""});
     ARROW_ASSIGN_OR_RAISE(auto info, FlightInfo::Make(*schema, descriptor, endpoints, -1, -1));
     return std::make_unique<FlightInfo>(std::move(info));
 }
@@ -1334,10 +1420,11 @@ DuckboxFlightSqlServer::GetFlightInfoStatement(const ServerCallContext &context,
             // Handle SQL is already rewritten. Describe it as-is; DoGet will
             // ExecuteHandle the same string without wrapping again.
             auto schema = box->DescribeHandleArrow(rw.sql);
-            return Info(descriptor, token, schema);
+            return Info(descriptor, token, schema, LocalAdvertisedLocation());
         } catch (const RedirectError &re) {
             return MaybeProxyInfo(re, descriptor, c.rec.id, c.rec.key, token,
-                                  ::arrow::schema({::arrow::field("_empty", ::arrow::null())}));
+                                  ::arrow::schema({::arrow::field("_empty", ::arrow::null())}),
+                                  "get_flight_info");
         }
     } catch (const std::exception &e) {
         return FromEx(e);
@@ -1453,8 +1540,15 @@ DuckboxFlightSqlServer::CreatePreparedStatement(
         try {
             auto box = Box(c);
             res.dataset_schema = box->DescribeHandleArrow(rw.sql);
-        } catch (const RedirectError &) {
-            res.dataset_schema = ::arrow::schema({::arrow::field("_empty", ::arrow::null())});
+        } catch (const RedirectError &re) {
+            auto info = MaybeProxyInfo(re, PreparedStatementDescriptor(token), c.rec.id, c.rec.key,
+                                       token, {}, "create_prepared_statement");
+            if (!info.ok()) {
+                return info.status();
+            }
+            ::arrow::ipc::DictionaryMemo memo;
+            ARROW_ASSIGN_OR_RAISE(auto schema, (*info)->GetSchema(&memo));
+            res.dataset_schema = schema;
         }
         ::arrow::FieldVector pfields;
         for (int i = 0; i < rw.user_param_count; i++) {
@@ -1551,10 +1645,11 @@ DuckboxFlightSqlServer::GetFlightInfoPreparedStatement(const ServerCallContext &
         try {
             auto box = runtime_->Get(rec);
             auto schema = box->DescribeHandleArrow(h.rewritten_sql);
-            return Info(descriptor, token, schema);
+            return Info(descriptor, token, schema, LocalAdvertisedLocation());
         } catch (const RedirectError &re) {
             return MaybeProxyInfo(re, PreparedStatementDescriptor(token), rec.id, rec.key, token,
-                                  ::arrow::schema({::arrow::field("_empty", ::arrow::null())}));
+                                  ::arrow::schema({::arrow::field("_empty", ::arrow::null())}),
+                                  "get_flight_info");
         }
     } catch (const std::exception &e) {
         return FromEx(e);
@@ -1653,7 +1748,8 @@ DuckboxFlightSqlServer::GetFlightInfoTables(const ServerCallContext &context,
             try {
                 (void)Box(c);
             } catch (const RedirectError &re) {
-                return MaybeProxyInfo(re, descriptor, c.rec.id, c.rec.key, "", schema);
+                return MaybeProxyInfo(re, descriptor, c.rec.id, c.rec.key, "", schema,
+                                      "get_tables");
             }
         }
         return MetaInfo(descriptor, schema);

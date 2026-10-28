@@ -6,6 +6,7 @@
 #include "flight/handle.hpp"
 #include "metrics/metrics.hpp"
 #include "rewriter/rewriter.hpp"
+#include "s3/s3.hpp"
 #include "sandbox/sandbox.hpp"
 #include "sandbox/sandbox_registry.hpp"
 
@@ -56,6 +57,7 @@ using ::arrow::flight::ServerCallContext;
 using ::arrow::flight::Ticket;
 using duckbox::cluster::S3ConditionalLeaseManager;
 using duckbox::cluster::S3LeaseOptions;
+using duckbox::cluster::S3NodeDirectory;
 using duckbox::config::LoadPolicyFile;
 using duckbox::flight::DuckboxFlightServer;
 using duckbox::flight::DuckboxFlightSqlServer;
@@ -308,6 +310,10 @@ bool WaitStub(const OwnerStub *stub, bool (OwnerStub::*fn)() const, int timeout_
 struct ProxyFixture {
     DaemonConfig daemon_a;
     DaemonConfig daemon_b;
+    std::shared_ptr<duckbox::s3::S3ControlClient> s3;
+    std::shared_ptr<duckbox::cluster::FakeClock> clock;
+    S3LeaseOptions opt_a;
+    S3LeaseOptions opt_b;
     std::shared_ptr<S3SandboxRegistry> defs;
     std::shared_ptr<S3ConditionalLeaseManager> leases_a;
     std::shared_ptr<S3ConditionalLeaseManager> leases_b;
@@ -319,15 +325,14 @@ struct ProxyFixture {
     duckbox::sandbox::SandboxRecord rec;
 
     explicit ProxyFixture(int64_t timeout_ms) {
-        auto s3 = MakeMemoryS3ControlClient("proxy-timeout");
-        auto clock = std::make_shared<duckbox::cluster::FakeClock>(7'000'000);
+        s3 = MakeMemoryS3ControlClient("proxy-timeout");
+        clock = std::make_shared<duckbox::cluster::FakeClock>(7'000'000);
         defs = std::make_shared<S3SandboxRegistry>(s3);
-        S3LeaseOptions oa;
-        oa.owner_id = "node-a";
-        oa.prefix = "leases/";
-        oa.ttl_ms = 30'000;
-        S3LeaseOptions ob = oa;
-        ob.owner_id = "node-b";
+        opt_a.owner_id = "node-a";
+        opt_a.prefix = "leases/";
+        opt_a.ttl_ms = 30'000;
+        opt_b = opt_a;
+        opt_b.owner_id = "node-b";
         daemon_a = TestDaemon();
         daemon_a.name = "node-a";
         daemon_a.peer_secret = "peer-secret-value";
@@ -336,9 +341,9 @@ struct ProxyFixture {
         daemon_b = daemon_a;
         daemon_b.name = "node-b";
         leases_a = std::make_shared<S3ConditionalLeaseManager>(
-            s3, oa, std::shared_ptr<duckbox::metrics::IMetrics>{}, clock);
+            s3, opt_a, std::shared_ptr<duckbox::metrics::IMetrics>{}, clock);
         leases_b = std::make_shared<S3ConditionalLeaseManager>(
-            s3, ob, std::shared_ptr<duckbox::metrics::IMetrics>{}, clock);
+            s3, opt_b, std::shared_ptr<duckbox::metrics::IMetrics>{}, clock);
         rt_a = std::make_shared<SandboxRuntime>(daemon_a, leases_a, defs);
         rt_b = std::make_shared<SandboxRuntime>(daemon_b, leases_b, defs);
         rt_a->SetClock(clock);
@@ -356,6 +361,18 @@ struct ProxyFixture {
         rec.spec.id = rec.id;
         rec.spec.bound_key = rec.key;
         rec = defs->Create(rec);
+    }
+
+    void PublishOwner(const std::string &owner_id, const std::string &flight,
+                      const std::string &advertised) {
+        S3LeaseOptions opt = owner_id == "node-a" ? opt_a : opt_b;
+        opt.owner_id = owner_id;
+        auto nodes = std::make_shared<S3NodeDirectory>(
+            s3, opt, std::shared_ptr<duckbox::metrics::IMetrics>{}, clock);
+        nodes->set_flight(flight);
+        nodes->set_advertised_address(advertised);
+        nodes->Heartbeat();
+        peers_a->SetNodeDirectory(std::move(nodes));
     }
 };
 
@@ -379,6 +396,8 @@ void TestLongProxiedQuery() {
     nb.Start();
     fx.leases_a->set_flight("grpc://127.0.0.1:" + std::to_string(na.int_port));
     fx.leases_b->set_flight("grpc://127.0.0.1:" + std::to_string(nb.int_port));
+    fx.PublishOwner("node-b", "grpc://127.0.0.1:" + std::to_string(nb.int_port),
+                    "grpc://127.0.0.1:" + std::to_string(nb.pub_port));
     auto owned = fx.rt_b->Get(fx.rec);
     Expect(owned && fx.leases_b->Peek("proxy-timeout-box").owned_locally,
            "node-b owns the sandbox");
@@ -572,6 +591,7 @@ void TestGetFlightInfoTimeout() {
     owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::HangInfo);
     owner.Start(fx.daemon_b);
     PlantOwnerLease(fx, owner.Url());
+    fx.PublishOwner("node-b", owner.Url(), "grpc://127.0.0.1:4748");
     auto na = StartProxyNode(fx);
     na.Start();
 
@@ -588,10 +608,31 @@ void TestGetFlightInfoTimeout() {
             .count();
     Expect(!info_res.ok(), "proxied GetFlightInfo fails when the owner does not answer");
     auto msg = info_res.ok() ? std::string() : info_res.status().ToString();
-    Expect(absl::StrContains(msg, "peer proxy timed out"),
-           "GetFlightInfo timeout is a clear timeout error");
+    Expect(absl::StrContains(msg, "owner_moved:") || absl::StrContains(msg, "Unavailable") ||
+               absl::StrContains(msg, "unavailable"),
+           "GetFlightInfo timeout is retryable UNAVAILABLE: " + msg);
+    Expect(absl::StrContains(msg, "owner unreachable") || absl::StrContains(msg, "owner_moved:"),
+           "GetFlightInfo timeout uses owner_moved / owner_unreachable: " + msg);
     Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 4000,
-           "GetFlightInfo fails around proxy_timeout_ms");
+           "GetFlightInfo fails around proxy_timeout_ms; elapsed=" + std::to_string(elapsed_ms) +
+               " status=" + msg);
+
+    auto t1 = std::chrono::steady_clock::now();
+    auto prep = sql_cli.Prepare(qopt, "SELECT id FROM deals");
+    auto prep_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t1)
+            .count();
+    Expect(!prep.ok(), "CreatePreparedStatement fails when the owner does not answer");
+    auto prep_msg = prep.ok() ? std::string() : prep.status().ToString();
+    Expect(absl::StrContains(prep_msg, "owner_moved:") ||
+               absl::StrContains(prep_msg, "Unavailable") ||
+               absl::StrContains(prep_msg, "unavailable"),
+           "CreatePreparedStatement timeout is retryable UNAVAILABLE: " + prep_msg);
+    Expect(!absl::StrContains(prep_msg, "_empty"),
+           "CreatePreparedStatement timeout does not return a placeholder _empty schema");
+    Expect(prep_ms >= kProxyTimeoutMs && prep_ms < kProxyTimeoutMs + 4000,
+           "CreatePreparedStatement fails around proxy_timeout_ms; elapsed=" +
+               std::to_string(prep_ms) + " status=" + prep_msg);
     na.Stop();
     owner.Stop();
 }
@@ -619,58 +660,6 @@ void TestSlowStubStream() {
     owner.Stop();
 }
 
-void TestSigstopPeerGetFlightInfo() {
-    ProxyFixture fx(kProxyTimeoutMs);
-    int fds[2];
-    Expect(pipe(fds) == 0, "sigstop pipe");
-    auto cfg = fx.daemon_b;
-    pid_t pid = fork();
-    Expect(pid >= 0, "sigstop fork");
-    if (pid == 0) {
-        close(fds[0]);
-        OwnerStub srv(OwnerStub::Mode::HangInfo);
-        auto loc = Location::ForGrpcTcp("127.0.0.1", 0);
-        FlightServerOptions opt(*loc);
-        opt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
-        duckbox::flight::ApplyInternalListenerKeepalive(opt);
-        if (!srv.Init(opt).ok()) {
-            _exit(2);
-        }
-        const int port = srv.port();
-        std::thread th([&srv] { (void)srv.Serve(); });
-        th.detach();
-        dprintf(fds[1], "%d\n", port);
-        close(fds[1]);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        raise(SIGSTOP);
-        pause();
-        _exit(0);
-    }
-    close(fds[1]);
-    char buf[32] = {};
-    const ssize_t n = read(fds[0], buf, sizeof(buf) - 1);
-    close(fds[0]);
-    Expect(n > 0, "sigstop child published a port");
-    const int port = std::atoi(buf);
-    const std::string url = "grpc://127.0.0.1:" + std::to_string(port);
-    std::this_thread::sleep_for(std::chrono::milliseconds(80));
-    auto desc = FlightDescriptor::Command("proxy-timeout");
-    auto t0 = std::chrono::steady_clock::now();
-    auto info = fx.peers_a->ForwardGetFlightInfo(url, desc, fx.rec.id, fx.rec.key);
-    auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-            .count();
-    std::cout << "sigstop_peer_getflightinfo_ms=" << elapsed_ms << "\n";
-    kill(pid, SIGKILL);
-    waitpid(pid, nullptr, 0);
-    Expect(!info.ok(), "GetFlightInfo to a SIGSTOP'd peer fails");
-    auto msg = info.status().ToString();
-    Expect(absl::StrContains(msg, "peer proxy timed out"),
-           "SIGSTOP'd peer is a timeout, not an unbounded wait");
-    Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 4000,
-           "SIGSTOP'd peer GetFlightInfo is bounded by proxy_timeout_ms");
-}
-
 struct SigstopChild {
     pid_t pid = -1;
     ~SigstopChild() { Reap(); }
@@ -684,6 +673,58 @@ struct SigstopChild {
         pid = -1;
     }
 };
+
+pid_t ForkFrozenOwner(const DaemonConfig &cfg, OwnerStub::Mode mode, int *port_out);
+
+void TestSigstopPeerGetFlightInfo() {
+    ProxyFixture fx(kProxyTimeoutMs);
+    int port = 0;
+    SigstopChild child;
+    child.pid = ForkFrozenOwner(fx.daemon_b, OwnerStub::Mode::HangInfo, &port);
+    Expect(child.pid > 0, "sigstop-getflightinfo fork");
+    Expect(port > 0, "sigstop-getflightinfo child published a port");
+    const std::string url = "grpc://127.0.0.1:" + std::to_string(port);
+    int wst = 0;
+    const pid_t w = waitpid(child.pid, &wst, WNOHANG);
+    Expect(w == 0, "owner is alive before dial (waitpid=" + std::to_string(w) +
+                       (w > 0 ? " status=" + std::to_string(wst) : std::string()) +
+                       " port=" + std::to_string(port) + " url=" + url + ")");
+    using InfoRes = ::arrow::Result<std::unique_ptr<FlightInfo>>;
+    auto done = std::make_shared<std::promise<InfoRes>>();
+    auto fut = done->get_future();
+    auto desc = FlightDescriptor::Command("proxy-timeout");
+    auto t0 = std::chrono::steady_clock::now();
+    std::thread worker([done, peers = fx.peers_a, url, desc, id = fx.rec.id, key = fx.rec.key] {
+        done->set_value(peers->ForwardGetFlightInfo(url, desc, id, key));
+    });
+    const auto budget = std::chrono::milliseconds(kProxyTimeoutMs + 4000);
+    if (fut.wait_for(budget) != std::future_status::ready) {
+        worker.detach();
+        child.Reap();
+        Expect(false, "GetFlightInfo right after SIGSTOP exceeded the deadline budget url=" + url);
+        _exit(1);
+    }
+    worker.join();
+    auto info = fut.get();
+    auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    std::cout << "sigstop_peer_getflightinfo_ms=" << elapsed_ms << "\n";
+    int after_wst = 0;
+    const pid_t after_w = waitpid(child.pid, &after_wst, WNOHANG);
+    child.Reap();
+    auto msg = info.ok() ? std::string("ok") : info.status().ToString();
+    const std::string state =
+        "elapsed=" + std::to_string(elapsed_ms) + " status=" + msg + " url=" + url +
+        " port=" + std::to_string(port) + " waitpid_before=" + std::to_string(w) +
+        " waitpid_after=" + std::to_string(after_w) +
+        (after_w > 0 ? " after_status=" + std::to_string(after_wst) : std::string());
+    Expect(!info.ok(), "GetFlightInfo to a SIGSTOP'd peer fails: " + state);
+    Expect(absl::StrContains(msg, "peer proxy timed out"),
+           "SIGSTOP'd peer is a timeout, not '" + msg + "'; " + state);
+    Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 4000,
+           "SIGSTOP'd peer GetFlightInfo is bounded by proxy_timeout_ms; " + state);
+}
 
 pid_t ForkFrozenOwner(const DaemonConfig &cfg, OwnerStub::Mode mode, int *port_out) {
     int fds[2];

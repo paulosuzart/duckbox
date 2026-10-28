@@ -145,6 +145,15 @@ const char *Help(const std::string &name) {
     if (name == "duckbox_proxy_seconds") {
         return "Peer proxy round-trip time.";
     }
+    if (name == "duckbox_redirects_total") {
+        return "GetFlightInfo or schema answered through the sandbox owner.";
+    }
+    if (name == "duckbox_redirect_errors_total") {
+        return "Unary owner describe failures (timeout, unreachable, missing address).";
+    }
+    if (name == "duckbox_redirect_describe_seconds") {
+        return "Unary peer GetFlightInfo used to compute the owner schema.";
+    }
     if (name == "duckbox_route_decisions_total") {
         return "Control-plane routing decisions.";
     }
@@ -478,6 +487,28 @@ void MetricsRegistry::ObserveProxy(const char *op, double seconds) {
     std::string labels = NodeLabels(std::string("op=\"") + EscapeLabel(op ? op : "get") + "\"");
     std::lock_guard<std::mutex> hold(mu_);
     ObserveHistLocked("duckbox_proxy_seconds", labels, kFwdBuckets, seconds);
+}
+
+void MetricsRegistry::IncRedirect(const char *op) {
+    std::string labels =
+        NodeLabels(std::string("op=\"") + EscapeLabel(op ? op : "get_flight_info") + "\"");
+    std::lock_guard<std::mutex> hold(mu_);
+    IncLocked("duckbox_redirects_total", labels);
+}
+
+void MetricsRegistry::IncRedirectError(const char *op, const char *reason) {
+    std::string labels =
+        NodeLabels(std::string("op=\"") + EscapeLabel(op ? op : "get_flight_info") +
+                   "\",reason=\"" + EscapeLabel(reason ? reason : "failed") + "\"");
+    std::lock_guard<std::mutex> hold(mu_);
+    IncLocked("duckbox_redirect_errors_total", labels);
+}
+
+void MetricsRegistry::ObserveRedirect(const char *op, double seconds) {
+    std::string labels =
+        NodeLabels(std::string("op=\"") + EscapeLabel(op ? op : "get_flight_info") + "\"");
+    std::lock_guard<std::mutex> hold(mu_);
+    ObserveHistLocked("duckbox_redirect_describe_seconds", labels, kFwdBuckets, seconds);
 }
 
 std::string MetricsRegistry::Render() const {

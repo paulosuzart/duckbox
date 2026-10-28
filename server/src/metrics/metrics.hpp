@@ -60,6 +60,11 @@ public:
 	virtual void IncProxy(const char *op) = 0;
 	virtual void IncProxyError(const char *op, const char *code) = 0;
 	virtual void ObserveProxy(const char *op, double seconds) = 0;
+	// Client-side routing (#99). op: get_flight_info|get_tables|create_prepared_statement.
+	// reason: timeout|unreachable|no_owner_address|failed. Old proxy metrics stay until #101.
+	virtual void IncRedirect(const char *op) = 0;
+	virtual void IncRedirectError(const char *op, const char *reason) = 0;
+	virtual void ObserveRedirect(const char *op, double seconds) = 0;
 	virtual std::string Render() const = 0; // Prometheus text; no tenant/user/key/sandbox-id labels
 };
 
@@ -96,6 +101,9 @@ public:
 	void IncProxy(const char *op) override;
 	void IncProxyError(const char *op, const char *code) override;
 	void ObserveProxy(const char *op, double seconds) override;
+	void IncRedirect(const char *op) override;
+	void IncRedirectError(const char *op, const char *reason) override;
+	void ObserveRedirect(const char *op, double seconds) override;
 	std::string Render() const override;
 
 	std::string Node() const {
@@ -181,6 +189,12 @@ public:
 	void IncProxyError(const char *, const char *) override {
 	}
 	void ObserveProxy(const char *, double) override {
+	}
+	void IncRedirect(const char *) override {
+	}
+	void IncRedirectError(const char *, const char *) override {
+	}
+	void ObserveRedirect(const char *, double) override {
 	}
 	std::string Render() const override {
 		return "";

@@ -291,8 +291,8 @@ v1 wire protocol. Clients authenticate with `Authorization: Bearer` on every cal
 
 | Code | Flight / gRPC status | When |
 | --- | --- | --- |
-| `owner_moved:` | `FlightStatusCode::Unavailable` / `UNAVAILABLE` | Sandbox owner changed; retry the query. Names the current owner and advertised address when known. `extra_info` example: `{"code":"owner_moved","owner":"node-c","address":"grpc://10.0.0.3:4747"}`. Emitted from #100 (nothing throws `OwnerMovedError` in production yet). |
-| `no_owner:` | `FlightStatusCode::Unavailable` / `UNAVAILABLE` | No live owner (`sandbox has no owner; retry`), describe timed out, or the peer advertise URL is not a registered node. Retry. `extra_info`: `{"code":"no_owner"}`. On the node that serves the call; through a non-owner the GetFlightInfo proxy still returns peer proxy failed (UNKNOWN) until #99. |
+| `owner_moved:` | `FlightStatusCode::Unavailable` / `UNAVAILABLE` | Sandbox owner changed, describe timed out, owner unreachable, or the owner's advertised address is missing. Retry. Names the current owner and advertised address when known (omitted if longer than 256 bytes). `extra_info` example: `{"code":"owner_moved","reason":"owner_unreachable","owner":"node-c","address":"grpc://10.0.0.3:4747"}`. `reason` is `owner_unreachable` or `no_owner_address` when that is why the call failed. |
+| `no_owner:` | `FlightStatusCode::Unavailable` / `UNAVAILABLE` | No live owner (`sandbox has no owner; retry`). Retry. `extra_info`: `{"code":"no_owner"}`. |
 | Rejected statement (no code prefix) | Invalid / INVALID_ARGUMENT | e.g. `only SELECT is allowed`, `table not allowlisted: …` |
 | `Unauthenticated` | `Unauthenticated` / `UNAUTHENTICATED` | Missing or invalid caller credential. Never echoes the secret. |
 | `re-prepare` | `Invalid` | Prepared handle version is not current (outside `handles.stale_version_grace`). |

@@ -169,9 +169,11 @@ private:
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> StreamBatch(
 	    const std::shared_ptr<::arrow::RecordBatch> &batch) const;
 
+	std::string LocalAdvertisedLocation() const;
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightInfo>> MaybeProxyInfo(
 	    const common::RedirectError &re, const ::arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
-	    const std::string &key, const std::string &token, const std::shared_ptr<::arrow::Schema> &schema);
+	    const std::string &key, const std::string &token, const std::shared_ptr<::arrow::Schema> &schema,
+	    const char *op = "get_flight_info");
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> MaybeProxyDoGet(
 	    const common::RedirectError &re, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
 	    const std::string &key, const ::arrow::flight::ServerCallContext &context, int64_t query_timeout_ms);
@@ -284,6 +286,8 @@ public:
 	void SetNodeDirectory(std::shared_ptr<cluster::S3NodeDirectory> nodes) {
 		nodes_ = std::move(nodes);
 	}
+	// Public Flight URL for owner_id from the live directory. Empty if unknown.
+	std::string AdvertisedAddressOf(const std::string &owner_id) const;
 	int64_t inflight() const { return global_inflight_.load(std::memory_order_acquire); }
 	// Close in-flight peer clients so hung DoGets unblock (SIGTERM / tests).
 	void Shutdown();
