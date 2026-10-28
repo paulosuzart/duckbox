@@ -16,6 +16,7 @@ void RunCteRewriteTests();
 void RunCteDmlFailClosedTests();
 void RunHiddenFilterRewriteTests();
 void RunHandleTests();
+void RunBindCacheTests();
 void RunCryptoTests();
 void RunRegistryTests();
 void RunMetricsTests();
