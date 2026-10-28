@@ -2,6 +2,7 @@
 #include "suite.hpp"
 
 #include "cluster/lease.hpp"
+#include "common/json.hpp"
 #include "flight/flight_sql_server.hpp"
 #include "flight/handle.hpp"
 #include "metrics/metrics.hpp"
@@ -28,6 +29,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -74,6 +76,18 @@ using duckbox::test::Expect;
 using duckbox::test::MemoryAnalystPath;
 using duckbox::test::MemorySpecDir;
 using duckbox::test::TestDaemon;
+
+duckbox::common::Json ExtraOf(const ::arrow::Status &st) {
+    auto detail = ::arrow::flight::FlightStatusDetail::UnwrapStatus(st);
+    if (!detail) {
+        return duckbox::common::Json::object();
+    }
+    try {
+        return duckbox::common::Json::parse(detail->extra_info());
+    } catch (const std::exception &) {
+        return duckbox::common::Json::object();
+    }
+}
 
 // Sub-second FlightCallOptions.timeout can become 0 (no deadline) on
 // Apple Arrow / gRPC integer-second conversion. Use a whole second.
@@ -608,11 +622,12 @@ void TestGetFlightInfoTimeout() {
             .count();
     Expect(!info_res.ok(), "proxied GetFlightInfo fails when the owner does not answer");
     auto msg = info_res.ok() ? std::string() : info_res.status().ToString();
-    Expect(absl::StrContains(msg, "owner_moved:") || absl::StrContains(msg, "Unavailable") ||
-               absl::StrContains(msg, "unavailable"),
-           "GetFlightInfo timeout is retryable UNAVAILABLE: " + msg);
-    Expect(absl::StrContains(msg, "owner unreachable") || absl::StrContains(msg, "owner_moved:"),
-           "GetFlightInfo timeout uses owner_moved / owner_unreachable: " + msg);
+    auto extra = info_res.ok() ? duckbox::common::Json::object() : ExtraOf(info_res.status());
+    Expect(absl::StrContains(msg, "owner_moved:"),
+           "GetFlightInfo timeout message starts with owner_moved: " + msg);
+    Expect(extra.contains("code") && extra["code"] == "owner_moved" && extra.contains("reason") &&
+               extra["reason"] == "owner_unreachable",
+           "GetFlightInfo timeout extra_info reason is owner_unreachable: " + msg);
     Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 4000,
            "GetFlightInfo fails around proxy_timeout_ms; elapsed=" + std::to_string(elapsed_ms) +
                " status=" + msg);
@@ -624,10 +639,12 @@ void TestGetFlightInfoTimeout() {
             .count();
     Expect(!prep.ok(), "CreatePreparedStatement fails when the owner does not answer");
     auto prep_msg = prep.ok() ? std::string() : prep.status().ToString();
-    Expect(absl::StrContains(prep_msg, "owner_moved:") ||
-               absl::StrContains(prep_msg, "Unavailable") ||
-               absl::StrContains(prep_msg, "unavailable"),
-           "CreatePreparedStatement timeout is retryable UNAVAILABLE: " + prep_msg);
+    auto prep_extra = prep.ok() ? duckbox::common::Json::object() : ExtraOf(prep.status());
+    Expect(absl::StrContains(prep_msg, "owner_moved:"),
+           "CreatePreparedStatement timeout message starts with owner_moved: " + prep_msg);
+    Expect(prep_extra.contains("code") && prep_extra["code"] == "owner_moved" &&
+               prep_extra.contains("reason") && prep_extra["reason"] == "owner_unreachable",
+           "CreatePreparedStatement timeout extra_info reason is owner_unreachable: " + prep_msg);
     Expect(!absl::StrContains(prep_msg, "_empty"),
            "CreatePreparedStatement timeout does not return a placeholder _empty schema");
     Expect(prep_ms >= kProxyTimeoutMs && prep_ms < kProxyTimeoutMs + 4000,

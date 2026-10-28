@@ -11,7 +11,7 @@ If the catalog is unreachable after warmup (Postgres stopped, network partition,
 ```
    client ──► load balancer / any public Flight SQL listener
                     │
-                    │  GetFlightInfo / DoGet (sandbox id + SQL)
+                    │  GetFlightInfo (sandbox id + SQL)
                     ▼
               this node: Acquire sandbox id
                     │
@@ -21,16 +21,19 @@ If the catalog is unreachable after warmup (Postgres stopped, network partition,
                yes  │   no
                     │    │
                     ▼    ▼
-              warm DuckDB   proxy over internal listener
+              warm DuckDB   unary describe to the owner
                     │       (peer secret, never the caller)
                     │         │
                     └────┬────┘
                          ▼
-              FlightInfo to the client: empty locations
-              (never a peer-internal address)
+              FlightInfo locations = owner's advertised_address
+              (from the node directory, never lease.advertise)
+                    │
+                    ▼
+              client DoGet ──► owner public listener
 ```
 
-**Routing:** the client talks only to the node it hit (the load-balancer address is enough). A non-owner forwards Flight SQL (`GetFlightInfo`, `DoGet`, prepared statements) to the owner over the **internal** peer channel. Endpoint locations returned to the client are empty (same server) or the public node the client used — never `lease.advertise`. A draining node may still forward to a live owner but must not take new ownership. A request already sent to an old owner is **not** replayed onto a new owner.
+**Routing:** `GetFlightInfo` on a non-owner does one short unary describe to the owner, then returns the owner's `advertised_address` from the node directory as every endpoint location. ADBC and other Flight SQL clients **follow that location** for DoGet — the load-balancer address is not enough. `advertised_address` must be reachable by clients. When TLS terminates in front of the node, set `advertised_address` to `grpc+tls://…`; a default `grpc://` + `listen` sends the Bearer token and tenant key in the clear to that node. Locations are never `lease.advertise` (the internal peer listener). A draining node may still describe via a live owner but must not take new ownership. A request already sent to an old owner is **not** replayed onto a new owner. Streaming DoGet between nodes is still proxied until that path is removed.
 
 `RedirectError` is an internal proxy trigger. It is never returned to clients.
 

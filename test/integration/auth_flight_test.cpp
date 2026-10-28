@@ -231,6 +231,7 @@ void duckbox::test::RunAuthFlightTests() {
 	{
 		DaemonConfig cfg = daemon;
 		cfg.listen = "127.0.0.1:0";
+		cfg.advertised_address = "grpc://127.0.0.1:4747";
 		cfg.callers.push_back(CallerRule{"analyst-svc", {"tenant_21:*"}});
 		cfg.operators = {"ops"};
 		auto defs = std::make_shared<MemorySandboxRegistry>();

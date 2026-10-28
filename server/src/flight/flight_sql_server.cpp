@@ -450,13 +450,48 @@ const char *ClassifyRedirectFailure(const Status &st) {
         absl::StrContains(st.message(), "advertise URL is empty")) {
         return "no_owner_address";
     }
-    if (st.IsIOError() || absl::StrContains(st.message(), "peer proxy failed") ||
+    if (st.IsCapacityError() || absl::StrContains(st.message(), "peer proxy busy") ||
+        st.IsIOError() || absl::StrContains(st.message(), "peer proxy failed") ||
         absl::StrContains(st.message(), "Connect") ||
         absl::StrContains(st.message(), "Unavailable") ||
         absl::StrContains(st.message(), "unavailable")) {
         return "unreachable";
     }
+    if (auto detail = ::arrow::flight::FlightStatusDetail::UnwrapStatus(st)) {
+        if (detail->code() == ::arrow::flight::FlightStatusCode::TimedOut) {
+            return "timeout";
+        }
+        if (detail->code() == ::arrow::flight::FlightStatusCode::Unavailable) {
+            return "unreachable";
+        }
+    }
     return "failed";
+}
+
+// Deadline, unavailable, dial failure, peer proxy failed/busy, and "not the
+// owner" are retryable. The owner's own application codes (binder, policy)
+// must not be rewritten to UNAVAILABLE.
+bool IsRedirectTransportFailure(const Status &st) {
+    if (st.ok()) {
+        return false;
+    }
+    const char *reason = ClassifyRedirectFailure(st);
+    if (std::strcmp(reason, "timeout") == 0 || std::strcmp(reason, "unreachable") == 0 ||
+        std::strcmp(reason, "no_owner_address") == 0) {
+        return true;
+    }
+    if (absl::StrContains(st.message(), "not the owner")) {
+        return true;
+    }
+    return false;
+}
+
+Status PassThroughOwnerStatus(const Status &st) {
+    std::string client = ClientFacingError(st.message());
+    if (auto detail = ::arrow::flight::FlightStatusDetail::UnwrapStatus(st)) {
+        return ::arrow::flight::MakeFlightError(detail->code(), client, detail->extra_info());
+    }
+    return Status(st.code(), client);
 }
 
 // Timed out only when the call failed AND (structured TimedOut OR now >= the
@@ -1300,12 +1335,17 @@ std::string DuckboxFlightSqlServer::LocalAdvertisedLocation() const {
     Metrics().ObserveRedirect(metric_op, seconds);
     if (!forwarded.ok()) {
         Metrics().IncProxyError("get_flight_info", "error");
-        const char *reason = ClassifyRedirectFailure(forwarded.status());
+        const Status &fwd = forwarded.status();
+        const char *reason = ClassifyRedirectFailure(fwd);
         Metrics().IncRedirectError(metric_op, reason);
-        // Timeout, unreachable owner, and mid-handoff "peer proxy failed"
-        // are retryable UNAVAILABLE (owner_moved / owner_unreachable).
+        if (!IsRedirectTransportFailure(fwd)) {
+            // Owner binder / policy / other application codes pass through.
+            return PassThroughOwnerStatus(fwd);
+        }
+        const bool missing = std::strcmp(reason, "no_owner_address") == 0;
         return StatusFromException(
-            OwnerMovedError(re.owner_id(), advertised, kRetryableOwnerUnreachable));
+            OwnerMovedError(re.owner_id(), missing ? std::string() : advertised,
+                            missing ? kRetryableNoOwnerAddress : kRetryableOwnerUnreachable));
     }
     auto rewritten = WithEndpointLocations(**forwarded, {*loc});
     if (!rewritten) {

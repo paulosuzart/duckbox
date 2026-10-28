@@ -61,8 +61,10 @@ class Duckbox:
     def query(self, sql: str, params: Optional[Sequence[Any]] = None) -> pd.DataFrame:
         """Run one SELECT against this named sandbox. Optional `?` params are bound, not interpolated.
 
-        Talk only to `url` (the load-balancer / public listener). Non-owner nodes proxy
-        to the owner over the internal peer channel; clients never see peer addresses.
+        Connect to `url` for GetFlightInfo. ADBC follows each endpoint location
+        (the owner's `advertised_address`) for DoGet; that address must be
+        reachable and should be `grpc+tls://` when TLS terminates in front of
+        the node. Locations are never the internal peer listener.
         """
         return self._execute(sql, params)
 

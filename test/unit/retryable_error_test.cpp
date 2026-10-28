@@ -271,7 +271,7 @@ void duckbox::test::RunRetryableErrorTests() {
         ExpectUnavailable(st, "redacted UnavailableError");
         Expect(st.message().find(secret) == std::string::npos,
                "retryable mapping never echoes a password= value");
-        Expect(st.message().find("no_owner: sandbox has no owner; retry") != std::string::npos,
+        Expect(st.message() == "no_owner: sandbox has no owner; retry",
                "redaction net yields a generic no_owner sentence, not a fragment");
         Expect(st.message().find(kLakeCatalogUnavailable) == std::string::npos,
                "redacted retryable message is not the catalog-unavailable fragment");
@@ -287,12 +287,28 @@ void duckbox::test::RunRetryableErrorTests() {
                "owner field is not compared as a secret value and password= is stripped");
         Expect(st.message().find("user:pass") == std::string::npos,
                "URI userinfo in an address does not reach the tenant");
-        Expect(st.message().find("owner_moved: sandbox owner changed; retry the query") !=
-                   std::string::npos,
+        Expect(st.message() == "owner_moved: sandbox owner changed; retry the query",
                "redaction net yields a generic owner_moved sentence, not a fragment");
         auto extra = ParseExtra(st, "redacted OwnerMovedError");
         Expect(extra.dump().find("should-not-compare") == std::string::npos &&
                    extra.dump().find("user:pass") == std::string::npos,
                "redacted extra_info drops owner and address");
+        Expect(!extra.contains("owner") && !extra.contains("address"),
+               "redacted extra_info omits owner and address fields");
+    }
+    {
+        auto st = StatusFromException(UnavailableError(kLakeCatalogUnavailable));
+        ExpectUnavailable(st, "catalog-unavailable fragment");
+        Expect(
+            st.message() == "no_owner: sandbox has no owner; retry",
+            "incoming catalog-unavailable fragment is replaced by the generic no_owner sentence");
+        Expect(st.message().find(kLakeCatalogUnavailable) == std::string::npos,
+               "generic no_owner sentence does not keep the catalog fragment");
+    }
+    {
+        auto st = StatusFromException(UnavailableError("Unable to connect to Postgres"));
+        ExpectUnavailable(st, "catalog IO marker");
+        Expect(st.message() == "no_owner: sandbox has no owner; retry",
+               "first-pass catalog marker redaction yields the generic no_owner sentence");
     }
 }

@@ -2,6 +2,7 @@
 #include "check.hpp"
 
 #include "common/error.hpp"
+#include "common/json.hpp"
 #include "flight/flight_sql_server.hpp"
 #include "flight/handle.hpp"
 #include "cluster/lease.hpp"
@@ -13,13 +14,31 @@
 
 #include <arrow/flight/client.h>
 #include <arrow/flight/sql/client.h>
+#include <arrow/flight/types.h>
 #include <arrow/ipc/dictionary.h>
 #include <arrow/table.h>
 
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <memory>
 #include <thread>
+
+namespace {
+
+duckbox::common::Json ExtraOf(const ::arrow::Status &st) {
+	auto detail = ::arrow::flight::FlightStatusDetail::UnwrapStatus(st);
+	if (!detail) {
+		return duckbox::common::Json::object();
+	}
+	try {
+		return duckbox::common::Json::parse(detail->extra_info());
+	} catch (const std::exception &) {
+		return duckbox::common::Json::object();
+	}
+}
+
+} // namespace
 
 void duckbox::test::RunClusterTests() {
 	using namespace duckbox;
@@ -328,6 +347,8 @@ void duckbox::test::RunClusterTests() {
 		auto daemon_pb = daemon_pa;
 		daemon_pb.name = "node-b";
 		daemon_pb.advertised_address = kAdvB;
+		auto metrics_p = std::make_shared<MetricsRegistry>("cluster-proxy", std::unordered_set<std::string>{"analyst"});
+		SetMetrics(metrics_p);
 		auto leases_pa = std::make_shared<S3ConditionalLeaseManager>(s3p, oa, std::shared_ptr<IMetrics>{}, clockp);
 		auto leases_pb = std::make_shared<S3ConditionalLeaseManager>(s3p, ob, std::shared_ptr<IMetrics>{}, clockp);
 		auto rt_pa = std::make_shared<SandboxRuntime>(daemon_pa, leases_pa, defs_p);
@@ -438,11 +459,65 @@ void duckbox::test::RunClusterTests() {
 			auto schema = info->GetSchema(&memo);
 			Expect(schema.ok() && *schema && (*schema)->GetFieldByName("id"),
 			       "FlightInfo has the real result schema computed by the owner");
+			{
+				auto mred = metrics_p->Render();
+				Expect(mred.find("duckbox_redirects_total{") != std::string::npos &&
+				           mred.find("op=\"get_flight_info\"") != std::string::npos,
+				       "successful redirect increments duckbox_redirects_total");
+			}
+			{
+				auto m_before = metrics_p->Render();
+				Expect(m_before.find("duckbox_result_rows_total") == std::string::npos &&
+				           m_before.find("op=\"do_get\"") == std::string::npos,
+				       "unary describe does not execute DoGet or count result rows");
+				auto aloc_i2 = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", na.pub_port);
+				auto acli_i2 = ::arrow::flight::FlightClient::Connect(*aloc_i2);
+				Expect(acli_i2.ok(), "I2 client connects to the owner public listener");
+				if (acli_i2.ok()) {
+					auto owner_cli =
+					    std::shared_ptr<::arrow::flight::FlightClient>(std::move(acli_i2).ValueOrDie());
+					auto owner_get = owner_cli->DoGet(qopt, info->endpoints()[0].ticket);
+					Expect(owner_get.ok(), "DoGet of the redirected ticket is served by the owner");
+					if (owner_get.ok()) {
+						auto tbl = owner_get.ValueOrDie()->ToTable();
+						Expect(tbl.ok() && (*tbl)->num_rows() == 1, "owner DoGet returns query rows");
+					}
+					auto mown = metrics_p->Render();
+					Expect(mown.find("duckbox_query_duration_seconds") != std::string::npos &&
+					           mown.find("duckbox_result_rows_total") != std::string::npos,
+					       "owner query counter advances after DoGet on the owner");
+					Expect(mown.find("op=\"do_get\"") == std::string::npos,
+					       "non-owner proxy DoGet counter does not advance when DoGet hits the owner");
+				}
+			}
 			auto stream_res = bcli->DoGet(qopt, info->endpoints()[0].ticket);
 			Expect(stream_res.ok(), "DoGet via non-owner proxies to the owner");
 			if (stream_res.ok()) {
 				auto tbl = stream_res.ValueOrDie()->ToTable();
 				Expect(tbl.ok() && (*tbl)->num_rows() == 1, "client on a non-owner node gets query rows");
+			}
+		}
+
+		{
+			auto binder = sql_b.Execute(qopt, "SELECT no_such_column FROM deals");
+			Expect(!binder.ok(), "binder error via non-owner fails");
+			if (!binder.ok()) {
+				auto bst = binder.status();
+				auto *bd = ::arrow::flight::FlightStatusDetail::UnwrapStatus(bst).get();
+				Expect(bst.IsInvalid(), "binder error via non-owner is InvalidArgument, not UNAVAILABLE");
+				Expect(bd == nullptr || bd->code() == ::arrow::flight::FlightStatusCode::Invalid,
+				       "binder error Flight code is Invalid, not Unavailable");
+				auto bmsg = bst.ToString();
+				Expect(bmsg.find("owner_moved:") == std::string::npos &&
+				           bmsg.find("owner unreachable") == std::string::npos,
+				       "binder error is not rewritten to owner_unreachable: " + bmsg);
+				Expect(bmsg.find("no_such_column") != std::string::npos ||
+				           bmsg.find("Binder") != std::string::npos,
+				       "binder error keeps the owner's message: " + bmsg);
+				auto mfail = metrics_p->Render();
+				Expect(mfail.find("duckbox_redirect_errors_total{") != std::string::npos &&
+				           mfail.find("reason=\"failed\"") != std::string::npos,
+				       "binder error increments redirect_errors reason=failed");
 			}
 		}
 
@@ -482,6 +557,36 @@ void duckbox::test::RunClusterTests() {
 			           !(*local_info)->endpoints()[0].locations.empty() &&
 			           (*local_info)->endpoints()[0].locations[0].ToString() == kAdvA,
 			       "multi-node local GetFlightInfo sets this node's advertised address");
+			auto local_prep = sql_a.Prepare(qopt, "SELECT id FROM deals ORDER BY id");
+			Expect(local_prep.ok(), "multi-node local CreatePreparedStatement");
+			if (local_prep.ok()) {
+				auto local_prep_info = (*local_prep)->Execute(qopt);
+				Expect(local_prep_info.ok() && !(*local_prep_info)->endpoints().empty() &&
+				           !(*local_prep_info)->endpoints()[0].locations.empty() &&
+				           (*local_prep_info)->endpoints()[0].locations[0].ToString() == kAdvA,
+				       "multi-node local prepared GetFlightInfo sets this node's advertised address");
+			}
+		}
+
+		{
+			clockp->AdvanceMs(2000);
+			nodes_pa->set_advertised_address("not a uri !!!");
+			nodes_pa->Heartbeat();
+			clockp->AdvanceMs(2000);
+			auto unp = sql_b.Execute(qopt, "SELECT id FROM deals");
+			Expect(!unp.ok(), "GetFlightInfo fails when advertised_address is unparseable");
+			if (!unp.ok()) {
+				auto umsg = unp.status().ToString();
+				auto extra = ExtraOf(unp.status());
+				Expect(extra.contains("reason") && extra["reason"] == "no_owner_address",
+				       "unparseable advertised_address extra_info reason is no_owner_address: " + umsg);
+				Expect(umsg.find(oa.flight) == std::string::npos &&
+				           umsg.find(std::to_string(na.int_port)) == std::string::npos,
+				       "unparseable-address error never returns a peer-internal address: " + umsg);
+			}
+			nodes_pa->set_advertised_address(kAdvA);
+			nodes_pa->Heartbeat();
+			clockp->AdvanceMs(2000);
 		}
 
 		{
@@ -492,8 +597,10 @@ void duckbox::test::RunClusterTests() {
 			auto missing = sql_b.Execute(qopt, "SELECT id FROM deals");
 			Expect(!missing.ok(), "GetFlightInfo fails when the owner has no advertised address");
 			auto msg = missing.status().ToString();
-			Expect(msg.find("owner_moved:") != std::string::npos || msg.find("Unavailable") != std::string::npos,
-			       "missing advertised address is retryable UNAVAILABLE: " + msg);
+			auto extra = ExtraOf(missing.status());
+			Expect(extra.contains("code") && extra["code"] == "owner_moved" && extra.contains("reason") &&
+			           extra["reason"] == "no_owner_address",
+			       "missing advertised address extra_info reason is no_owner_address: " + msg);
 			Expect(msg.find(oa.flight) == std::string::npos &&
 			           msg.find(std::to_string(na.int_port)) == std::string::npos,
 			       "missing-address error never returns a peer-internal address: " + msg);
@@ -505,8 +612,15 @@ void duckbox::test::RunClusterTests() {
 		na.Stop();
 		auto after_kill = sql_b.Execute(qopt, "SELECT id FROM deals");
 		Expect(!after_kill.ok(), "owner killed mid-flight is not replayed to a new owner");
+		if (!after_kill.ok()) {
+			auto kmsg = after_kill.status().ToString();
+			auto kextra = ExtraOf(after_kill.status());
+			Expect(kextra.contains("reason") && kextra["reason"] == "owner_unreachable",
+			       "killed owner extra_info reason is owner_unreachable: " + kmsg);
+		}
 		Expect(!leases_pb->Peek("proxy-box").owned_locally, "non-owner does not take ownership while the lease lives");
 
 		nb.Stop();
+		SetMetrics(nullptr);
 	}
 }
