@@ -5,12 +5,18 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <random>
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifdef DUCKBOX_HAVE_LIBPQ
+#include <libpq-fe.h>
+#endif
 
 namespace {
 
@@ -264,6 +270,255 @@ void ExpectNeverWeaker(const std::string &input, const std::string &got, const c
 }
 
 } // namespace refimpl
+
+#ifdef DUCKBOX_HAVE_LIBPQ
+struct LibpqExtract {
+    bool parsed = false;
+    std::string password;
+};
+
+LibpqExtract ParseLibpqPassword(const std::string &conninfo) {
+    LibpqExtract out;
+    char *errmsg = nullptr;
+    PQconninfoOption *opts = PQconninfoParse(conninfo.c_str(), &errmsg);
+    if (errmsg) {
+        std::free(errmsg);
+    }
+    if (!opts) {
+        return out;
+    }
+    out.parsed = true;
+    for (PQconninfoOption *opt = opts; opt->keyword != nullptr; ++opt) {
+        if (opt->keyword && std::string(opt->keyword) == "password" && opt->val != nullptr) {
+            out.password = opt->val;
+            break;
+        }
+    }
+    PQconninfoFree(opts);
+    return out;
+}
+
+struct LibpqCase {
+    const char *label;
+    std::string input;
+    // Non-secret substring production promises to keep (empty = no keep check).
+    const char *keep;
+};
+
+void ExpectStemGone(const LibpqCase &c, const std::string &got) {
+    const auto at = c.input.find("LIBPQ-ORACLE-PW-");
+    if (at == std::string::npos) {
+        return;
+    }
+    duckbox::test::Expect(got.find(c.input.substr(at, 18)) == std::string::npos,
+                          std::string(c.label) + " (no libpq password) still hides the PW stem");
+    duckbox::test::Expect(got.find(duckbox::lake::kRedactedMarker) != std::string::npos,
+                          std::string(c.label) + " (no libpq password) uses the marker");
+}
+
+void ExpectPasswordFragmentsGone(const LibpqCase &c, const std::string &got,
+                                 const std::string &password) {
+    // Every alphanumeric fragment of the libpq password (len>=2) must vanish.
+    // Catches partial leaks (NL tail after a line-end bound, SPACE after '%').
+    std::string frag;
+    auto flush = [&]() {
+        if (frag.size() >= 2) {
+            duckbox::test::Expect(got.find(frag) == std::string::npos,
+                                  std::string(c.label) + " leaked libpq password fragment '" +
+                                      frag + "'");
+        }
+        frag.clear();
+    };
+    for (char ch : password) {
+        if (std::isalnum(static_cast<unsigned char>(ch))) {
+            frag.push_back(ch);
+        } else {
+            flush();
+        }
+    }
+    flush();
+}
+
+void CheckLibpqCase(const LibpqCase &c, int *ran, int *parsed, int *empty_pw, int *parse_fail) {
+    ++*ran;
+    auto got = duckbox::lake::RedactSecretText(c.input);
+    auto ext = ParseLibpqPassword(c.input);
+    if (!ext.parsed) {
+        ++*parse_fail;
+        ExpectStemGone(c, got);
+        if (c.keep && c.keep[0] != '\0') {
+            duckbox::test::Expect(got.find(c.keep) != std::string::npos,
+                                  std::string(c.label) + " keeps non-secret '" + c.keep + "'");
+        }
+        return;
+    }
+    ++*parsed;
+    if (!ext.password.empty()) {
+        ExpectPasswordFragmentsGone(c, got, ext.password);
+    }
+    if (ext.password.empty()) {
+        ++*empty_pw;
+        ExpectStemGone(c, got);
+    } else if (c.input.find(ext.password) != std::string::npos) {
+        duckbox::test::Expect(got.find(ext.password) == std::string::npos,
+                              std::string(c.label) + " leaked libpq password '" + ext.password +
+                                  "'");
+        duckbox::test::Expect(got.find(duckbox::lake::kRedactedMarker) != std::string::npos,
+                              std::string(c.label) + " uses the redaction marker");
+    } else {
+        // Percent-decoded / unescaped password is not a literal substring.
+        // The distinctive LIBPQ-ORACLE-PW stem in the input must still vanish.
+        const auto stem_at = c.input.find("LIBPQ-ORACLE-PW-");
+        if (stem_at != std::string::npos) {
+            auto stem = c.input.substr(stem_at, 18);
+            duckbox::test::Expect(got.find(stem) == std::string::npos,
+                                  std::string(c.label) + " leaked encoded password stem '" + stem +
+                                      "'");
+        }
+        duckbox::test::Expect(got.find(duckbox::lake::kRedactedMarker) != std::string::npos,
+                              std::string(c.label) + " uses the redaction marker");
+    }
+    if (c.keep && c.keep[0] != '\0') {
+        duckbox::test::Expect(got.find(c.keep) != std::string::npos,
+                              std::string(c.label) + " keeps non-secret '" + c.keep + "'");
+    }
+}
+
+void RunLibpqRedactionOracle() {
+    const std::string tab_uri =
+        std::string("postgresql://oracle_u:LIBPQ-ORACLE-PW-10") + '\t' + "TAB@oracle-host/oracledb";
+    const std::string nl_uri =
+        std::string("postgresql://oracle_u:LIBPQ-ORACLE-PW-11") + '\n' + "NL@oracle-host/oracledb";
+    const std::string tab_conn =
+        std::string("host=oracle-host user=oracle_u password='LIBPQ-ORACLE-PW-19") + '\t' +
+        "TAB' dbname=oracledb";
+    const std::string nl_conn =
+        std::string("host=oracle-host user=oracle_u password='LIBPQ-ORACLE-PW-28") + '\n' +
+        "NL' dbname=oracledb";
+
+    const LibpqCase cases[] = {
+        {"postgresql URI", "postgresql://oracle_u:LIBPQ-ORACLE-PW-01@oracle-host/oracledb",
+         "oracle-host"},
+        {"postgres URI", "postgres://oracle_u:LIBPQ-ORACLE-PW-02@oracle-host/oracledb",
+         "oracle-host"},
+        {"URI percent-encoded space",
+         "postgresql://oracle_u:LIBPQ-ORACLE-PW-03%20SPACE@oracle-host/oracledb", "oracle-host"},
+        {"URI percent-encoded tab",
+         "postgresql://oracle_u:LIBPQ-ORACLE-PW-04%09TAB@oracle-host/oracledb", "oracle-host"},
+        {"URI percent-encoded slash",
+         "postgresql://oracle_u:LIBPQ-ORACLE-PW-05%2Fslash@oracle-host/oracledb", "oracle-host"},
+        {"URI raw slash", "postgresql://oracle_u:LIBPQ-ORACLE-PW-06/slash@oracle-host/oracledb",
+         "oracle-host"},
+        {"URI percent-encoded @",
+         "postgresql://oracle_u:LIBPQ-ORACLE-PW-07%40at@oracle-host/oracledb", "oracle-host"},
+        {"URI percent-encoded colon",
+         "postgresql://oracle_u:LIBPQ-ORACLE-PW-08%3Acolon@oracle-host/oracledb", "oracle-host"},
+        {"URI raw space", "postgresql://oracle_u:LIBPQ-ORACLE-PW-09 SPACE@oracle-host/oracledb",
+         "oracle-host"},
+        {"URI raw tab", tab_uri, "oracle-host"},
+        {"URI raw newline", nl_uri, ""},
+        {"URI missing password", "postgresql://oracle_u@oracle-host/oracledb",
+         "oracle_u@oracle-host"},
+        {"URI truncated no @", "postgresql://oracle_u:LIBPQ-ORACLE-PW-13", ""},
+        {"URI truncated LINE 1:",
+         "LINE 1: SELECT CAST('Zz postgresql://oracle_u:LIBPQ-ORACLE-PW-14", "LINE 1:"},
+        {"conninfo unquoted",
+         "host=oracle-host user=oracle_u password=LIBPQ-ORACLE-PW-16 dbname=oracledb",
+         "host=oracle-host"},
+        {"conninfo escaped space",
+         "host=oracle-host user=oracle_u password=LIBPQ-ORACLE-PW-17\\ SPACE dbname=oracledb",
+         "user=oracle_u"},
+        {"conninfo quoted space",
+         "host=oracle-host user=oracle_u password='LIBPQ-ORACLE-PW-18 SPACE' dbname=oracledb",
+         "dbname=oracledb"},
+        {"conninfo quoted tab", tab_conn, "host=oracle-host"},
+        {"conninfo quoted slash",
+         "host=oracle-host user=oracle_u password='LIBPQ-ORACLE-PW-20/slash' dbname=oracledb",
+         "user=oracle_u"},
+        {"conninfo quoted @",
+         "host=oracle-host user=oracle_u password='LIBPQ-ORACLE-PW-21@at' dbname=oracledb",
+         "host=oracle-host"},
+        {"conninfo quoted colon",
+         "host=oracle-host user=oracle_u password='LIBPQ-ORACLE-PW-22:colon' dbname=oracledb",
+         "dbname=oracledb"},
+        {"conninfo doubled quote",
+         "host=oracle-host user=oracle_u password='LIBPQ-ORACLE-PW-23''quote' dbname=oracledb",
+         "user=oracle_u"},
+        {"conninfo backslash quote",
+         "host=oracle-host user=oracle_u password='LIBPQ-ORACLE-PW-24\\'quote' dbname=oracledb",
+         "host=oracle-host"},
+        {"conninfo double-quoted escaped quote",
+         "host=oracle-host user=oracle_u password=\"LIBPQ-ORACLE-PW-25\\\"quote\" dbname=oracledb",
+         "dbname=oracledb"},
+        {"conninfo missing password", "host=oracle-host user=oracle_u dbname=oracledb",
+         "user=oracle_u"},
+        {"conninfo quoted newline", nl_conn, "host=oracle-host"},
+        {"conninfo literal percent",
+         "host=oracle-host user=oracle_u password=LIBPQ-ORACLE-PW-29%40at dbname=oracledb",
+         "host=oracle-host"},
+        {"conninfo empty password", "host=oracle-host user=oracle_u password= dbname=oracledb",
+         "host=oracle-host"},
+        {"conninfo empty quoted password",
+         "host=oracle-host user=oracle_u password='' dbname=oracledb", "user=oracle_u"},
+        {"URI raw colon in password",
+         "postgresql://oracle_u:LIBPQ-ORACLE-PW-30:colon@oracle-host/oracledb", "oracle-host"},
+    };
+
+    int ran = 0;
+    int parsed = 0;
+    int empty_pw = 0;
+    int parse_fail = 0;
+    for (const auto &c : cases) {
+        CheckLibpqCase(c, &ran, &parsed, &empty_pw, &parse_fail);
+    }
+
+    // Raw '/' starts the URI path for PQconninfoParse, so libpq extracts no
+    // password. Production still redacts the userinfo span (over-redact).
+    {
+        const char *raw_slash =
+            "postgresql://oracle_u:LIBPQ-ORACLE-PW-06/slash@oracle-host/oracledb";
+        auto ext = ParseLibpqPassword(raw_slash);
+        duckbox::test::Expect(ext.parsed, "URI raw slash: PQconninfoParse succeeds");
+        duckbox::test::Expect(ext.password.empty(), "URI raw slash: libpq extracts no password");
+        auto got = duckbox::lake::RedactSecretText(raw_slash);
+        duckbox::test::Expect(got.find("LIBPQ-ORACLE-PW-06/slash") == std::string::npos,
+                              "URI raw slash: production still redacts the / span");
+        duckbox::test::Expect(got.find("LIBPQ-ORACLE-PW-06") == std::string::npos,
+                              "URI raw slash: production does not leak the / span head");
+        duckbox::test::Expect(got.find(duckbox::lake::kRedactedMarker) != std::string::npos,
+                              "URI raw slash: uses the redaction marker");
+        duckbox::test::Expect(got.find("oracle-host") != std::string::npos,
+                              "URI raw slash: host stays visible");
+    }
+
+    // libpq 18 rejects a raw space in the URI (parse_fail); 17 extracts the
+    // password. Leak-check the span either way — do not depend on version.
+    {
+        const char *raw_space =
+            "postgresql://oracle_u:LIBPQ-ORACLE-PW-09 SPACE@oracle-host/oracledb";
+        auto got = duckbox::lake::RedactSecretText(raw_space);
+        duckbox::test::Expect(got.find("LIBPQ-ORACLE-PW-09") == std::string::npos,
+                              "URI raw space: stem is redacted regardless of libpq parse");
+        duckbox::test::Expect(got.find("SPACE") == std::string::npos,
+                              "URI raw space: SPACE tail is redacted regardless of libpq parse");
+        duckbox::test::Expect(got.find(duckbox::lake::kRedactedMarker) != std::string::npos,
+                              "URI raw space: uses the redaction marker");
+        duckbox::test::Expect(got.find("oracle-host") != std::string::npos,
+                              "URI raw space: host stays visible");
+    }
+
+    std::cout << "libpq oracle: RAN " << ran << " cases (parsed=" << parsed
+              << " empty_password=" << empty_pw << " parse_fail=" << parse_fail << ")\n";
+}
+#endif
+
+void RunLibpqRedactionOracleOrSkip() {
+#ifdef DUCKBOX_HAVE_LIBPQ
+    RunLibpqRedactionOracle();
+#else
+    std::cout << "SKIP: libpq not found\n";
+#endif
+}
 
 } // namespace
 
@@ -864,4 +1119,6 @@ void duckbox::test::RunSecretRedactPatternTests() {
 #else
     std::clog << "secret_redact scale SKIP (DUCKBOX_COVERAGE)\n";
 #endif
+
+    RunLibpqRedactionOracleOrSkip();
 }

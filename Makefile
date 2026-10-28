@@ -13,8 +13,9 @@ deps:
 arrow:
 	bash $(PROJ_DIR)scripts/install_arrow.sh
 
+CMAKE_FLAGS ?=
 configure: deps
-	$(CMAKE) -S $(PROJ_DIR) -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=$(CXX)
+	$(CMAKE) -S $(PROJ_DIR) -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=$(CXX) $(CMAKE_FLAGS)
 
 build: configure
 	$(CMAKE) --build $(BUILD_DIR) --parallel
