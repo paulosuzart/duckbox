@@ -2149,9 +2149,10 @@ int RunServer(const ServerOptions &opt_in) {
               << " (peer + operator; do not expose)" << std::endl;
     LogAdvertisedAddress(std::cout, opt.daemon.advertised_address);
     if (!opt.daemon.debug_http.empty()) {
+        auto dp = ParseListenAddress(opt.daemon.debug_http, "debug_http", AddressUse::Bind, 4748);
         ServerOptions dbg = opt;
         std::thread([dbg, defs, runtime]() { StartDebugHttp(dbg, defs, runtime); }).detach();
-        std::cout << "debug HTTP /v1/query on " << opt.daemon.debug_http << "\n";
+        std::cout << "debug HTTP /v1/query on " << dp.first << ":" << dp.second << "\n";
     }
 
     auto signals = std::make_shared<std::atomic<int>>(0);
