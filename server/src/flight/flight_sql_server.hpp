@@ -206,6 +206,10 @@ struct NodeCliRequest {
 };
 int RunNodeDrain(const NodeCliRequest &req);
 ::arrow::Result<::arrow::flight::Location> ParseFlightLocation(const std::string &url);
+// Maps duckbox exceptions to Flight Status. UnavailableError / OwnerMovedError
+// become FlightStatusCode::Unavailable (gRPC UNAVAILABLE) with a stable code
+// prefix and compact JSON extra_info. Other types keep their existing status.
+::arrow::Status StatusFromException(const std::exception &e);
 
 // Handshake token is a bearer secret or JWT, never an unsigned spec payload.
 // Allow gRPC keepalive pings on the internal peer listener.

@@ -37,6 +37,7 @@ void RunLakeAttachSecretTests();
 void RunSecretRedactPatternTests();
 void RunTempDirectoryTests();
 void RunTokenSanitizeTests();
+void RunRetryableErrorTests();
 void RunDeadlineTests();
 
 } // namespace test
