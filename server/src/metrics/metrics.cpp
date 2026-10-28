@@ -608,7 +608,7 @@ void StartMetricsHttp(const std::string &listen, std::shared_ptr<IMetrics> metri
                         "text/plain; version=0.0.4; charset=utf-8");
     });
     if (!g_metrics_http->bind_to_port(host, port)) {
-        throw Error("metrics listen failed on " + listen);
+        throw Error("metrics listen failed on " + host + ":" + std::to_string(port));
     }
     std::clog << "metrics: Prometheus text on " << host << ":" << port << " /metrics\n";
     g_metrics_thread = std::thread([]() { g_metrics_http->listen_after_bind(); });

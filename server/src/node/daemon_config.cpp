@@ -15,6 +15,8 @@
 #include "arrow/result.h"
 #include "arrow/util/uri.h"
 
+#include <algorithm>
+#include <arpa/inet.h>
 #include <cstdlib>
 #include <fnmatch.h>
 #include <iostream>
@@ -84,6 +86,18 @@ std::pair<std::string, int> ParseListenAddress(const std::string &listen, const 
     const std::string host = uri->host();
     if (host.empty()) {
         throw PolicyError(std::string(what) + ": HOST:PORT is required");
+    }
+    // Host is an IPv6 literal or a DNS/IPv4 name; '%', ';', '=' etc. would smuggle a secret.
+    if (use == AddressUse::FlightUrl) {
+        in6_addr v6{};
+        const bool dns = !host.empty() && std::all_of(host.begin(), host.end(), [](char c) {
+            return absl::ascii_isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' ||
+                   c == '_';
+        });
+        if (!dns && ::inet_pton(AF_INET6, host.c_str(), &v6) != 1) {
+            throw PolicyError(std::string(what) +
+                              ": Flight URL host must be a DNS name or IP address");
+        }
     }
     int port = uri->port();
     if (port < 0) {
@@ -600,6 +614,16 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     }
     if (!cfg.debug_http.empty() && !cfg.allow_insecure_dev) {
         add("debug_http", "requires auth.allow_insecure_dev");
+    }
+    if (!cfg.debug_http.empty()) {
+        try {
+            auto dp = ParseListenAddress(cfg.debug_http, "debug_http", AddressUse::Bind, 4748);
+            if (dp.second <= 0 || dp.second > 65535) {
+                add("debug_http", "port out of range");
+            }
+        } catch (const std::exception &e) {
+            add("debug_http", AddressIssueMessage("debug_http", e));
+        }
     }
     if (cfg.handle_ttl_seconds <= 0) {
         add("limits.handle_ttl_seconds", "must be > 0");

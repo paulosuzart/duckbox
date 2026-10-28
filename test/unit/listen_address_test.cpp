@@ -79,4 +79,12 @@ void duckbox::test::RunListenAddressTests() {
 
     ExpectReject("grpc://leakuser:s3cretLeak@node-a.example:4984", "userinfo",
                  "userinfo is refused", {"leakuser", "s3cretLeak"}, "advertised_address");
+    ExpectReject("grpc://node-a.example;tok=s3cretLeak:4984", "DNS name or IP address",
+                 "advertised_address refuses a token in the host", {"s3cretLeak"},
+                 "advertised_address");
+    ExpectReject("grpc://leakuser%40s3cretLeak:4984", "DNS name or IP address",
+                 "lease.advertise refuses percent-encoded userinfo in the host", {"s3cretLeak"},
+                 "lease.advertise");
+    ExpectReject("[s3cretLeak:4984", "HOST:PORT is required",
+                 "unparseable address does not echo the parser status", {"s3cretLeak"});
 }

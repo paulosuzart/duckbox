@@ -643,6 +643,21 @@ void duckbox::test::RunSpecLoaderTests() {
             locked.debug_http = "127.0.0.1:18480";
             ExpectThrowContains([&] { ValidateDaemonOrThrow(locked); }, "debug_http",
                                 "debug_http is refused without allow_insecure_dev");
+            DaemonConfig leak_dbg = TestDaemon();
+            leak_dbg.debug_http = "http://leakuser:s3cretLeak@127.0.0.1:18480";
+            try {
+                ValidateDaemonOrThrow(leak_dbg);
+                Expect(false, "debug_http userinfo (no throw)");
+            } catch (const std::exception &e) {
+                std::string w = e.what();
+                Expect(w.find("debug_http") != std::string::npos &&
+                           w.find("userinfo") != std::string::npos,
+                       "debug_http userinfo names the field and rule");
+                Expect(w.find("leakuser") == std::string::npos &&
+                           w.find("s3cretLeak") == std::string::npos &&
+                           w.find("http://") == std::string::npos,
+                       "debug_http userinfo does not echo the value");
+            }
             locked.allow_insecure_dev = true;
             ValidateDaemonOrThrow(locked);
         }
@@ -861,6 +876,10 @@ void duckbox::test::RunSpecLoaderTests() {
                                      "credential in path without '@' is refused");
             expect_userinfo_rejected("grpc://node-a.example:4984#s3cretLeak", {"s3cretLeak"},
                                      "credential in fragment without '@' is refused");
+            expect_userinfo_rejected("grpc://node-a.example;tok=s3cretLeak:4984", {"s3cretLeak"},
+                                     "credential in host sub-delims is refused");
+            expect_userinfo_rejected("grpc://leakuser%40s3cretLeak:4984", {"s3cretLeak"},
+                                     "percent-encoded '@' in host is refused");
             expect_userinfo_rejected("grpc://:4984", {}, "empty host is refused");
             for (const char *good : {"GRPC+TLS://node-a.example:4984", "grpc://[2001:db8::1]:4984",
                                      "grpc://node-a.example:4984/", "grpc://10.0.0.7:4984",
