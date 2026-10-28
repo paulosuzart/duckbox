@@ -560,6 +560,58 @@ duckbox_add_test(duckbox_s3_sts_tests
   test/support/check.cpp
   test/integration/s3_sts_test.cpp)
 
+# Optional libpq oracle for unit secret-redaction tests. Never a production
+# or default-build dependency: the suite prints "SKIP: libpq not found" and
+# passes when headers/library are absent. CI sets DUCKBOX_REQUIRE_LIBPQ=ON
+# so a silent SKIP cannot turn the required jobs green.
+option(DUCKBOX_REQUIRE_LIBPQ "Fail configure if libpq is missing (CI unit oracle)" OFF)
+find_package(PostgreSQL QUIET)
+if(NOT PostgreSQL_FOUND)
+  find_package(PkgConfig QUIET)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(DUCKBOX_LIBPQ QUIET libpq)
+  endif()
+endif()
+if(APPLE AND NOT PostgreSQL_FOUND AND NOT DUCKBOX_LIBPQ_FOUND)
+  execute_process(COMMAND brew --prefix libpq
+    OUTPUT_VARIABLE _brew_libpq
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(_brew_libpq AND EXISTS "${_brew_libpq}/include/libpq-fe.h")
+    set(DUCKBOX_LIBPQ_FOUND TRUE)
+    set(DUCKBOX_LIBPQ_INCLUDE_DIRS "${_brew_libpq}/include")
+    if(EXISTS "${_brew_libpq}/lib/libpq.dylib")
+      set(DUCKBOX_LIBPQ_LIBRARIES "${_brew_libpq}/lib/libpq.dylib")
+    else()
+      set(DUCKBOX_LIBPQ_LIBRARIES pq)
+      set(DUCKBOX_LIBPQ_LIBRARY_DIRS "${_brew_libpq}/lib")
+    endif()
+  endif()
+endif()
+if(PostgreSQL_FOUND)
+  message(STATUS "libpq found via find_package(PostgreSQL); enabling unit redaction oracle")
+  target_compile_definitions(duckbox_unit_tests PRIVATE DUCKBOX_HAVE_LIBPQ=1)
+  if(TARGET PostgreSQL::PostgreSQL)
+    target_link_libraries(duckbox_unit_tests PRIVATE PostgreSQL::PostgreSQL)
+  else()
+    target_include_directories(duckbox_unit_tests PRIVATE ${PostgreSQL_INCLUDE_DIRS})
+    target_link_libraries(duckbox_unit_tests PRIVATE ${PostgreSQL_LIBRARIES})
+  endif()
+elseif(DUCKBOX_LIBPQ_FOUND)
+  message(STATUS "libpq found via pkg-config/Homebrew; enabling unit redaction oracle")
+  target_compile_definitions(duckbox_unit_tests PRIVATE DUCKBOX_HAVE_LIBPQ=1)
+  target_include_directories(duckbox_unit_tests PRIVATE ${DUCKBOX_LIBPQ_INCLUDE_DIRS})
+  if(DUCKBOX_LIBPQ_LIBRARY_DIRS)
+    target_link_directories(duckbox_unit_tests PRIVATE ${DUCKBOX_LIBPQ_LIBRARY_DIRS})
+  endif()
+  target_link_libraries(duckbox_unit_tests PRIVATE ${DUCKBOX_LIBPQ_LIBRARIES})
+else()
+  if(DUCKBOX_REQUIRE_LIBPQ)
+    message(FATAL_ERROR "DUCKBOX_REQUIRE_LIBPQ=ON but libpq was not found")
+  endif()
+  message(STATUS "libpq not found; unit redaction oracle will print SKIP: libpq not found")
+endif()
+
 enable_testing()
 add_test(NAME unit COMMAND duckbox_unit_tests)
 add_test(NAME guardrails COMMAND duckbox_guardrail_tests)

@@ -12,12 +12,17 @@
 #include <arrow/flight/server.h>
 #include <arrow/flight/types.h>
 
+#include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -116,6 +121,73 @@ bool HaveDuckbox() {
     return ::access(DuckboxBin().c_str(), X_OK) == 0;
 }
 
+// Generous for CI: a 100 KiB token against a live daemon plus a gRPC
+// metadata-size / auth failure. SIGKILL + fail if the child outlives this.
+constexpr std::chrono::seconds kRunDuckboxTimeout{30};
+
+timeval RemainingTimeval(std::chrono::steady_clock::time_point deadline) {
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+        return {0, 0};
+    }
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+    timeval tv;
+    tv.tv_sec = static_cast<time_t>(us.count() / 1000000);
+    tv.tv_usec = static_cast<suseconds_t>(us.count() % 1000000);
+    return tv;
+}
+
+void SetWaitStatus(Captured &c, int st) {
+    if (WIFEXITED(st)) {
+        c.rc = WEXITSTATUS(st);
+    } else if (WIFSIGNALED(st)) {
+        c.rc = 128 + WTERMSIG(st);
+    } else {
+        c.rc = 1;
+    }
+}
+
+// Reap after SIGKILL. Bounded so an uninterruptible child cannot hang CI.
+bool ReapAfterKill(pid_t pid, int *st, std::chrono::steady_clock::time_point deadline) {
+    int backoff_ms = 5;
+    while (std::chrono::steady_clock::now() < deadline) {
+        pid_t w = waitpid(pid, st, WNOHANG);
+        if (w == pid) {
+            return true;
+        }
+        if (w < 0 && errno != EINTR) {
+            return false;
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            break;
+        }
+        auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        auto nap = std::min(std::chrono::milliseconds(backoff_ms), remain);
+        if (nap.count() <= 0) {
+            break;
+        }
+        std::this_thread::sleep_for(nap);
+        backoff_ms = std::min(backoff_ms * 2, 100);
+    }
+    return false;
+}
+
+void FailRunDuckboxTimeout(pid_t pid, int read_fd) {
+    if (read_fd >= 0) {
+        close(read_fd);
+    }
+    if (pid > 0) {
+        kill(pid, SIGKILL);
+        int st = 0;
+        auto reap_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        (void)ReapAfterKill(pid, &st, reap_deadline);
+    }
+    duckbox::test::Expect(false, "RunDuckbox timed out after " +
+                                     std::to_string(kRunDuckboxTimeout.count()) +
+                                     "s (kRunDuckboxTimeout); child SIGKILL'd");
+}
+
 Captured RunDuckbox(const std::vector<std::string> &args) {
     Captured c;
     std::string bin = DuckboxBin();
@@ -144,20 +216,80 @@ Captured RunDuckbox(const std::vector<std::string> &args) {
         _exit(127);
     }
     close(fds[1]);
+    const auto deadline = std::chrono::steady_clock::now() + kRunDuckboxTimeout;
     char buf[4096];
-    ssize_t nread;
-    while ((nread = read(fds[0], buf, sizeof(buf))) > 0) {
+    bool timed_out = false;
+    while (true) {
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            timed_out = true;
+            break;
+        }
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fds[0], &rfds);
+        timeval tv = RemainingTimeval(deadline);
+        int sel = select(fds[0] + 1, &rfds, nullptr, nullptr, &tv);
+        if (sel == 0) {
+            timed_out = true;
+            break;
+        }
+        if (sel < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        ssize_t nread = read(fds[0], buf, sizeof(buf));
+        if (nread < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (nread == 0) {
+            break;
+        }
         c.out.append(buf, static_cast<size_t>(nread));
     }
-    close(fds[0]);
-    int st = 0;
-    if (waitpid(pid, &st, 0) == -1) {
-        c.rc = 1;
-    } else if (WIFEXITED(st)) {
-        c.rc = WEXITSTATUS(st);
-    } else if (WIFSIGNALED(st)) {
-        c.rc = 128 + WTERMSIG(st);
+    if (timed_out) {
+        FailRunDuckboxTimeout(pid, fds[0]);
+        return c;
     }
+    close(fds[0]);
+    // Pipe EOF is the event: the child closed stdio, so waitpid should
+    // return immediately. A short backoff with the same deadline covers a
+    // child that closed the pipe but has not exited yet.
+    int st = 0;
+    int backoff_ms = 5;
+    bool reaped = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) {
+            reaped = true;
+            break;
+        }
+        if (w < 0 && errno != EINTR) {
+            c.rc = 1;
+            return c;
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            break;
+        }
+        auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        auto nap = std::min(std::chrono::milliseconds(backoff_ms), remain);
+        if (nap.count() <= 0) {
+            break;
+        }
+        std::this_thread::sleep_for(nap);
+        backoff_ms = std::min(backoff_ms * 2, 100);
+    }
+    if (!reaped) {
+        FailRunDuckboxTimeout(pid, -1);
+        return c;
+    }
+    SetWaitStatus(c, st);
     return c;
 }
 

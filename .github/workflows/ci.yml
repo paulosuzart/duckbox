@@ -45,6 +45,12 @@ jobs:
             duckdb-v2.0.0-nanoarrow-yamlcpp080-nlohmann3113-awssdk-s3-${{ runner.os }}-${{ runner.arch }}
       - name: Install AWS SDK C++ (S3+STS, vcpkg)
         run: bash scripts/install_aws_sdk.sh
+      # Test-time only: optional CMake libpq oracle (S1). Not a default-build
+      # dependency; other CI jobs and local builds without libpq-dev SKIP.
+      - name: Install libpq-dev (S1 redaction oracle, this job only)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libpq-dev
       - name: ccache
         uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
         with:
@@ -52,7 +58,7 @@ jobs:
           create-symlink: true
           max-size: 500M
       - name: Build
-        run: make build CXX=g++
+        run: make build CXX=g++ CMAKE_FLAGS=-DDUCKBOX_REQUIRE_LIBPQ=ON
       - name: pyarrow (Flight SQL metadata alignment)
         run: |
           python3 -m venv .venv
@@ -60,7 +66,10 @@ jobs:
       - name: Unit tests
         env:
           DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: ctest --test-dir build -L unit --output-on-failure
+        run: |
+          set -o pipefail
+          ctest --test-dir build -L unit --output-on-failure --verbose | tee unit-oracle.log
+          grep -q 'libpq oracle: RAN 30' unit-oracle.log
       - name: Guardrail tests
         run: ctest --test-dir build -L guardrails --output-on-failure
       - name: Integration tests
@@ -96,7 +105,8 @@ jobs:
       - name: Build (AppleClang; omit -DCMAKE_CXX_COMPILER=g++)
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix)"
+            -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+            -DDUCKBOX_REQUIRE_LIBPQ=ON
           JOBS="$(sysctl -n hw.ncpu)"
           cmake --build build --parallel "$JOBS" --target duckbox duckbox_unit_tests duckbox_guardrail_tests duckbox_integration_tests duckbox_schema_tests duckbox_s3_credentials_tests duckbox_s3_secret_guardrail_tests duckbox_s3_sts_tests
       - name: pyarrow (arm64 Flight SQL metadata alignment)
@@ -107,7 +117,11 @@ jobs:
         env:
           DUCKBOX_HANDLE_SECRET: duckbox-dev-secret
           DUCKBOX_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: ctest --test-dir build -L 'unit|guardrails|integration' --exclude-regex '^schema$' --output-on-failure --verbose
+        run: |
+          set -o pipefail
+          ctest --test-dir build -L 'unit|guardrails|integration' --exclude-regex '^schema$' \
+            --output-on-failure --verbose | tee unit-oracle.log
+          grep -q 'libpq oracle: RAN 30' unit-oracle.log
       # Direct ctest: lldb changes the process memory layout, so a pass
       # under the debugger is not enough on its own.
       - name: Schema tests (ctest)
