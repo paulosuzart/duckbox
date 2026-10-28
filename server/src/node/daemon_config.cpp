@@ -4,20 +4,19 @@
 #include "common/error.hpp"
 #include "common/yaml.hpp"
 #include "config/policy.hpp"
-#include "flight/flight_sql_server.hpp"
 #include "s3/s3.hpp"
 #include "s3/s3_credentials.hpp"
 #include "s3/secrets.hpp"
 #include "sandbox/temp_directory.hpp"
 
 #include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
 
 #include "arrow/result.h"
 #include "arrow/util/uri.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
-#include <cctype>
 #include <cstdlib>
 #include <fnmatch.h>
 #include <iostream>
@@ -40,68 +39,73 @@ bool LeaseEndpointConfigured(const DaemonConfig &cfg) {
     return !cfg.lease.endpoint.empty() || !cfg.lease.endpoint_env.empty();
 }
 
-void ValidateAdvertisedAddressOrThrow(const std::string &address, const char *what) {
-    auto loc = flight::ParseFlightLocation(address);
-    if (!loc.ok()) {
-        throw PolicyError(std::string(what) + ": invalid Flight URL (grpc://host:port or "
-                                              "grpc+tls://host:port)");
+// One linear scan of a bounded address. Named so SpecError does not double the field.
+std::string AddressIssueMessage(const char *what, const std::exception &e) {
+    const std::string prefix = std::string(what) + ": ";
+    std::string w = e.what();
+    if (absl::StartsWith(w, prefix)) {
+        w.erase(0, prefix.size());
     }
-    std::string spec = address;
-    if (spec.find("://") == std::string::npos) {
-        spec = "grpc://" + spec;
-    }
-    auto uri = ::arrow::util::Uri::FromString(spec);
-    if (!uri.ok()) {
-        throw PolicyError(std::string(what) + ": invalid Flight URL (grpc://host:port or "
-                                              "grpc+tls://host:port)");
-    }
-    // Empty userinfo (":@") leaves username() and password() empty; '@' still marks it.
-    if (!uri->username().empty() || !uri->password().empty() ||
-        spec.find('@') != std::string::npos) {
-        throw PolicyError(std::string(what) + ": Flight URL must not contain userinfo");
-    }
-    auto scheme = absl::AsciiStrToLower(uri->scheme());
-    if (scheme != "grpc" && scheme != "grpc+tls") {
-        throw PolicyError(std::string(what) + ": scheme must be grpc:// or grpc+tls://");
-    }
-    // arrow::util::Uri has no fragment accessor; '#' is never valid in a host:port URL.
-    if (!(uri->path().empty() || uri->path() == "/") || !uri->query_string().empty() ||
-        spec.find('#') != std::string::npos) {
-        throw PolicyError(std::string(what) + ": Flight URL must be scheme://host:port only");
-    }
-    // Host is an IPv6 literal or a DNS/IPv4 name; '%', ';', '=' etc. would smuggle a secret.
-    const std::string host = uri->host();
-    in6_addr v6{};
-    const bool dns = !host.empty() && std::all_of(host.begin(), host.end(), [](char c) {
-        return absl::ascii_isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' ||
-               c == '_';
-    });
-    if (!dns && ::inet_pton(AF_INET6, host.c_str(), &v6) != 1) {
-        throw PolicyError(std::string(what) + ": Flight URL host must be a DNS name or IP address");
-    }
+    return w;
 }
 
 } // namespace
 
-std::pair<std::string, int> ParseListenAddress(const std::string &listen, int default_port) {
+std::pair<std::string, int> ParseListenAddress(const std::string &listen, const char *what,
+                                               AddressUse use, int default_port) {
     if (listen.empty()) {
-        throw PolicyError("listen address is empty");
+        throw PolicyError(std::string(what) + ": HOST:PORT is required");
+    }
+    const auto scheme_end = listen.find("://");
+    if (use == AddressUse::FlightUrl) {
+        if (scheme_end == std::string::npos) {
+            throw PolicyError(std::string(what) + ": scheme must be grpc:// or grpc+tls://");
+        }
+        const auto scheme = absl::AsciiStrToLower(listen.substr(0, scheme_end));
+        if (scheme != "grpc" && scheme != "grpc+tls") {
+            throw PolicyError(std::string(what) + ": scheme must be grpc:// or grpc+tls://");
+        }
     }
     std::string spec = listen;
-    if (spec.find("://") == std::string::npos) {
+    if (scheme_end == std::string::npos) {
         spec = "http://" + spec;
     }
     auto uri = ::arrow::util::Uri::FromString(spec);
     if (!uri.ok()) {
-        throw PolicyError("listen: expected HOST:PORT, got '" + listen + "'");
+        throw PolicyError(std::string(what) + ": HOST:PORT is required");
     }
-    auto host = uri->host();
+    // Empty userinfo (":@") leaves username() and password() empty; '@' still marks it.
+    if (!uri->username().empty() || !uri->password().empty() || absl::StrContains(spec, '@')) {
+        throw PolicyError(std::string(what) + ": must not contain userinfo");
+    }
+    if (use == AddressUse::FlightUrl &&
+        (!(uri->path().empty() || uri->path() == "/") || !uri->query_string().empty() ||
+         absl::StrContains(spec, '#'))) {
+        throw PolicyError(std::string(what) + ": must be HOST:PORT only");
+    }
+    const std::string host = uri->host();
     if (host.empty()) {
-        throw PolicyError("listen: expected HOST:PORT, got '" + listen + "'");
+        throw PolicyError(std::string(what) + ": HOST:PORT is required");
+    }
+    // Host is an IPv6 literal or a DNS/IPv4 name; '%', ';', '=' etc. would smuggle a secret.
+    if (use == AddressUse::FlightUrl) {
+        in6_addr v6{};
+        const bool dns = !host.empty() && std::all_of(host.begin(), host.end(), [](char c) {
+            return absl::ascii_isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' ||
+                   c == '_';
+        });
+        if (!dns && ::inet_pton(AF_INET6, host.c_str(), &v6) != 1) {
+            throw PolicyError(std::string(what) +
+                              ": Flight URL host must be a DNS name or IP address");
+        }
     }
     int port = uri->port();
     if (port < 0) {
-        port = default_port;
+        if (default_port > 0) {
+            port = default_port;
+        } else {
+            throw PolicyError(std::string(what) + ": HOST:PORT is required");
+        }
     }
     return {host, port};
 }
@@ -120,13 +124,13 @@ bool IsWildcardHost(const std::string &host) {
 }
 
 std::string DefaultInternalListen(const std::string &listen) {
-    auto lp = ParseListenAddress(listen, 4747);
+    auto lp = ParseListenAddress(listen, "listen");
     return "127.0.0.1:" + std::to_string(lp.second + 1000);
 }
 
 void FinalizeDaemonListen(DaemonConfig &cfg) {
     if (cfg.internal_listen.empty()) {
-        auto lp = ParseListenAddress(cfg.listen, 4747);
+        auto lp = ParseListenAddress(cfg.listen, "listen");
         if (IsLoopbackHost(lp.first)) {
             cfg.internal_listen = DefaultInternalListen(cfg.listen);
         }
@@ -135,7 +139,7 @@ void FinalizeDaemonListen(DaemonConfig &cfg) {
         cfg.lease.advertise = "grpc://" + cfg.internal_listen;
     }
     if (cfg.advertised_address.empty()) {
-        auto lp = ParseListenAddress(cfg.listen, 4747);
+        auto lp = ParseListenAddress(cfg.listen, "listen");
         if (LeaseEndpointConfigured(cfg) && IsWildcardHost(lp.first)) {
             // Multi-node cannot publish a wildcard; ValidateDaemonOrThrow names the option.
         } else {
@@ -227,7 +231,7 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
     }
     if (root.Get("advertised_address")) {
         d.advertised_address = root.GetString("advertised_address");
-        ValidateAdvertisedAddressOrThrow(d.advertised_address, "advertised_address");
+        (void)ParseListenAddress(d.advertised_address, "advertised_address", AddressUse::FlightUrl);
     }
     d.handle_secret = root.GetString("handle_secret", d.handle_secret);
     auto secret_env = root.GetString("handle_secret_env");
@@ -430,6 +434,9 @@ DaemonConfig LoadDaemonFile(const std::string &path) {
         d.lease.skip_probe = lease->GetBool("skip_probe", false);
         d.lease.node_id = lease->GetString("node_id");
         d.lease.advertise = lease->GetString("advertise");
+        if (!d.lease.advertise.empty()) {
+            (void)ParseListenAddress(d.lease.advertise, "lease.advertise", AddressUse::FlightUrl);
+        }
         d.lease.ttl_ms = lease->GetInt("ttl_ms", d.lease.ttl_ms);
         auto ttl_raw = lease->GetString("ttl");
         if (!ttl_raw.empty()) {
@@ -548,7 +555,7 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
         issues.push_back({path, msg});
     };
     try {
-        auto lp = ParseListenAddress(cfg.listen, 4747);
+        auto lp = ParseListenAddress(cfg.listen, "listen");
         if (lp.second <= 0 || lp.second > 65535) {
             add("listen", "port out of range");
         }
@@ -557,18 +564,21 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
             add("advertised_address", "required when listen is a wildcard in multi-node mode");
         }
     } catch (const std::exception &e) {
-        add("listen", e.what());
+        add("listen", AddressIssueMessage("listen", e));
     }
     if (!cfg.advertised_address.empty()) {
         try {
-            ValidateAdvertisedAddressOrThrow(cfg.advertised_address, "advertised_address");
+            (void)ParseListenAddress(cfg.advertised_address, "advertised_address",
+                                     AddressUse::FlightUrl);
         } catch (const std::exception &e) {
-            std::string w = e.what();
-            const std::string prefix = "advertised_address: ";
-            if (w.rfind(prefix, 0) == 0) {
-                w = w.substr(prefix.size());
-            }
-            add("advertised_address", w);
+            add("advertised_address", AddressIssueMessage("advertised_address", e));
+        }
+    }
+    if (!cfg.lease.advertise.empty()) {
+        try {
+            (void)ParseListenAddress(cfg.lease.advertise, "lease.advertise", AddressUse::FlightUrl);
+        } catch (const std::exception &e) {
+            add("lease.advertise", AddressIssueMessage("lease.advertise", e));
         }
     }
     if (cfg.max_sandboxes == 0) {
@@ -605,6 +615,16 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     if (!cfg.debug_http.empty() && !cfg.allow_insecure_dev) {
         add("debug_http", "requires auth.allow_insecure_dev");
     }
+    if (!cfg.debug_http.empty()) {
+        try {
+            auto dp = ParseListenAddress(cfg.debug_http, "debug_http", AddressUse::Bind, 4748);
+            if (dp.second <= 0 || dp.second > 65535) {
+                add("debug_http", "port out of range");
+            }
+        } catch (const std::exception &e) {
+            add("debug_http", AddressIssueMessage("debug_http", e));
+        }
+    }
     if (cfg.handle_ttl_seconds <= 0) {
         add("limits.handle_ttl_seconds", "must be > 0");
     }
@@ -613,7 +633,7 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
             SteadyClockTimeoutMaxMessage("lease.proxy_first_message_max_ms"));
     }
     try {
-        auto lp = ParseListenAddress(cfg.listen, 4747);
+        auto lp = ParseListenAddress(cfg.listen, "listen");
         if (!cfg.internal_listen_configured) {
             if (!IsLoopbackHost(lp.first)) {
                 add("internal_listen",
@@ -626,13 +646,14 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
             }
         }
         if (!cfg.internal_listen.empty()) {
-            auto ip = ParseListenAddress(cfg.internal_listen, 5747);
+            auto ip =
+                ParseListenAddress(cfg.internal_listen, "internal_listen", AddressUse::Bind, 5747);
             if (ip.second <= 0 || ip.second > 65535) {
                 add("internal_listen", "port out of range");
             }
         }
     } catch (const std::exception &e) {
-        add("internal_listen", e.what());
+        add("internal_listen", AddressIssueMessage("internal_listen", e));
     }
     if (cfg.internal_listen_configured &&
         (!cfg.lease.endpoint.empty() || !cfg.lease.endpoint_env.empty()) &&
@@ -646,12 +667,13 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     if (!cfg.metrics_listen.empty() && cfg.metrics_listen != "off" &&
         cfg.metrics_listen != "false") {
         try {
-            auto mp = ParseListenAddress(cfg.metrics_listen, 9477);
+            auto mp =
+                ParseListenAddress(cfg.metrics_listen, "metrics.listen", AddressUse::Bind, 9477);
             if (mp.second <= 0 || mp.second > 65535) {
                 add("metrics.listen", "port out of range");
             }
         } catch (const std::exception &e) {
-            add("metrics.listen", e.what());
+            add("metrics.listen", AddressIssueMessage("metrics.listen", e));
         }
     }
 

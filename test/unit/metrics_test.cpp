@@ -61,4 +61,18 @@ void duckbox::test::RunMetricsTests() {
 	Expect(std::string(ClassifyLimit(Error("query timeout"))) == "timeout", "classify timeout");
 	WriteSandboxAudit("create", "acme-analyst", "tenant_21:user_sergio");
 	Expect(text.find("duckbox_init_sql_seconds") == std::string::npos, "initSQL histogram is gone");
+
+	try {
+		StartMetricsHttp("127.0.0.1:1/?tok=s3cretLeak", nullptr);
+		Expect(false, "metrics bind on port 1 (no throw)");
+		StopMetricsHttp();
+	} catch (const std::exception &e) {
+		const std::string w = e.what();
+		Expect(w.find("metrics listen failed on 127.0.0.1:1") != std::string::npos,
+		       "metrics bind failure names host:port");
+		Expect(w.find("s3cretLeak") == std::string::npos && w.find("tok=") == std::string::npos &&
+		           w.find("/?") == std::string::npos,
+		       "metrics bind failure does not echo the raw listen value");
+		StopMetricsHttp();
+	}
 }

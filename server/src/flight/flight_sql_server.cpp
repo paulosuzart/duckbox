@@ -2104,7 +2104,7 @@ int RunServer(const ServerOptions &opt_in) {
         return 1;
     }
 
-    auto ip = ParseListenAddress(ilisten, 5747);
+    auto ip = ParseListenAddress(ilisten, "internal_listen", AddressUse::Bind, 5747);
     std::string flight = opt.daemon.lease.advertise;
     if (flight.empty()) {
         flight = "grpc://" + ip.first + ":" + std::to_string(internal->port());
@@ -2142,16 +2142,17 @@ int RunServer(const ServerOptions &opt_in) {
         }
     });
     std::thread internal_th([&]() { (void)internal->Serve(); });
-    auto lp = ParseListenAddress(opt.daemon.listen, 4747);
+    auto lp = ParseListenAddress(opt.daemon.listen, "listen");
     std::cout << "duckbox Flight SQL listening on grpc://" << lp.first << ":" << pub->port()
               << " (DuckDB " << DUCKBOX_DUCKDB_VERSION << ", control plane only)" << std::endl;
     std::cout << "duckbox internal listener on grpc://" << ip.first << ":" << internal->port()
               << " (peer + operator; do not expose)" << std::endl;
     LogAdvertisedAddress(std::cout, opt.daemon.advertised_address);
     if (!opt.daemon.debug_http.empty()) {
+        auto dp = ParseListenAddress(opt.daemon.debug_http, "debug_http", AddressUse::Bind, 4748);
         ServerOptions dbg = opt;
         std::thread([dbg, defs, runtime]() { StartDebugHttp(dbg, defs, runtime); }).detach();
-        std::cout << "debug HTTP /v1/query on " << opt.daemon.debug_http << "\n";
+        std::cout << "debug HTTP /v1/query on " << dp.first << ":" << dp.second << "\n";
     }
 
     auto signals = std::make_shared<std::atomic<int>>(0);

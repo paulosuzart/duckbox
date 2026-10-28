@@ -150,8 +150,13 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg);
 
 bool GlobMatch(const std::string &pattern,
                const std::string &value); // POSIX fnmatch; caller key patterns
-// HOST:PORT (optional scheme). Arrow URI parser; default_port if the URI has none.
-std::pair<std::string, int> ParseListenAddress(const std::string &listen, int default_port);
+enum class AddressUse { Bind, FlightUrl };
+// Arrow URI parser. Never echoes the input. Bind: HOST:PORT (optional scheme).
+// FlightUrl: grpc:// or grpc+tls:// and a port. Rejects userinfo without echoing it.
+std::pair<std::string, int> ParseListenAddress(const std::string &listen,
+                                               const char *what = "listen",
+                                               AddressUse use = AddressUse::Bind,
+                                               int default_port = -1);
 // Throws AuthError if this identity may not use sandbox_key.
 void AuthorizeCaller(const DaemonConfig &cfg, const std::string &identity,
                      const std::string &sandbox_key);
