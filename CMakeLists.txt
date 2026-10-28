@@ -513,7 +513,8 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/temp_directory_test.cpp
   test/unit/token_sanitize_test.cpp
   test/unit/retryable_error_test.cpp
-  test/unit/deadline_test.cpp)
+  test/unit/deadline_test.cpp
+  test/unit/lease_check_owned_test.cpp)
 
 duckbox_add_test(duckbox_guardrail_tests
   test/support/check.cpp
@@ -549,7 +550,8 @@ duckbox_add_test(duckbox_integration_tests
   test/integration/secret_flight_test.cpp
   test/integration/temp_directory_test.cpp
   test/integration/token_sanitize_test.cpp
-  test/integration/retryable_error_test.cpp)
+  test/integration/retryable_error_test.cpp
+  test/integration/doget_owner_test.cpp)
 add_dependencies(duckbox_integration_tests duckbox)
 target_compile_definitions(duckbox_integration_tests PRIVATE
   DUCKBOX_BIN_PATH="$<TARGET_FILE:duckbox>")

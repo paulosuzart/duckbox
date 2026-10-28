@@ -36,8 +36,9 @@ int main() {
     RunTempDirectoryExecTests();
     RunTokenSanitizeTests();
     RunRetryableErrorFlightTests();
+    RunDoGetOwnerTests();
     std::cerr << "integration suite proxy_hang\n" << std::flush;
-    // Last: 150 hung DoGets can detach leftover gRPC threads (Arrow #31235).
+    // Last: a hung peer handshake can detach a leftover gRPC thread (Arrow #31235).
     RunProxyHangTests();
     return ReportAndExit("integration");
 }

@@ -31,6 +31,7 @@ void RunSecretFlightTests();
 void RunTempDirectoryExecTests();
 void RunTokenSanitizeTests();
 void RunRetryableErrorFlightTests();
+void RunDoGetOwnerTests();
 
 } // namespace test
 } // namespace duckbox

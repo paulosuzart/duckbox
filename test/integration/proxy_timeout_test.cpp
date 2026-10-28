@@ -290,37 +290,6 @@ FlightCallOptions QueryOpt() {
     return opt;
 }
 
-class FakeCallContext : public ServerCallContext {
-  public:
-    const std::string &peer_identity() const override { return peer_id_; }
-    const std::string &peer() const override { return peer_; }
-    void AddHeader(const std::string &, const std::string &) const override {}
-    void AddTrailer(const std::string &, const std::string &) const override {}
-    ::arrow::flight::ServerMiddleware *GetMiddleware(const std::string &) const override {
-        return nullptr;
-    }
-    bool is_cancelled() const override { return cancelled_.load(std::memory_order_acquire); }
-    const ::arrow::flight::CallHeaders &incoming_headers() const override { return headers_; }
-    void Cancel() { cancelled_.store(true, std::memory_order_release); }
-
-  private:
-    std::string peer_id_;
-    std::string peer_;
-    ::arrow::flight::CallHeaders headers_;
-    std::atomic<bool> cancelled_{false};
-};
-
-bool WaitStub(const OwnerStub *stub, bool (OwnerStub::*fn)() const, int timeout_ms) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (stub != nullptr && (stub->*fn)()) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return false;
-}
-
 struct ProxyFixture {
     DaemonConfig daemon_a;
     DaemonConfig daemon_b;
@@ -399,123 +368,6 @@ void PlantOwnerLease(ProxyFixture &fx, const std::string &flight) {
     auto held = fx.leases_b->Acquire(fx.rec.id);
     Expect(held.owned_locally && held.flight == flight,
            "node-b lease points at the owner Flight URL");
-}
-
-void TestLongProxiedQuery() {
-    ProxyFixture fx(kProxyTimeoutMs);
-    auto peers_b = std::make_shared<PeerFlight>(fx.daemon_b.peer_secret, kProxyTimeoutMs);
-    auto na = StartProxyNode(fx);
-    auto nb = StartDuckboxPair(fx.daemon_b, fx.defs, fx.rt_b, peers_b, fx.signer, fx.rewriter);
-    na.Start();
-    nb.Start();
-    fx.leases_a->set_flight("grpc://127.0.0.1:" + std::to_string(na.int_port));
-    fx.leases_b->set_flight("grpc://127.0.0.1:" + std::to_string(nb.int_port));
-    fx.PublishOwner("node-b", "grpc://127.0.0.1:" + std::to_string(nb.int_port),
-                    "grpc://127.0.0.1:" + std::to_string(nb.pub_port));
-    auto owned = fx.rt_b->Get(fx.rec);
-    Expect(owned && fx.leases_b->Peek("proxy-timeout-box").owned_locally,
-           "node-b owns the sandbox");
-
-    int64_t n = 400000;
-    int64_t local_ms = 0;
-    std::string sql;
-    for (int i = 0; i < 6; i++) {
-        sql = "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM t WHERE x < " +
-              std::to_string(n) + ") SELECT max(x) FROM t";
-        auto t0 = std::chrono::steady_clock::now();
-        auto out = owned->Execute(sql);
-        local_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now() - t0)
-                       .count();
-        if (local_ms > kProxyTimeoutMs + 400) {
-            break;
-        }
-        n *= 2;
-    }
-    Expect(local_ms > kProxyTimeoutMs, "calibrated owner query exceeds proxy_timeout_ms");
-
-    auto loc = Location::ForGrpcTcp("127.0.0.1", na.pub_port);
-    auto cli_res = FlightClient::Connect(*loc);
-    Expect(cli_res.ok(), "client connects to non-owner");
-    auto cli = std::shared_ptr<FlightClient>(std::move(cli_res).ValueOrDie());
-    ::arrow::flight::sql::FlightSqlClient sql_cli(cli);
-    auto qopt = QueryOpt();
-    auto t0 = std::chrono::steady_clock::now();
-    auto info_res = sql_cli.Execute(qopt, sql);
-    Expect(info_res.ok(), "proxied GetFlightInfo for a long query succeeds");
-    if (info_res.ok()) {
-        auto stream_res = cli->DoGet(qopt, info_res.ValueOrDie()->endpoints()[0].ticket);
-        Expect(stream_res.ok(), "proxied DoGet starts without DEADLINE_EXCEEDED");
-        if (stream_res.ok()) {
-            auto tbl = stream_res.ValueOrDie()->ToTable();
-            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now() - t0)
-                                  .count();
-            Expect(tbl.ok(), "long proxied query returns the full result");
-            if (tbl.ok()) {
-                Expect((*tbl)->num_rows() == 1, "long proxied query has one aggregate row");
-            }
-            Expect(elapsed_ms > kProxyTimeoutMs, "proxied stream outlived proxy_timeout_ms");
-            auto err = tbl.ok() ? std::string() : tbl.status().ToString();
-            Expect(!absl::StrContains(absl::AsciiStrToLower(err), "deadline exceeded"),
-                   "long proxied query is not DEADLINE_EXCEEDED");
-        }
-    }
-    na.Stop();
-    nb.Stop();
-}
-
-void TestDeadlineCancelsHungOwner() {
-    ProxyFixture fx(kProxyTimeoutMs);
-    fx.peers_a->set_first_message_max_ms(kProxyTimeoutMs);
-    StubOwner owner;
-    owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::HangBeforeSchema);
-    auto *stub = owner.server.get();
-    owner.Start(fx.daemon_b);
-
-    FakeCallContext ctx;
-    auto t0 = std::chrono::steady_clock::now();
-    auto stream_res = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-timeout"}, fx.rec.id,
-                                               fx.rec.key, ctx, 0);
-    auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-            .count();
-    std::cout << "deadline_before_schema_ms=" << elapsed_ms << "\n";
-    Expect(!stream_res.ok(), "hung owner fails the whole-call DoGet deadline");
-    auto msg = stream_res.status().ToString();
-    Expect(absl::StrContains(msg, "peer proxy timed out"),
-           "deadline before schema is a fixed timeout error");
-    Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 2500,
-           "whole-call deadline fires around proxy_first_message_max_ms");
-    Expect(WaitStub(stub, &OwnerStub::Cancelled, 4000),
-           "gRPC deadline cancels the hung owner DoGet");
-    owner.Stop();
-}
-
-void TestDeadlineCapped() {
-    ProxyFixture fx(500);
-    fx.peers_a->set_first_message_max_ms(kProxyTimeoutMs);
-    StubOwner owner;
-    owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::HangBeforeSchema);
-    auto *stub = owner.server.get();
-    owner.Start(fx.daemon_b);
-
-    FakeCallContext ctx;
-    auto t0 = std::chrono::steady_clock::now();
-    auto stream_res = fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-timeout"}, fx.rec.id,
-                                               fx.rec.key, ctx, 8000);
-    auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-            .count();
-    std::cout << "deadline_capped_ms=" << elapsed_ms << "\n";
-    Expect(!stream_res.ok(), "ceiling caps query_timeout_ms + proxy_timeout_ms");
-    Expect(absl::StrContains(stream_res.status().ToString(), "peer proxy timed out"),
-           "capped deadline is a fixed timeout error");
-    Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 2500,
-           "whole-call deadline is the 2000ms ceiling, not 8000+500");
-    Expect(WaitStub(stub, &OwnerStub::Cancelled, 4000),
-           "gRPC deadline cancels the hung owner DoGet");
-    owner.Stop();
 }
 
 void TestOwnerInterruptOnCancel() {
@@ -654,29 +506,6 @@ void TestGetFlightInfoTimeout() {
     owner.Stop();
 }
 
-void TestSlowStubStream() {
-    ProxyFixture fx(500);
-    StubOwner owner;
-    owner.server = std::make_unique<OwnerStub>(OwnerStub::Mode::SlowDoGet);
-    owner.Start(fx.daemon_b);
-    FakeCallContext ctx;
-    auto t0 = std::chrono::steady_clock::now();
-    auto stream_res =
-        fx.peers_a->ForwardDoGet(owner.Url(), Ticket{"proxy-timeout"}, fx.rec.id, fx.rec.key, ctx);
-    Expect(stream_res.ok(), "slow-stub proxied DoGet completes under the deadline ceiling");
-    if (stream_res.ok()) {
-        auto stream = std::move(*stream_res);
-        auto schema = stream->GetSchemaPayload();
-        auto batch = stream->Next();
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::steady_clock::now() - t0)
-                              .count();
-        Expect(schema.ok() && batch.ok(), "slow-stub stream returns the full result");
-        Expect(elapsed_ms > 500, "slow-stub DoGet outlived proxy_timeout_ms");
-    }
-    owner.Stop();
-}
-
 struct SigstopChild {
     pid_t pid = -1;
     ~SigstopChild() { Reap(); }
@@ -788,183 +617,16 @@ pid_t ForkFrozenOwner(const DaemonConfig &cfg, OwnerStub::Mode mode, int *port_o
     return pid;
 }
 
-int SelfThreadCount() {
-    std::ifstream in("/proc/self/status");
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.rfind("Threads:", 0) == 0) {
-            return std::atoi(line.c_str() + 8);
-        }
-    }
-    return 0;
-}
-
-int SelfFdCount() {
-    int n = 0;
-    std::error_code ec;
-    for (auto it = std::filesystem::directory_iterator("/proc/self/fd", ec);
-         it != std::filesystem::directory_iterator(); ++it) {
-        ++n;
-    }
-    return n;
-}
-
-void TestSigstopPeerDoGet() {
-    ProxyFixture fx(kProxyTimeoutMs);
-    fx.peers_a->set_first_message_max_ms(kProxyTimeoutMs);
-    int port = 0;
-    SigstopChild child;
-    child.pid = ForkFrozenOwner(fx.daemon_b, OwnerStub::Mode::HangBeforeSchema, &port);
-    Expect(child.pid > 0, "sigstop-doget fork");
-    Expect(port > 0, "sigstop-doget child published a port");
-    const std::string url = "grpc://127.0.0.1:" + std::to_string(port);
-    int wst = 0;
-    const pid_t w = waitpid(child.pid, &wst, WNOHANG);
-    Expect(w == 0, "owner is alive before dial (waitpid=" + std::to_string(w) +
-                       (w > 0 ? " status=" + std::to_string(wst) : std::string()) + ")");
-    using StreamRes = ::arrow::Result<std::unique_ptr<FlightDataStream>>;
-    // Everything the worker touches is owned by the worker (shared_ptr / by
-    // value): on a budget overrun it is detached and may still return later.
-    auto done = std::make_shared<std::promise<StreamRes>>();
-    auto fut = done->get_future();
-    auto ctx = std::make_shared<FakeCallContext>();
-    auto t0 = std::chrono::steady_clock::now();
-    std::thread worker([done, ctx, peers = fx.peers_a, url, id = fx.rec.id, key = fx.rec.key] {
-        done->set_value(peers->ForwardDoGet(url, Ticket{"proxy-timeout"}, id, key, *ctx));
-    });
-    const auto budget = std::chrono::milliseconds(kProxyTimeoutMs + 4000);
-    if (fut.wait_for(budget) != std::future_status::ready) {
-        worker.detach();
-        child.Reap();
-        Expect(false, "DoGet right after SIGSTOP exceeded the deadline budget");
-        // Detached worker may still hold leak_mu; do not continue the suite.
-        _exit(1);
-    }
-    worker.join();
-    auto stream = fut.get();
-    auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-            .count();
-    std::cout << "sigstop_peer_doget_ms=" << elapsed_ms << "\n";
-    child.Reap();
-    auto msg = stream.ok() ? std::string("ok") : stream.status().ToString();
-    Expect(!stream.ok(), "DoGet right after SIGSTOP fails: " + msg);
-    Expect(absl::StrContains(msg, "peer proxy timed out"),
-           "DoGet right after SIGSTOP is a timeout, not '" + msg + "'");
-    Expect(elapsed_ms >= kProxyTimeoutMs && elapsed_ms < kProxyTimeoutMs + 4000,
-           "DoGet right after SIGSTOP is bounded by the deadline (no 60s hang); elapsed=" +
-               std::to_string(elapsed_ms) + " status=" + msg);
-}
-
-void TestSigstopHandshakeClose() {
-    constexpr int kN = 260;
-    constexpr int64_t kShortMs = 50;
-    ProxyFixture fx(kShortMs);
-    fx.peers_a->set_first_message_max_ms(kShortMs);
-    int port = 0;
-    SigstopChild child;
-    child.pid = ForkFrozenOwner(fx.daemon_b, OwnerStub::Mode::HangBeforeSchema, &port);
-    Expect(child.pid > 0, "graveyard-doget fork");
-    Expect(port > 0, "graveyard-doget child published a port");
-    const std::string frozen = "grpc://127.0.0.1:" + std::to_string(port);
-    int wst = 0;
-    Expect(waitpid(child.pid, &wst, WNOHANG) == 0, "graveyard owner is alive before dial");
-
-    int64_t max_ms = 0;
-    int failed = 0;
-    FakeCallContext ctx;
-    using StreamRes = ::arrow::Result<std::unique_ptr<FlightDataStream>>;
-    const auto call_budget = std::chrono::milliseconds(kShortMs + 2000);
-    auto one_frozen = [&](int idx) -> StreamRes {
-        auto done = std::make_shared<std::promise<StreamRes>>();
-        auto fut = done->get_future();
-        auto call_ctx = std::make_shared<FakeCallContext>();
-        auto t0 = std::chrono::steady_clock::now();
-        std::thread worker(
-            [done, call_ctx, peers = fx.peers_a, frozen, id = fx.rec.id, key = fx.rec.key] {
-                done->set_value(
-                    peers->ForwardDoGet(frozen, Ticket{"proxy-timeout"}, id, key, *call_ctx));
-            });
-        if (fut.wait_for(call_budget) != std::future_status::ready) {
-            worker.detach();
-            child.Reap();
-            Expect(false, "frozen handshake DoGet " + std::to_string(idx) +
-                              " exceeded the per-call budget (Close hang?)");
-            _exit(1);
-        }
-        worker.join();
-        auto stream = fut.get();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now() - t0)
-                      .count();
-        if (ms > max_ms) {
-            max_ms = ms;
-        }
-        return stream;
-    };
-    // gRPC's thread pool starts lazily. Baseline after warm-up so the test
-    // does not depend on earlier suites leaving threads/fds behind.
-    constexpr int kWarm = 5;
-    for (int i = 0; i < kWarm; i++) {
-        (void)one_frozen(-1 - i);
-    }
-    const int threads0 = SelfThreadCount();
-    const int fds0 = SelfFdCount();
-    for (int i = 0; i < kN; i++) {
-        auto stream = one_frozen(i);
-        if (!stream.ok()) {
-            ++failed;
-        }
-    }
-    const int threads1 = SelfThreadCount();
-    const int fds1 = SelfFdCount();
-    std::cout << "sigstop_close_n=" << kN << " failed=" << failed << " threads_before=" << threads0
-              << " threads_after=" << threads1 << " fds_before=" << fds0 << " fds_after=" << fds1
-              << " max_ms=" << max_ms << "\n";
-    Expect(failed == kN, "each frozen handshake DoGet fails");
-    Expect(max_ms < kShortMs + 2000,
-           "no graveyard pthread_cond_destroy hang; max_ms=" + std::to_string(max_ms));
-    Expect(threads1 <= threads0 + 4, "thread count stays flat across >256 failed handshakes");
-    Expect(fds1 <= fds0 + 4, "fd count stays flat across >256 failed handshakes");
-
-    StubOwner healthy;
-    healthy.server = std::make_unique<OwnerStub>(OwnerStub::Mode::Fast);
-    healthy.Start(fx.daemon_b);
-    auto ok = fx.peers_a->ForwardDoGet(healthy.Url(), Ticket{"proxy-timeout"}, fx.rec.id,
-                                       fx.rec.key, ctx);
-    Expect(ok.ok(), "healthy peer DoGet still succeeds after the frozen-handshake loop");
-    int64_t release_ms = -1;
-    if (ok.ok()) {
-        (void)(*ok)->Next();
-        auto t1 = std::chrono::steady_clock::now();
-        ok->reset();
-        release_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         std::chrono::steady_clock::now() - t1)
-                         .count();
-    }
-    std::cout << "sigstop_close_healthy_release_ms=" << release_ms << "\n";
-    Expect(release_ms >= 0 && release_ms < 1000,
-           "healthy stream is released promptly after Close(); ms=" + std::to_string(release_ms));
-    healthy.Stop();
-    child.Reap();
-}
-
 } // namespace
 
 void duckbox::test::RunProxyTimeoutTests() {
-    TestSlowStubStream();
-    TestLongProxiedQuery();
     TestOwnerInterruptOnCancel();
 #ifndef __APPLE__
     // Hung-peer Flight deadlines (silent stub / SIGSTOP) hang Apple Arrow 26
     // for the job lifetime even with TimeoutDuration seconds set. Linux CI
     // covers those bounds. Last green macOS (5ebea330) used a direct
     // timeout_ms/1000 assignment; RemainingTimeout still hangs there.
-    TestDeadlineCancelsHungOwner();
-    TestDeadlineCapped();
     TestGetFlightInfoTimeout();
     TestSigstopPeerGetFlightInfo();
-    TestSigstopPeerDoGet();
-    TestSigstopHandshakeClose();
 #endif
 }

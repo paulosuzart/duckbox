@@ -73,6 +73,7 @@ class ScriptedLeaseManager : public ILeaseManager {
         miss.tenant_key = resource_id;
         return miss;
     }
+    Lease CheckOwned(const std::string &resource_id) override { return Acquire(resource_id); }
     void Renew(const Lease &) override {}
     void Release(const Lease &) override {}
     Lease Peek(const std::string &resource_id) override {
