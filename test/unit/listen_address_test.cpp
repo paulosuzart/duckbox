@@ -95,19 +95,19 @@ void duckbox::test::RunListenAddressTests() {
         Expect(std::string(e.what()).find("scheme must be grpc:// or grpc+tls://") !=
                    std::string::npos,
                "lease.advertise refuses a non-Flight scheme");
-        Expect(std::string(e.what()).find("foo://") == std::string::npos,
+        Expect(std::string(e.what()).find("foo") == std::string::npos,
                "lease.advertise foo:// does not echo the scheme");
     }
     ExpectReject("http://127.0.0.1:9000", "scheme is invalid / not accepted",
                  "listen refuses an http:// prefix");
     ExpectReject("foo://127.0.0.1:4747", "scheme is invalid / not accepted",
-                 "listen refuses foo://", {"foo://"});
+                 "listen refuses foo://", {"foo"});
     ExpectReject("Http://127.0.0.1:4747", "scheme is invalid / not accepted",
                  "mixed-case scheme is refused");
     ExpectReject("http://127.0.0.1:5747", "scheme is invalid / not accepted",
                  "internal_listen refuses an http:// prefix", {"http://"}, "internal_listen");
     ExpectReject("foo://127.0.0.1:9477", "scheme is invalid / not accepted",
-                 "metrics.listen refuses foo://", {"foo://"}, "metrics.listen");
+                 "metrics.listen refuses foo://", {"foo"}, "metrics.listen");
     ExpectReject("http://127.0.0.1:18480", "scheme is invalid / not accepted",
                  "debug_http refuses an http:// prefix", {"http://"}, "debug_http", 4748);
 
@@ -119,6 +119,8 @@ void duckbox::test::RunListenAddressTests() {
           "::ffff:0.0.0.0", "[::0]", "[::ffff:0.0.0.0]", "[0:0:0:0:0:0:0:0]"}) {
         Expect(IsWildcardHost(w), std::string("wildcard spelling is a wildcard bind: ") + w);
     }
+    Expect(!IsWildcardHost("::ffff:1.2.3.4") && !IsWildcardHost("[::ffff:1.2.3.4]"),
+           "v4-mapped non-zero addresses are not wildcards");
     Expect(!IsWildcardHost("::1") && !IsWildcardHost("10.0.0.7") && !IsWildcardHost("node-a"),
            "non-any addresses are not wildcards");
     Expect(!IsWildcardHost("127.0.0.1") && !IsWildcardHost("localhost"),
@@ -145,6 +147,9 @@ void duckbox::test::RunListenAddressTests() {
     ExpectReject(":4984", "HOST:PORT is required", "scheme-less empty host is refused");
     ExpectReject("grpc://node-a.example:4984/?tok=s3cretLeak", "HOST:PORT only", "query is refused",
                  {"s3cretLeak"}, "advertised_address");
+    ExpectReject("127.0.0.1:4747?", "HOST:PORT only", "trailing ? is refused");
+    ExpectReject("grpc://node-a.example:4984?", "HOST:PORT only",
+                 "advertised_address trailing ? is refused", {}, "advertised_address");
     ExpectReject("grpc://node-a.example:4984#s3cretLeak", "HOST:PORT only", "fragment is refused",
                  {"s3cretLeak"}, "advertised_address");
     ExpectReject(std::string(513, 'a') + ":4747", "HOST:PORT is required",
@@ -158,8 +163,45 @@ void duckbox::test::RunListenAddressTests() {
                  "empty DNS label is refused");
     ExpectReject(std::string(64, 'a') + ".example:4747", "host must be a DNS name or IP address",
                  "64-char DNS label is refused");
-    ExpectReject(std::string(254, 'a') + ":4747", "host must be a DNS name or IP address",
-                 "254-char DNS name is refused");
+    {
+        const std::string l63(63, 'a');
+        auto ok63 = ParseListenAddress(l63 + ".example:4747");
+        Expect(ok63.first == l63 + ".example", "63-char DNS label is accepted");
+        const std::string n253 = std::string(63, 'a') + "." + std::string(63, 'b') + "." +
+                                 std::string(63, 'c') + "." + std::string(61, 'd');
+        Expect(ParseListenAddress(n253 + ":4747").first == n253, "253-char DNS name is accepted");
+        ExpectReject(n253 + "d:4747", "host must be a DNS name or IP address",
+                     "254-char multi-label DNS name is refused");
+    }
+    for (const char *bad : {"-a", "a-", "-", "a.-b.c"}) {
+        ExpectReject(std::string(bad) + ":4747", "host must be a DNS name or IP address",
+                     "leading/trailing hyphen in a DNS label is refused (RFC 1123)");
+    }
+    for (const char *bad :
+         {"1.2.3.999", "256.1.1.1", "1.2.3.4.5", "4294967296", "08", "1.2.3.08"}) {
+        ExpectReject(std::string(bad) + ":4747", "host must be a DNS name or IP address",
+                     "all-numeric host that is not an IP literal is refused");
+    }
+    Expect(ParseListenAddress("xn--bcher-kva.example:4747").first == "xn--bcher-kva.example",
+           "punycode label is accepted");
+    Expect(ParseListenAddress("123.example:4747").first == "123.example",
+           "numeric non-top label is a DNS name");
+    ExpectReject("grpc://127.0.0.1:4747", "scheme is invalid / not accepted",
+                 "listen refuses lowercase grpc://", {"grpc://"});
+    ExpectReject("grpc://127.0.0.1:5747", "scheme is invalid / not accepted",
+                 "internal_listen refuses lowercase grpc://", {"grpc://"}, "internal_listen");
+    ExpectReject("grpc://127.0.0.1:9477", "scheme is invalid / not accepted",
+                 "metrics.listen refuses lowercase grpc://", {"grpc://"}, "metrics.listen");
+    ExpectReject("grpc://127.0.0.1:18480", "scheme is invalid / not accepted",
+                 "debug_http refuses lowercase grpc://", {"grpc://"}, "debug_http", 4748);
+
+    {
+        auto c = duckbox::node::DefaultDaemonConfig();
+        c.advertised_address = "node-a.example:4747";
+        duckbox::node::FinalizeDaemonListen(c);
+        Expect(c.advertised_address == "grpc://node-a.example:4747",
+               "bare HOST:PORT advertised_address is published as grpc://HOST:PORT");
+    }
 
     // The 512-byte cap is the complexity bound; the 513-byte case above proves it.
 }

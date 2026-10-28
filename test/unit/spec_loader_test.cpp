@@ -746,8 +746,12 @@ void duckbox::test::RunSpecLoaderTests() {
                 std::string w = e.what();
                 Expect(w.find("advertised_address") != std::string::npos,
                        "host 0 wildcard names advertised_address");
-                Expect(w.find("wildcard (0, 0.0.0.0, or ::)") != std::string::npos,
-                       "host 0 wildcard error documents 0 as a wildcard bind");
+                Expect(w.find("0x0") != std::string::npos && w.find("00") != std::string::npos &&
+                           w.find("0.0") != std::string::npos &&
+                           w.find("000.000.000.000") != std::string::npos &&
+                           w.find("0x00000000") != std::string::npos &&
+                           w.find("[::ffff:0.0.0.0]") != std::string::npos,
+                       "host 0 wildcard error lists the accepted wildcard spellings");
             }
             host0.advertised_address = "grpc://node-a.example:4747";
             ValidateDaemonOrThrow(host0);
@@ -850,9 +854,11 @@ void duckbox::test::RunSpecLoaderTests() {
                 Expect(false, "ValidateDaemonOrThrow listen without port (no throw)");
             } catch (const std::exception &e) {
                 std::string w = e.what();
-                Expect(w.find("listen") != std::string::npos &&
-                           w.find("HOST:PORT is required") != std::string::npos,
-                       "ValidateDaemonOrThrow listen without port names the field and HOST:PORT");
+                Expect(w == "sandbox spec is invalid (1 error):\n  - listen: HOST:PORT is required",
+                       "ValidateDaemonOrThrow listen without port is exactly one listen error");
+                Expect(w.find("internal_listen: listen:") == std::string::npos,
+                       "ValidateDaemonOrThrow listen without port does not duplicate onto "
+                       "internal_listen");
                 Expect(w.find("127.0.0.1") == std::string::npos,
                        "ValidateDaemonOrThrow listen without port does not echo the value");
             }
@@ -913,7 +919,7 @@ void duckbox::test::RunSpecLoaderTests() {
                 std::string w = e.what();
                 Expect(w.find("debug_http: scheme is invalid / not accepted") != std::string::npos,
                        "debug_http foo:// names the scheme rule instead of std::terminate");
-                Expect(w.find("foo://") == std::string::npos &&
+                Expect(w.find("foo") == std::string::npos &&
                            w.find("127.0.0.1") == std::string::npos,
                        "debug_http foo:// does not echo the value");
             }
@@ -1067,7 +1073,7 @@ void duckbox::test::RunSpecLoaderTests() {
                     Expect(w.find("metrics.listen") != std::string::npos &&
                                w.find("scheme is invalid / not accepted") != std::string::npos,
                            "foo:// metrics.listen names the scheme rule");
-                    Expect(w.find("foo://") == std::string::npos &&
+                    Expect(w.find("foo") == std::string::npos &&
                                w.find("127.0.0.1") == std::string::npos,
                            "foo:// metrics.listen does not echo the value");
                 }

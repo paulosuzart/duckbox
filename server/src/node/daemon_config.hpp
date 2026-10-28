@@ -55,11 +55,10 @@ struct LeaseSettings {
     std::string advertise; // grpc://host:port; default grpc://listen
     int64_t ttl_ms = 15000;
     int64_t heartbeat_ms = 5000;
-    int64_t skew_ms = 1000;     // steal waits this long past expiry_ms (clock skew)
-    int64_t cache_ms = 250;     // short Acquire cache; 0 disables
-    int64_t gc_ms = 86'400'000; // tombstone GC age; 0 disables (default 24h)
-    int64_t proxy_timeout_ms =
-        5000; // peer connect, handshake, GetFlightInfo; added to DoGet deadline
+    int64_t skew_ms = 1000;          // steal waits this long past expiry_ms (clock skew)
+    int64_t cache_ms = 250;          // short Acquire cache; 0 disables
+    int64_t gc_ms = 86'400'000;      // tombstone GC age; 0 disables (default 24h)
+    int64_t proxy_timeout_ms = 5000; // peer connect, handshake, GetFlightInfo; added to DoGet deadline
     // Ceiling for the proxied DoGet whole-call deadline, and for the owner
     // DescribeHandleArrow mutex wait, when query_timeout_ms is 0.
     int64_t proxy_first_message_max_ms = 60000;
@@ -68,7 +67,7 @@ struct LeaseSettings {
     // After SIGTERM, _Exit if graceful shutdown (Drain + Flight Shutdown) exceeds this.
     // Default 8s = Drain(2s) + Flight Shutdown(2s) + slack. Must be > 0.
     int64_t shutdown_watchdog_ms = 8000;
-    size_t max_leases = 0; // 0 = unlimited
+    size_t max_leases = 0;           // 0 = unlimited
 };
 
 // Trusted caller → allowed tenant-key globs. Empty list is allow-all only when
@@ -151,12 +150,12 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg);
 
 bool GlobMatch(const std::string &pattern,
                const std::string &value); // POSIX fnmatch; caller key patterns
+enum class AddressUse { Bind, FlightUrl };
 // HOST:PORT. Arrow URI parser. Never echoes `listen`.
 // Bind (listen, internal_listen, metrics, debug_http): no scheme; bare HOST:PORT.
 // FlightUrl (advertised_address, lease.advertise): grpc:// or grpc+tls://, or bare HOST:PORT.
 // Rejects missing port (unless default_port > 0), port 0, userinfo, IPvFuture,
 // and non-canonical percent-encoding. DNS host: [A-Za-z0-9.-], labels 1-63, total <= 253.
-enum class AddressUse { Bind, FlightUrl };
 std::pair<std::string, int> ParseListenAddress(const std::string &listen,
                                                const char *what = "listen",
                                                AddressUse use = AddressUse::Bind,

@@ -66,7 +66,8 @@ bool IsDnsHostname(const std::string &host) {
         return false;
     }
     for (absl::string_view label : absl::StrSplit(host, '.')) {
-        if (label.empty() || label.size() > 63) {
+        // RFC 1123 2.1: 1-63 chars, letters/digits/hyphen, no leading or trailing hyphen.
+        if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-') {
             return false;
         }
         if (!std::all_of(label.begin(), label.end(), [](char c) {
@@ -75,17 +76,19 @@ bool IsDnsHostname(const std::string &host) {
             return false;
         }
     }
-    return true;
+    // RFC 1123 2.1: an all-numeric top label is not a DNS name. Numeric hosts must be IP
+    // literals (checked by IsIpLiteral first), so 1.2.3.999 / 256.1.1.1 / 999 are refused.
+    const auto dot = host.rfind('.');
+    const absl::string_view top = dot == std::string::npos
+                                      ? absl::string_view(host)
+                                      : absl::string_view(host).substr(dot + 1);
+    return !std::all_of(top.begin(), top.end(),
+                        [](char c) { return absl::ascii_isdigit(static_cast<unsigned char>(c)); });
 }
 
 bool IsIpLiteral(const std::string &host) {
-    const std::string h = UnbracketHost(host);
-    in6_addr v6{};
-    if (::inet_pton(AF_INET6, h.c_str(), &v6) == 1) {
-        return true;
-    }
     in_addr v4{};
-    return ::inet_aton(h.c_str(), &v4) != 0;
+    return ::inet_aton(host.c_str(), &v4) != 0;
 }
 
 } // namespace
@@ -122,8 +125,9 @@ std::pair<std::string, int> ParseListenAddress(const std::string &listen, const 
         throw PolicyError(std::string(what) + ": must not contain userinfo");
     }
     // arrow::util::Uri has no fragment accessor; '#' is never valid in a host:port URL.
+    // A lone trailing '?' leaves query_string empty and would otherwise be published as-is.
     if (!(uri->path().empty() || uri->path() == "/") || !uri->query_string().empty() ||
-        absl::StrContains(spec, '#')) {
+        absl::StrContains(spec, '#') || absl::StrContains(listen, '?')) {
         throw PolicyError(std::string(what) + ": must be HOST:PORT only");
     }
     const std::string host = uri->host();
@@ -141,12 +145,9 @@ std::pair<std::string, int> ParseListenAddress(const std::string &listen, const 
     if (port == 0) {
         throw PolicyError(std::string(what) + ": port 0 is not accepted");
     }
-    if (port > 65535) {
-        throw PolicyError(std::string(what) + ": port out of range");
-    }
     // uri->host() is percent-decoded (canonical). '%' in the input means the host
     // was not written in canonical form. A bracketed host must be IPv6 (no IPvFuture).
-    // Unbracketed hosts are an IP literal (inet_aton / inet_pton) or a DNS name.
+    // Unbracketed hosts are an IPv4 literal (inet_aton) or a DNS name.
     const bool bracketed = absl::StrContains(spec, '[');
     const bool encoded = absl::StrContains(spec, '%');
     in6_addr v6{};
@@ -188,6 +189,11 @@ std::string DefaultInternalListen(const std::string &listen) {
 }
 
 void FinalizeDaemonListen(DaemonConfig &cfg) {
+    // A bare HOST:PORT advertised_address is published as a Flight URL clients can dial.
+    if (!cfg.advertised_address.empty() &&
+        cfg.advertised_address.find("://") == std::string::npos) {
+        cfg.advertised_address = "grpc://" + cfg.advertised_address;
+    }
     if (cfg.internal_listen.empty()) {
         auto lp = ParseListenAddress(cfg.listen, "listen");
         if (IsLoopbackHost(lp.first)) {
@@ -611,12 +617,17 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
     auto add = [&](const std::string &path, const std::string &msg) {
         issues.push_back({path, msg});
     };
+    std::pair<std::string, int> listen_hp;
+    bool listen_ok = false;
     try {
-        auto lp = ParseListenAddress(cfg.listen, "listen");
-        if (LeaseEndpointConfigured(cfg) && IsWildcardHost(lp.first) &&
+        listen_hp = ParseListenAddress(cfg.listen, "listen");
+        listen_ok = true;
+        if (LeaseEndpointConfigured(cfg) && IsWildcardHost(listen_hp.first) &&
             cfg.advertised_address.empty()) {
             add("advertised_address",
-                "required when listen is a wildcard (0, 0.0.0.0, or ::) in multi-node mode");
+                "required when listen is a wildcard (0, 0x0, 00, 0.0, 000.000.000.000, "
+                "0x00000000, 0.0.0.0, ::, [::], ::0, [::0], 0:0:0:0:0:0:0:0, "
+                "[0:0:0:0:0:0:0:0], ::ffff:0.0.0.0, or [::ffff:0.0.0.0]) in multi-node mode");
         }
     } catch (const std::exception &e) {
         add("listen", AddressIssueMessage("listen", e));
@@ -686,9 +697,8 @@ void ValidateDaemonOrThrow(const DaemonConfig &cfg) {
             SteadyClockTimeoutMaxMessage("lease.proxy_first_message_max_ms"));
     }
     try {
-        auto lp = ParseListenAddress(cfg.listen, "listen");
-        if (!cfg.internal_listen_configured) {
-            if (!IsLoopbackHost(lp.first)) {
+        if (listen_ok && !cfg.internal_listen_configured) {
+            if (!IsLoopbackHost(listen_hp.first)) {
                 add("internal_listen",
                     "required when listen is not loopback (never expose the internal listener)");
             } else if (!cfg.lease.advertise.empty()) {
