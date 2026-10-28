@@ -1117,9 +1117,12 @@ void SandboxRuntime::TickLeases() {
             std::clog << retry.dump() << "\n";
         }
     }
-    if (leases_ && !fenced_.load()) {
+    if (leases_) {
         Metrics().SetNodeHealthy(Serving());
         for (auto &id : leases_->OwnedIds()) {
+            if (fenced_.load()) {
+                break;
+            }
             try {
                 leases_->Renew(leases_->Held(id));
             } catch (const std::exception &e) {
@@ -1132,7 +1135,7 @@ void SandboxRuntime::TickLeases() {
                 std::clog << lost.dump() << "\n";
             }
         }
-        if (!nodes_) {
+        if (!fenced_.load() && !nodes_) {
             try {
                 Lease node;
                 node.tenant_key = "__node__";
@@ -1144,13 +1147,15 @@ void SandboxRuntime::TickLeases() {
                 std::clog << nr.dump() << "\n";
             }
         }
-        try {
-            leases_->GcTombstones();
-        } catch (const std::exception &e) {
-            Json gc;
-            gc["event"] = "lease_gc";
-            gc["reason"] = e.what();
-            std::clog << gc.dump() << "\n";
+        if (!fenced_.load()) {
+            try {
+                leases_->GcTombstones();
+            } catch (const std::exception &e) {
+                Json gc;
+                gc["event"] = "lease_gc";
+                gc["reason"] = e.what();
+                std::clog << gc.dump() << "\n";
+            }
         }
     } else {
         Metrics().SetNodeHealthy(Serving());

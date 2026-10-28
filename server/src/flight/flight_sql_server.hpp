@@ -299,24 +299,6 @@ public:
 	    const std::string &url, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
 	    const std::string &key, const ::arrow::flight::ServerCallContext &context, int64_t query_timeout_ms = 0);
 
-private:
-	using Deadline = std::chrono::steady_clock::time_point;
-	::arrow::flight::FlightClientOptions PeerClientOpts() const;
-	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Dial(const std::string &url,
-	                                                                    Deadline deadline);
-	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Client(const std::string &url,
-	                                                                      Deadline deadline);
-	::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>> DialTransport(
-	    const std::string &url, Deadline deadline);
-	::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>> StreamTransport(
-	    const std::string &url, Deadline deadline);
-	void AbandonStream(std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream);
-	::arrow::flight::FlightCallOptions BaseOpt(const std::string &sandbox_id, const std::string &key) const;
-	::arrow::flight::FlightCallOptions CallOpt(const std::string &sandbox_id, const std::string &key,
-	                                           Deadline deadline) const;
-	::arrow::flight::FlightCallOptions StreamOpt(const std::string &sandbox_id, const std::string &key,
-	                                            Deadline deadline) const;
-	int64_t FirstMessageBoundMs(int64_t query_timeout_ms) const;
 	class InflightGuard {
 	public:
 		InflightGuard() = default;
@@ -353,6 +335,25 @@ private:
 		std::shared_ptr<std::atomic<int64_t>> peer_;
 	};
 	::arrow::Result<InflightGuard> AcquireInflight(const std::string &url);
+
+private:
+	using Deadline = std::chrono::steady_clock::time_point;
+	::arrow::flight::FlightClientOptions PeerClientOpts() const;
+	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Dial(const std::string &url,
+	                                                                    Deadline deadline);
+	::arrow::Result<std::shared_ptr<::arrow::flight::FlightClient>> Client(const std::string &url,
+	                                                                      Deadline deadline);
+	::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>> DialTransport(
+	    const std::string &url, Deadline deadline);
+	::arrow::Result<std::shared_ptr<::arrow::flight::internal::ClientTransport>> StreamTransport(
+	    const std::string &url, Deadline deadline);
+	void AbandonStream(std::shared_ptr<::arrow::flight::internal::ClientDataStream> stream);
+	::arrow::flight::FlightCallOptions BaseOpt(const std::string &sandbox_id, const std::string &key) const;
+	::arrow::flight::FlightCallOptions CallOpt(const std::string &sandbox_id, const std::string &key,
+	                                           Deadline deadline) const;
+	::arrow::flight::FlightCallOptions StreamOpt(const std::string &sandbox_id, const std::string &key,
+	                                            Deadline deadline) const;
+	int64_t FirstMessageBoundMs(int64_t query_timeout_ms) const;
 
 	std::string secret_;
 	int64_t timeout_ms_ = 5000;

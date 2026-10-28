@@ -442,21 +442,89 @@ bool IsPeerTimeout(const Status &st) {
     return false;
 }
 
+// Local PeerFlight / handoff failures set this detail themselves. Owner
+// application errors are never tagged, so ClassifyRedirectFailure must not
+// inspect their message text.
+enum class PeerCallKind { Timeout, Unreachable, Busy, NoOwnerAddress };
+
+class PeerCallDetail final : public ::arrow::StatusDetail {
+  public:
+    explicit PeerCallDetail(PeerCallKind kind) : kind_(kind) {}
+    const char *type_id() const override { return kTypeId; }
+    std::string ToString() const override {
+        switch (kind_) {
+        case PeerCallKind::Timeout:
+            return "timeout";
+        case PeerCallKind::Unreachable:
+            return "unreachable";
+        case PeerCallKind::Busy:
+            return "busy";
+        case PeerCallKind::NoOwnerAddress:
+            return "no_owner_address";
+        }
+        return "failed";
+    }
+    PeerCallKind kind() const { return kind_; }
+    static const PeerCallDetail *Unwrap(const Status &st) {
+        if (st.ok()) {
+            return nullptr;
+        }
+        const auto &d = st.detail();
+        if (d && d->type_id() == kTypeId) {
+            return static_cast<const PeerCallDetail *>(d.get());
+        }
+        return nullptr;
+    }
+    static constexpr const char *kTypeId = "duckbox.flight.PeerCallDetail";
+
+  private:
+    PeerCallKind kind_;
+};
+
+Status WithPeerCall(Status st, PeerCallKind kind) {
+    if (st.ok()) {
+        return st;
+    }
+    return st.WithDetail(std::make_shared<PeerCallDetail>(kind));
+}
+
+Status PeerTimeoutStatus() {
+    return WithPeerCall(Status::IOError("peer proxy timed out"), PeerCallKind::Timeout);
+}
+
+Status PeerBusyStatus() {
+    return WithPeerCall(Status::CapacityError("peer proxy busy"), PeerCallKind::Busy);
+}
+
+// Dial / Authenticate / Connect: timeout vs unreachable. Never used for an
+// owner GetFlightInfo application status (that would re-tag binder errors).
+Status TagDialFailure(const Status &st, Deadline deadline) {
+    if (st.ok()) {
+        return st;
+    }
+    if (IsPeerTimeout(st) || DeadlineReached(deadline)) {
+        return PeerTimeoutStatus();
+    }
+    return WithPeerCall(st, PeerCallKind::Unreachable);
+}
+
 const char *ClassifyRedirectFailure(const Status &st) {
-    if (IsPeerTimeout(st) || absl::StrContains(st.message(), "timed out")) {
+    if (auto *peer = PeerCallDetail::Unwrap(st)) {
+        switch (peer->kind()) {
+        case PeerCallKind::Timeout:
+            return "timeout";
+        case PeerCallKind::NoOwnerAddress:
+            return "no_owner_address";
+        case PeerCallKind::Unreachable:
+        case PeerCallKind::Busy:
+            return "unreachable";
+        }
+    }
+    if (IsPeerTimeout(st)) {
         return "timeout";
     }
-    if (absl::StrContains(st.message(), "not a registered") ||
-        absl::StrContains(st.message(), "advertise URL is empty")) {
-        return "no_owner_address";
-    }
-    if (st.IsCapacityError() || absl::StrContains(st.message(), "peer proxy busy") ||
-        st.IsIOError() || absl::StrContains(st.message(), "peer proxy failed") ||
-        absl::StrContains(st.message(), "Connect") ||
-        absl::StrContains(st.message(), "Unavailable") ||
-        absl::StrContains(st.message(), "unavailable")) {
-        return "unreachable";
-    }
+    // Untagged Flight status codes from the wire only. Do not match owner
+    // application error text (SELECT unavailable / "Connect" / password=).
     if (auto detail = ::arrow::flight::FlightStatusDetail::UnwrapStatus(st)) {
         if (detail->code() == ::arrow::flight::FlightStatusCode::TimedOut) {
             return "timeout";
@@ -468,22 +536,16 @@ const char *ClassifyRedirectFailure(const Status &st) {
     return "failed";
 }
 
-// Deadline, unavailable, dial failure, peer proxy failed/busy, and "not the
-// owner" are retryable. The owner's own application codes (binder, policy)
-// must not be rewritten to UNAVAILABLE.
+// Deadline, unavailable, dial failure, and peer proxy busy are retryable.
+// The owner's own application codes (binder, policy) must not be rewritten
+// to UNAVAILABLE.
 bool IsRedirectTransportFailure(const Status &st) {
     if (st.ok()) {
         return false;
     }
     const char *reason = ClassifyRedirectFailure(st);
-    if (std::strcmp(reason, "timeout") == 0 || std::strcmp(reason, "unreachable") == 0 ||
-        std::strcmp(reason, "no_owner_address") == 0) {
-        return true;
-    }
-    if (absl::StrContains(st.message(), "not the owner")) {
-        return true;
-    }
-    return false;
+    return std::strcmp(reason, "timeout") == 0 || std::strcmp(reason, "unreachable") == 0 ||
+           std::strcmp(reason, "no_owner_address") == 0;
 }
 
 Status PassThroughOwnerStatus(const Status &st) {
@@ -496,12 +558,14 @@ Status PassThroughOwnerStatus(const Status &st) {
 
 // Timed out only when the call failed AND (structured TimedOut OR now >= the
 // per-call deadline). No elapsed≈timeout comparison and no slack constant.
+// Owner GetFlightInfo errors stay untagged so binder text cannot look like
+// a transport failure.
 Status AsProxyTimeoutIfDue(const Status &st, Deadline deadline) {
     if (st.ok()) {
         return st;
     }
     if (IsPeerTimeout(st) || DeadlineReached(deadline)) {
-        return Status::IOError("peer proxy timed out");
+        return PeerTimeoutStatus();
     }
     return st;
 }
@@ -877,13 +941,13 @@ int64_t PeerFlight::FirstMessageBoundMs(int64_t query_timeout_ms) const {
     const int64_t global = global_inflight_.fetch_add(1, std::memory_order_acq_rel) + 1;
     if (global > max_inflight_) {
         global_inflight_.fetch_sub(1, std::memory_order_acq_rel);
-        return Status::CapacityError("peer proxy busy");
+        return PeerBusyStatus();
     }
     const int64_t per_peer = peer->fetch_add(1, std::memory_order_acq_rel) + 1;
     if (per_peer > max_inflight_per_peer_) {
         peer->fetch_sub(1, std::memory_order_acq_rel);
         global_inflight_.fetch_sub(1, std::memory_order_acq_rel);
-        return Status::CapacityError("peer proxy busy");
+        return PeerBusyStatus();
     }
     return InflightGuard(&global_inflight_, std::move(peer));
 }
@@ -894,17 +958,25 @@ PeerFlight::Dial(const std::string &url, Deadline deadline) {
         return Status::Invalid("peer proxy requires auth.peer_secret_ref");
     }
     if (url.empty()) {
-        return Status::Invalid("peer advertise URL is empty");
+        return WithPeerCall(Status::Invalid("peer advertise URL is empty"),
+                            PeerCallKind::NoOwnerAddress);
     }
     if (nodes_ && !nodes_->IsKnownFlight(url)) {
-        return Status::Invalid("peer proxy target is not a registered node");
+        return WithPeerCall(Status::Invalid("peer proxy target is not a registered node"),
+                            PeerCallKind::NoOwnerAddress);
     }
     if (DeadlineReached(deadline)) {
-        return Status::IOError("peer proxy timed out");
+        return PeerTimeoutStatus();
     }
-    ARROW_ASSIGN_OR_RAISE(auto loc, ParseFlightLocation(url));
-    ARROW_ASSIGN_OR_RAISE(auto raw, ::arrow::flight::FlightClient::Connect(loc, PeerClientOpts()));
-    std::shared_ptr<::arrow::flight::FlightClient> client(std::move(raw));
+    auto loc = ParseFlightLocation(url);
+    if (!loc.ok()) {
+        return TagDialFailure(loc.status(), deadline);
+    }
+    auto raw = ::arrow::flight::FlightClient::Connect(*loc, PeerClientOpts());
+    if (!raw.ok()) {
+        return TagDialFailure(raw.status(), deadline);
+    }
+    std::shared_ptr<::arrow::flight::FlightClient> client(std::move(raw).ValueOrDie());
     auto auth = std::make_unique<PeerClientAuth>(secret_);
     ::arrow::flight::FlightCallOptions auth_opt;
     auth_opt.timeout = RemainingTimeout(deadline);
@@ -913,7 +985,7 @@ PeerFlight::Dial(const std::string &url, Deadline deadline) {
         // Handshake Write/Read can surface Deadline Exceeded as Internal
         // ("Could not finish writing") when the peer is SIGSTOP'd. Classify
         // as timed out only if now >= deadline or the status is TimedOut.
-        return AsProxyTimeoutIfDue(st, deadline);
+        return TagDialFailure(st, deadline);
     }
     return client;
 }
@@ -948,22 +1020,27 @@ PeerFlight::DialTransport(const std::string &url, Deadline deadline) {
         return Status::Invalid("peer proxy requires auth.peer_secret_ref");
     }
     if (url.empty()) {
-        return Status::Invalid("peer advertise URL is empty");
+        return WithPeerCall(Status::Invalid("peer advertise URL is empty"),
+                            PeerCallKind::NoOwnerAddress);
     }
     if (nodes_ && !nodes_->IsKnownFlight(url)) {
-        return Status::Invalid("peer proxy target is not a registered node");
+        return WithPeerCall(Status::Invalid("peer proxy target is not a registered node"),
+                            PeerCallKind::NoOwnerAddress);
     }
     if (DeadlineReached(deadline)) {
-        return Status::IOError("peer proxy timed out");
+        return PeerTimeoutStatus();
     }
-    ARROW_ASSIGN_OR_RAISE(auto loc, ParseFlightLocation(url));
+    auto loc = ParseFlightLocation(url);
+    if (!loc.ok()) {
+        return TagDialFailure(loc.status(), deadline);
+    }
     // Registers the gRPC transport factory (Connect itself is lazy).
-    (void)::arrow::flight::FlightClient::Connect(loc, PeerClientOpts());
+    (void)::arrow::flight::FlightClient::Connect(*loc, PeerClientOpts());
     auto *reg = ::arrow::flight::internal::GetDefaultTransportRegistry();
-    ARROW_ASSIGN_OR_RAISE(auto raw, reg->MakeClient(loc.scheme()));
+    ARROW_ASSIGN_OR_RAISE(auto raw, reg->MakeClient(loc->scheme()));
     std::shared_ptr<::arrow::flight::internal::ClientTransport> transport(std::move(raw));
-    ARROW_ASSIGN_OR_RAISE(auto uri, ::arrow::util::Uri::FromString(loc.ToString()));
-    ARROW_RETURN_NOT_OK(transport->Init(PeerClientOpts(), loc, uri));
+    ARROW_ASSIGN_OR_RAISE(auto uri, ::arrow::util::Uri::FromString(loc->ToString()));
+    ARROW_RETURN_NOT_OK(transport->Init(PeerClientOpts(), *loc, uri));
     auto auth = std::make_unique<PeerClientAuth>(secret_);
     ::arrow::flight::FlightCallOptions auth_opt;
     auth_opt.timeout = RemainingTimeout(deadline);
@@ -974,7 +1051,7 @@ PeerFlight::DialTransport(const std::string &url, Deadline deadline) {
         // closed first. Close (no leak: a leaked transport pins a thread and
         // an fd, and evicting it from the bounded graveyard hangs again).
         (void)transport->Close();
-        return AsProxyTimeoutIfDue(st, deadline);
+        return TagDialFailure(st, deadline);
     }
     return transport;
 }
@@ -1040,7 +1117,7 @@ PeerFlight::ForwardGetFlightInfo(const std::string &url, const FlightDescriptor 
     ARROW_ASSIGN_OR_RAISE(auto guard, AcquireInflight(url));
     ARROW_ASSIGN_OR_RAISE(auto client, Client(url, deadline));
     if (DeadlineReached(deadline)) {
-        return Status::IOError("peer proxy timed out");
+        return PeerTimeoutStatus();
     }
     auto info = client->GetFlightInfo(CallOpt(sandbox_id, key, deadline), descriptor);
     if (!info.ok()) {
@@ -1062,7 +1139,7 @@ PeerFlight::ForwardDoGet(const std::string &url, const Ticket &ticket,
     ARROW_ASSIGN_OR_RAISE(auto guard, AcquireInflight(url));
     ARROW_ASSIGN_OR_RAISE(auto transport, StreamTransport(url, deadline));
     if (DeadlineReached(deadline)) {
-        return Status::IOError("peer proxy timed out");
+        return PeerTimeoutStatus();
     }
     auto opt = StreamOpt(sandbox_id, key, deadline);
     std::unique_ptr<::arrow::flight::internal::ClientDataStream> raw;
@@ -1308,7 +1385,10 @@ std::string DuckboxFlightSqlServer::LocalAdvertisedLocation() const {
     const std::string &key, const std::string &token,
     const std::shared_ptr<::arrow::Schema> &schema, const char *op) {
     if (plane_ == ListenerPlane::Internal) {
-        return Status::Invalid("not the owner");
+        // Mid-handoff / non-owner internal listener: retryable owner_moved.
+        // Status code Unavailable survives the gRPC hop so the public
+        // redirect path classifies it without matching error text.
+        return StatusFromException(OwnerMovedError(re.owner_id(), {}, kRetryableOwnerUnreachable));
     }
     if (!peers_) {
         return Status::Invalid("peer proxy requires auth.peer_secret_ref");
