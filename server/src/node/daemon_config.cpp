@@ -202,10 +202,8 @@ void FinalizeDaemonListen(DaemonConfig &cfg) {
         if (LeaseEndpointConfigured(cfg) && IsWildcardHost(lp.first)) {
             // Multi-node cannot publish a wildcard; ValidateDaemonOrThrow names the option.
         } else {
-            // listen may carry a scheme (ParseListenAddress accepts one); publish host:port only.
-            const auto sep = cfg.listen.find("://");
-            cfg.advertised_address =
-                "grpc://" + (sep == std::string::npos ? cfg.listen : cfg.listen.substr(sep + 3));
+            // Bind listen is HOST:PORT (no scheme). Publish the Flight URL from that bind.
+            cfg.advertised_address = "grpc://" + cfg.listen;
         }
     }
 }

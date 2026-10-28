@@ -1039,6 +1039,39 @@ void duckbox::test::RunSpecLoaderTests() {
                            "http:// listen does not echo the value");
                 }
             }
+            {
+                DaemonConfig ilsch = TestDaemon();
+                ilsch.internal_listen = "http://127.0.0.1:5747";
+                ilsch.internal_listen_configured = true;
+                try {
+                    ValidateDaemonOrThrow(ilsch);
+                    Expect(false, "http:// internal_listen (no throw)");
+                } catch (const std::exception &e) {
+                    std::string w = e.what();
+                    Expect(w.find("internal_listen") != std::string::npos &&
+                               w.find("scheme is invalid / not accepted") != std::string::npos,
+                           "http:// internal_listen names the scheme rule");
+                    Expect(w.find("http://") == std::string::npos &&
+                               w.find("127.0.0.1") == std::string::npos,
+                           "http:// internal_listen does not echo the value");
+                }
+            }
+            {
+                DaemonConfig msch = TestDaemon();
+                msch.metrics_listen = "foo://127.0.0.1:9477";
+                try {
+                    ValidateDaemonOrThrow(msch);
+                    Expect(false, "foo:// metrics.listen (no throw)");
+                } catch (const std::exception &e) {
+                    std::string w = e.what();
+                    Expect(w.find("metrics.listen") != std::string::npos &&
+                               w.find("scheme is invalid / not accepted") != std::string::npos,
+                           "foo:// metrics.listen names the scheme rule");
+                    Expect(w.find("foo://") == std::string::npos &&
+                               w.find("127.0.0.1") == std::string::npos,
+                           "foo:// metrics.listen does not echo the value");
+                }
+            }
             DaemonConfig ok = TestDaemon();
             ok.advertised_address = "grpc+tls://node-a.example:4984";
             ValidateDaemonOrThrow(ok);

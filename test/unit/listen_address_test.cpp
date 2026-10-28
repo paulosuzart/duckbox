@@ -104,6 +104,12 @@ void duckbox::test::RunListenAddressTests() {
                  "listen refuses foo://", {"foo://"});
     ExpectReject("Http://127.0.0.1:4747", "scheme is invalid / not accepted",
                  "mixed-case scheme is refused");
+    ExpectReject("http://127.0.0.1:5747", "scheme is invalid / not accepted",
+                 "internal_listen refuses an http:// prefix", {"http://"}, "internal_listen");
+    ExpectReject("foo://127.0.0.1:9477", "scheme is invalid / not accepted",
+                 "metrics.listen refuses foo://", {"foo://"}, "metrics.listen");
+    ExpectReject("http://127.0.0.1:18480", "scheme is invalid / not accepted",
+                 "debug_http refuses an http:// prefix", {"http://"}, "debug_http", 4748);
 
     Expect(IsWildcardHost("0.0.0.0") && IsWildcardHost("::") && IsWildcardHost("[::]"),
            "0.0.0.0 and :: are wildcard binds");
@@ -146,6 +152,8 @@ void duckbox::test::RunListenAddressTests() {
 
     ExpectReject("duckbox_node-1.svc.cluster.local:4984", "host must be a DNS name or IP address",
                  "underscore in DNS host is refused");
+    ExpectReject("host$.example:4747", "host must be a DNS name or IP address",
+                 "non-DNS charset in host is refused");
     ExpectReject("foo..bar:4747", "host must be a DNS name or IP address",
                  "empty DNS label is refused");
     ExpectReject(std::string(64, 'a') + ".example:4747", "host must be a DNS name or IP address",
