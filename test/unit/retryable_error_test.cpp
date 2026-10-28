@@ -297,6 +297,31 @@ void duckbox::test::RunRetryableErrorTests() {
                "redacted extra_info omits owner and address fields");
     }
     {
+        // what() contains password= so the first-pass net already redacted
+        // (`already_redacted`). Owner/address are clean, so the second-pass
+        // ClientFacingError on the assembled message would not fire. Without
+        // the already_redacted handling the tenant would see the catalog
+        // fragment plus owner/address (#107 S3).
+        class PasswordOwnerMoved : public OwnerMovedError {
+          public:
+            PasswordOwnerMoved(std::string owner, std::string address)
+                : OwnerMovedError(std::move(owner), std::move(address)),
+                  msg_("binder error: password=<fake>") {}
+            const char *what() const noexcept override { return msg_.c_str(); }
+
+          private:
+            std::string msg_;
+        };
+        auto st = StatusFromException(PasswordOwnerMoved("node-c", "grpc://10.0.0.3:4747"));
+        ExpectUnavailable(st, "already-redacted OwnerMovedError message");
+        Expect(st.message() == "owner_moved: sandbox owner changed; retry the query",
+               "already-redacted OwnerMovedError yields the generic owner_moved sentence, "
+               "not the fragment plus owner/address");
+        auto extra = ParseExtra(st, "already-redacted OwnerMovedError message");
+        Expect(!extra.contains("owner") && !extra.contains("address"),
+               "already-redacted extra_info omits owner and address fields");
+    }
+    {
         auto st = StatusFromException(UnavailableError(kLakeCatalogUnavailable));
         ExpectUnavailable(st, "catalog-unavailable fragment");
         Expect(
