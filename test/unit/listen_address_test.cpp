@@ -138,9 +138,9 @@ void duckbox::test::RunListenAddressTests() {
                  "advertised_address");
     ExpectReject(":4984", "HOST:PORT is required", "scheme-less empty host is refused");
     ExpectReject("grpc://node-a.example:4984/?tok=s3cretLeak", "HOST:PORT only", "query is refused",
-                 {"s3cretLeak"});
+                 {"s3cretLeak"}, "advertised_address");
     ExpectReject("grpc://node-a.example:4984#s3cretLeak", "HOST:PORT only", "fragment is refused",
-                 {"s3cretLeak"});
+                 {"s3cretLeak"}, "advertised_address");
     ExpectReject(std::string(513, 'a') + ":4747", "HOST:PORT is required",
                  "address longer than 512 bytes is refused");
 
