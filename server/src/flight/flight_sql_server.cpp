@@ -178,18 +178,20 @@ FlightDescriptor PreparedStatementDescriptor(const std::string &handle) {
 
 static ::arrow::Status RetryableUnavailable(const char *code, const std::string &client,
                                             const std::string &owner, const std::string &address,
-                                            const std::string &reason = {}) {
+                                            const std::string &reason = {},
+                                            bool already_redacted = false) {
     // ClientFacingError already ran on `client`. Assemble the prefix and
     // optional owner/address, then run the pattern-only safety net again so
     // a leak in those fields cannot reach the tenant. Never pass owner or
     // address as secret comparison values. Fields longer than 256 bytes are
-    // omitted (#107 S2). When the net fires, return a generic retryable
-    // sentence instead of a redacted fragment (#107 S3).
+    // omitted (#107 S2). When the net fires (or already fired on `client`),
+    // return a generic retryable sentence instead of a redacted fragment
+    // (#107 S3).
     std::string extra_owner = owner.size() > kMaxRetryableDetailBytes ? std::string() : owner;
     std::string extra_address = address.size() > kMaxRetryableDetailBytes ? std::string() : address;
     auto msg = FormatRetryableMessage(code, client, extra_owner, extra_address);
     auto safe = ClientFacingError(msg);
-    if (safe != msg) {
+    if (already_redacted || safe != msg || client == kLakeCatalogUnavailable) {
         extra_owner.clear();
         extra_address.clear();
         const char *generic = (code != nullptr && std::string(code) == kRetryableNoOwner)
@@ -205,7 +207,9 @@ static ::arrow::Status RetryableUnavailable(const char *code, const std::string 
 ::arrow::Status StatusFromException(const std::exception &e) {
     // Pattern-only safety net (no secret ctx): password=, URI userinfo, or a
     // catalog IO/CONNECTION/HTTP type / marker. Never substitute values.
-    std::string client = ClientFacingError(e.what(), ddb::ErrorData(e).Type());
+    const std::string raw = e.what();
+    std::string client = ClientFacingError(raw, ddb::ErrorData(e).Type());
+    const bool redacted = (client != raw);
     if (dynamic_cast<const ConflictError *>(&e)) {
         return ::arrow::Status::AlreadyExists(client);
     }
@@ -220,18 +224,17 @@ static ::arrow::Status RetryableUnavailable(const char *code, const std::string 
     }
     if (auto *moved = dynamic_cast<const OwnerMovedError *>(&e)) {
         return RetryableUnavailable(kRetryableOwnerMoved, client, moved->owner_id(),
-                                    moved->address(), moved->reason());
+                                    moved->address(), moved->reason(), redacted);
     }
     if (dynamic_cast<const UnavailableError *>(&e)) {
         // Describe timeout / unregistered peer are retryable owner-moved
         // failures (C2), not "no owner".
-        const std::string raw = e.what();
         if (absl::StrContains(raw, "describe timed out") ||
             absl::StrContains(raw, "not a registered node")) {
             return RetryableUnavailable(kRetryableOwnerMoved, client, {}, {},
-                                        kRetryableOwnerUnreachable);
+                                        kRetryableOwnerUnreachable, redacted);
         }
-        return RetryableUnavailable(kRetryableNoOwner, client, {}, {});
+        return RetryableUnavailable(kRetryableNoOwner, client, {}, {}, {}, redacted);
     }
     if (dynamic_cast<const AuthError *>(&e)) {
         return ::arrow::flight::MakeFlightError(::arrow::flight::FlightStatusCode::Unauthenticated,
