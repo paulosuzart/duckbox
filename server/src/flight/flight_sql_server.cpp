@@ -173,30 +173,62 @@ FlightDescriptor PreparedStatementDescriptor(const std::string &handle) {
     return FlightDescriptor::Command(any.SerializeAsString());
 }
 
-Status FromEx(const std::exception &e) {
+} // namespace
+
+static ::arrow::Status RetryableUnavailable(const char *code, const std::string &client,
+                                            const std::string &owner, const std::string &address) {
+    // ClientFacingError already ran on `client`. Assemble the prefix and
+    // optional owner/address, then run the pattern-only safety net again so
+    // a leak in those fields cannot reach the tenant. Never pass owner or
+    // address as secret comparison values.
+    auto msg = FormatRetryableMessage(code, client, owner, address);
+    auto safe = ClientFacingError(msg);
+    std::string extra_owner = owner;
+    std::string extra_address = address;
+    if (safe != msg) {
+        extra_owner.clear();
+        extra_address.clear();
+        msg = ClientFacingError(FormatRetryableMessage(code, safe, {}, {}));
+    }
+    return ::arrow::flight::MakeFlightError(
+        ::arrow::flight::FlightStatusCode::Unavailable, msg,
+        FormatRetryableExtraInfo(code, extra_owner, extra_address));
+}
+
+::arrow::Status StatusFromException(const std::exception &e) {
     // Pattern-only safety net (no secret ctx): password=, URI userinfo, or a
     // catalog IO/CONNECTION/HTTP type / marker. Never substitute values.
     std::string client = ClientFacingError(e.what(), ddb::ErrorData(e).Type());
     if (dynamic_cast<const ConflictError *>(&e)) {
-        return Status::AlreadyExists(client);
+        return ::arrow::Status::AlreadyExists(client);
     }
     if (dynamic_cast<const NotFoundError *>(&e)) {
-        return Status::KeyError(client);
+        return ::arrow::Status::KeyError(client);
     }
     if (dynamic_cast<const RedirectError *>(&e)) {
-        return Status::Invalid(client);
+        return ::arrow::Status::Invalid(client);
     }
     if (dynamic_cast<const LeaseLostError *>(&e)) {
-        return Status::Invalid(client);
+        return ::arrow::Status::Invalid(client);
+    }
+    if (auto *moved = dynamic_cast<const OwnerMovedError *>(&e)) {
+        return RetryableUnavailable(kRetryableOwnerMoved, client, moved->owner_id(),
+                                    moved->address());
     }
     if (dynamic_cast<const UnavailableError *>(&e)) {
-        return Status::IOError(client);
+        return RetryableUnavailable(kRetryableNoOwner, client, {}, {});
     }
     if (dynamic_cast<const AuthError *>(&e)) {
         return ::arrow::flight::MakeFlightError(::arrow::flight::FlightStatusCode::Unauthenticated,
                                                 client);
     }
-    return Status::Invalid(client);
+    return ::arrow::Status::Invalid(client);
+}
+
+namespace {
+
+Status FromEx(const std::exception &e) {
+    return StatusFromException(e);
 }
 
 std::shared_ptr<::arrow::Buffer> BufOf(const std::string &s) {

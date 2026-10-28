@@ -2,8 +2,8 @@
 
 // Error types used across spec load, auth, SQL enforcement, and Flight SQL.
 // Flight maps these to Status (Invalid / AlreadyExists / KeyError /
-// Unauthenticated). Messages must never contain secret values or raw user SQL
-// beyond a short reason.
+// Unauthenticated / Unavailable). Messages must never contain secret values or
+// raw user SQL beyond a short reason.
 
 #include <stdexcept>
 #include <string>
@@ -81,6 +81,30 @@ class UnavailableError : public Error {
   public:
     explicit UnavailableError(const std::string &msg) : Error(msg) {}
 };
+
+// Stable codes at the start of tenant-facing retryable Flight messages (C4).
+inline constexpr const char *kRetryableOwnerMoved = "owner_moved";
+inline constexpr const char *kRetryableNoOwner = "no_owner";
+
+// Sandbox owner changed (or is unknown). Owner id and advertised address are
+// optional and appear on the client message / extra_info only when known.
+class OwnerMovedError : public Error {
+  public:
+    explicit OwnerMovedError(std::string owner_id = {}, std::string address = {});
+    const std::string &owner_id() const { return owner_id_; }
+    const std::string &address() const { return address_; }
+
+  private:
+    std::string owner_id_;
+    std::string address_;
+};
+
+// Prefix `code:` onto an already-redacted message. Owner/address fields are
+// appended only when known. extra_info is compact JSON with the same fields.
+std::string FormatRetryableMessage(const std::string &code, const std::string &message,
+                                   const std::string &owner = {}, const std::string &address = {});
+std::string FormatRetryableExtraInfo(const std::string &code, const std::string &owner = {},
+                                     const std::string &address = {});
 
 // This node is not the owner. Internal proxy trigger only — never returned to
 // clients. `what()` is `duckbox redirect owner=ID location=URL` (the owner's
