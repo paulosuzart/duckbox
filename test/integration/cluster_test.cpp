@@ -21,10 +21,110 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 namespace {
+
+// One-shot Put gate: the next Put waits until Unblock(). Heartbeat is a Put.
+class BlockingS3ControlClient final : public duckbox::s3::S3ControlClient {
+public:
+	explicit BlockingS3ControlClient(std::shared_ptr<duckbox::s3::S3ControlClient> inner)
+	    : inner_(std::move(inner)) {}
+
+	void BlockNextPut() {
+		std::lock_guard<std::mutex> hold(mu_);
+		entered_ = std::make_shared<std::promise<void>>();
+		released_ = std::make_shared<std::promise<void>>();
+		entered_fut_ = entered_->get_future().share();
+		released_fut_ = released_->get_future().share();
+		block_next_ = true;
+	}
+
+	bool WaitUntilBlocked(std::chrono::milliseconds d) const {
+		if (!entered_fut_.valid()) {
+			return false;
+		}
+		return entered_fut_.wait_for(d) == std::future_status::ready;
+	}
+
+	void Unblock() {
+		std::lock_guard<std::mutex> hold(mu_);
+		if (!released_) {
+			return;
+		}
+		try {
+			released_->set_value();
+		} catch (const std::future_error &) {
+		}
+		released_.reset();
+	}
+
+	duckbox::s3::S3Object Get(const std::string &key) const override { return inner_->Get(key); }
+	duckbox::s3::S3Object Put(const std::string &key, const std::string &body,
+	                         const std::string &if_match = "",
+	                         const std::string &if_none_match = "") const override {
+		std::shared_future<void> rel;
+		{
+			std::lock_guard<std::mutex> hold(mu_);
+			if (block_next_) {
+				block_next_ = false;
+				rel = released_fut_;
+				if (entered_) {
+					entered_->set_value();
+				}
+			}
+		}
+		if (rel.valid() && rel.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+			duckbox::s3::S3Object out;
+			out.status = 0;
+			out.error = "heartbeat gate timed out";
+			return out;
+		}
+		return inner_->Put(key, body, if_match, if_none_match);
+	}
+	duckbox::s3::S3Object Delete(const std::string &key,
+	                             const std::string &if_match = "") const override {
+		return inner_->Delete(key, if_match);
+	}
+	std::vector<std::string> ListKeys(const std::string &prefix) const override {
+		return inner_->ListKeys(prefix);
+	}
+	const std::string &bucket() const override { return inner_->bucket(); }
+
+private:
+	std::shared_ptr<duckbox::s3::S3ControlClient> inner_;
+	mutable std::mutex mu_;
+	mutable bool block_next_ = false;
+	mutable std::shared_ptr<std::promise<void>> entered_;
+	mutable std::shared_ptr<std::promise<void>> released_;
+	mutable std::shared_future<void> entered_fut_;
+	mutable std::shared_future<void> released_fut_;
+};
+
+class CountingLeaseManager final : public duckbox::cluster::ILeaseManager {
+public:
+	explicit CountingLeaseManager(std::shared_ptr<duckbox::cluster::ILeaseManager> inner)
+	    : inner_(std::move(inner)) {}
+	int renews() const { return renews_.load(); }
+	duckbox::cluster::Lease Acquire(const std::string &id) override { return inner_->Acquire(id); }
+	void Renew(const duckbox::cluster::Lease &lease) override {
+		renews_.fetch_add(1);
+		inner_->Renew(lease);
+	}
+	void Release(const duckbox::cluster::Lease &lease) override { inner_->Release(lease); }
+	duckbox::cluster::Lease Peek(const std::string &id) override { return inner_->Peek(id); }
+	std::vector<std::string> OwnedIds() const override { return inner_->OwnedIds(); }
+	duckbox::cluster::Lease Held(const std::string &id) override { return inner_->Held(id); }
+	void GcTombstones() override { inner_->GcTombstones(); }
+	void set_flight(std::string flight) override { inner_->set_flight(std::move(flight)); }
+
+private:
+	std::shared_ptr<duckbox::cluster::ILeaseManager> inner_;
+	std::atomic<int> renews_{0};
+};
 
 duckbox::common::Json ExtraOf(const ::arrow::Status &st) {
 	auto detail = ::arrow::flight::FlightStatusDetail::UnwrapStatus(st);
@@ -251,6 +351,73 @@ void duckbox::test::RunClusterTests() {
 		Expect(!rt2b.fenced() && rt2b.Serving() && fence2b.empty(),
 		       "restart after S3 returns takes over the same node_id");
 		SetMetrics(nullptr);
+	}
+
+	{
+		auto inner = MakeMemoryS3ControlClient("hb-inflight");
+		auto gate = std::make_shared<BlockingS3ControlClient>(inner);
+		auto clock_g = std::make_shared<FakeClock>(8'000'000);
+		S3LeaseOptions og;
+		og.owner_id = "node-gate";
+		og.flight = "grpc://127.0.0.1:4751";
+		og.prefix = "leases/";
+		og.ttl_ms = 15'000;
+		auto inner_leases =
+		    std::make_shared<S3ConditionalLeaseManager>(gate, og, std::shared_ptr<IMetrics>{}, clock_g);
+		auto leases_g = std::make_shared<CountingLeaseManager>(inner_leases);
+		auto nodes_g = std::make_shared<S3NodeDirectory>(gate, og, std::shared_ptr<IMetrics>{}, clock_g);
+		auto defs_g = std::make_shared<S3SandboxRegistry>(gate);
+		auto daemon_g = TestDaemon();
+		daemon_g.name = "node-gate";
+		SandboxRuntime rt_g(daemon_g, leases_g, defs_g);
+		rt_g.SetNodeDirectory(nodes_g);
+		rt_g.SetClock(clock_g);
+		rt_g.SetFenceHook([](const std::string &) {});
+
+		auto rec_g = RecordFromSpec(loaded, spec_dir);
+		rec_g.id = "gate-box";
+		rec_g.key = "tenant_21:user_sergio";
+		rec_g.spec.id = rec_g.id;
+		rec_g.spec.bound_key = rec_g.key;
+		rec_g = defs_g->Create(rec_g);
+		auto box_g = rt_g.Get(rec_g);
+		Expect(box_g && leases_g->Peek("gate-box").owned_locally, "gate fixture owns a sandbox");
+		rt_g.TickLeases();
+		const int renews_before = leases_g->renews();
+		Expect(renews_before >= 1 && rt_g.Serving() && nodes_g->has_published(),
+		       "first tick heartbeats and renews the owned sandbox");
+
+		gate->BlockNextPut();
+		std::promise<void> tick_done;
+		auto tick_fut = tick_done.get_future();
+		std::thread ticker([&] {
+			try {
+				rt_g.TickLeases();
+			} catch (...) {
+			}
+			try {
+				tick_done.set_value();
+			} catch (...) {
+			}
+		});
+		Expect(gate->WaitUntilBlocked(std::chrono::seconds(5)),
+		       "Heartbeat Put blocks before sandbox Renew");
+		clock_g->AdvanceMs(15'000);
+		bool fenced_from_assert = false;
+		try {
+			rt_g.AssertServing();
+		} catch (const std::exception &) {
+			fenced_from_assert = true;
+		}
+		Expect(rt_g.fenced() && fenced_from_assert, "AssertServing fences while Heartbeat is blocked");
+		gate->Unblock();
+		Expect(tick_fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+		       "TickLeases returns after Heartbeat unblocks");
+		if (ticker.joinable()) {
+			ticker.join();
+		}
+		Expect(leases_g->renews() == renews_before,
+		       "in-flight TickLeases does not Renew after Fence during Heartbeat");
 	}
 
 	{

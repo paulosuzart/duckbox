@@ -1117,7 +1117,7 @@ void SandboxRuntime::TickLeases() {
             std::clog << retry.dump() << "\n";
         }
     }
-    if (leases_) {
+    if (leases_ && !fenced_.load()) {
         Metrics().SetNodeHealthy(Serving());
         for (auto &id : leases_->OwnedIds()) {
             try {
