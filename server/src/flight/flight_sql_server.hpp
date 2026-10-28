@@ -22,6 +22,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,11 +39,52 @@ struct ServerOptions {
 	std::string spec_dir; // unused for queries; bootstrap SQL is inlined on the spec
 };
 
+// Same-node fallback for bind parameter IPC. One key per bind (the original
+// handle). Counts key + value bytes. FIFO eviction keeps the total at or
+// below max_bytes (4 MiB per node, shared by all tenants, best-effort).
+// An entry larger than the budget is rejected and not stored.
+class BindCache {
+public:
+	static constexpr size_t kDefaultMaxBytes = 4 * 1024 * 1024;
+	explicit BindCache(size_t max_bytes = kDefaultMaxBytes);
+	// false if key+ipc exceeds the budget even after eviction (not stored).
+	bool Remember(const std::string &key, const std::string &ipc);
+	// false on miss. Distinguishes a stored empty payload from a miss.
+	bool Lookup(const std::string &key, std::string *ipc) const;
+	size_t bytes() const;
+	size_t size() const;
+	size_t max_bytes() const;
+	// cache_, order_ and pos_ hold the same keys (tests).
+	bool Consistent() const;
+
+private:
+	void EraseLocked(const std::string &key);
+	void EvictOldestLocked();
+
+	const size_t max_bytes_;
+	size_t bytes_ = 0;
+	mutable std::mutex mu_;
+	std::unordered_map<std::string, std::string> cache_;
+	std::list<std::string> order_;
+	std::unordered_map<std::string, std::list<std::string>::iterator> pos_;
+};
+
+// DoPut rejects bind parameter IPC larger than this (Arrow InvalidArgument).
+inline constexpr size_t kMaxBindParamsBytes = 1024 * 1024;
+// Public listener: max size of one inbound gRPC message (binds are capped at 1 MiB;
+// a DoPut-returned handle carrying them stays well below this).
+inline constexpr size_t kMaxPublicMessageBytes = 4 * 1024 * 1024;
+
 // Flight SQL surface for one node. Every Statement/DoGet path authenticates the
 // caller and resolves x-duckbox-sandbox to a registry record. Catalog RPCs are
 // filtered to spec-allowlisted tables — they never describe the host DuckDB.
 class DuckboxFlightSqlServer : public ::arrow::flight::sql::FlightSqlServerBase {
 public:
+	// Same-node bind fallback bytes (tests / observability).
+	size_t BindCacheBytes() const { return bind_cache_.bytes(); }
+	size_t BindCacheSize() const { return bind_cache_.size(); }
+	// Batches consumed by the last DoPutPreparedStatementQuery (tests).
+	size_t LastDoPutBatches() const { return last_doput_batches_.load(std::memory_order_relaxed); }
 	DuckboxFlightSqlServer(node::DaemonConfig daemon, std::shared_ptr<sandbox::SandboxRegistry> defs,
 	                       std::shared_ptr<sandbox::SandboxRuntime> runtime, std::shared_ptr<IHandleSigner> signer,
 	                       std::shared_ptr<rewriter::ISqlRewriter> rewriter, node::ListenerPlane plane = node::ListenerPlane::Public,
@@ -140,12 +183,14 @@ private:
 	std::shared_ptr<rewriter::ISqlRewriter> rewriter_;
 	node::ListenerPlane plane_ = node::ListenerPlane::Public;
 	std::shared_ptr<PeerFlight> peers_;
+	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> DoGetVerified(
+	    const ::arrow::flight::ServerCallContext &context, StatementHandle h, const std::string &cache_key);
+
 	void RememberBind(const std::string &key, const std::string &ipc) const;
 
-	mutable std::mutex bind_mu_;
-	mutable std::unordered_map<std::string, std::string> bind_cache_;
-	mutable std::vector<std::string> bind_order_;
-	static constexpr size_t kMaxBindCache = 256;
+	mutable BindCache bind_cache_;
+	// Written by concurrent DoPut handlers; atomic so the test seam is not a data race.
+	std::atomic<size_t> last_doput_batches_{0};
 };
 
 // FlightSqlServerBase::DoAction is final; this wrapper intercepts sandbox CRUD
@@ -214,6 +259,8 @@ int RunNodeDrain(const NodeCliRequest &req);
 // Handshake token is a bearer secret or JWT, never an unsigned spec payload.
 // Allow gRPC keepalive pings on the internal peer listener.
 void ApplyInternalListenerKeepalive(::arrow::flight::FlightServerOptions &opt);
+// Public listener: cap one inbound gRPC message at kMaxPublicMessageBytes.
+void ApplyPublicListenerMessageCap(::arrow::flight::FlightServerOptions &opt);
 // Stops the one shared owner-side DuckDB Interrupt poller (daemon shutdown).
 void ShutdownOwnerInterruptWatch();
 

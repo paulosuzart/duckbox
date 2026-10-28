@@ -29,6 +29,7 @@
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
+#include <arrow/util/byte_size.h>
 #include <arrow/util/cancel.h>
 #include <arrow/util/uri.h>
 
@@ -675,6 +676,15 @@ void ShutdownOwnerInterruptWatch() {
     OwnerHub().Shutdown();
 }
 
+void ApplyPublicListenerMessageCap(::arrow::flight::FlightServerOptions &opt) {
+    // Arrow Flight disables gRPC's receive limit; bound one inbound message so a
+    // single oversized DoPut frame is refused by gRPC before it is buffered.
+    opt.builder_hook = [](void *raw) {
+        static_cast<grpc::ServerBuilder *>(raw)->SetMaxReceiveMessageSize(
+            static_cast<int>(kMaxPublicMessageBytes));
+    };
+}
+
 void ApplyInternalListenerKeepalive(::arrow::flight::FlightServerOptions &opt) {
     opt.builder_hook = [](void *raw) {
         auto *builder = static_cast<grpc::ServerBuilder *>(raw);
@@ -1019,17 +1029,102 @@ DuckboxFlightSqlServer::DuckboxFlightSqlServer(
                     static_cast<int32_t>(sql::SqlInfoOptions::SQL_SUPPORTED_TRANSACTION_NONE));
 }
 
+BindCache::BindCache(size_t max_bytes) : max_bytes_(max_bytes) {}
+
+void BindCache::EraseLocked(const std::string &key) {
+    auto it = cache_.find(key);
+    if (it == cache_.end()) {
+        return;
+    }
+    bytes_ -= key.size() + it->second.size();
+    cache_.erase(it);
+    auto pit = pos_.find(key);
+    if (pit != pos_.end()) {
+        order_.erase(pit->second);
+        pos_.erase(pit);
+    }
+}
+
+void BindCache::EvictOldestLocked() {
+    if (order_.empty()) {
+        return;
+    }
+    auto old = std::move(order_.front());
+    order_.pop_front();
+    pos_.erase(old);
+    auto it = cache_.find(old);
+    if (it == cache_.end()) {
+        return;
+    }
+    bytes_ -= old.size() + it->second.size();
+    cache_.erase(it);
+}
+
+bool BindCache::Remember(const std::string &key, const std::string &ipc) {
+    const size_t entry = key.size() + ipc.size();
+    if (entry > max_bytes_) {
+        return false;
+    }
+    std::lock_guard<std::mutex> g(mu_);
+    EraseLocked(key);
+    while (!order_.empty() && bytes_ + entry > max_bytes_) {
+        EvictOldestLocked();
+    }
+    if (bytes_ + entry > max_bytes_) {
+        return false;
+    }
+    auto oit = order_.insert(order_.end(), key);
+    pos_[key] = oit;
+    cache_[key] = ipc;
+    bytes_ += entry;
+    return true;
+}
+
+bool BindCache::Lookup(const std::string &key, std::string *ipc) const {
+    std::lock_guard<std::mutex> g(mu_);
+    auto it = cache_.find(key);
+    if (it == cache_.end()) {
+        return false;
+    }
+    if (ipc) {
+        *ipc = it->second;
+    }
+    return true;
+}
+
+size_t BindCache::bytes() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return bytes_;
+}
+
+size_t BindCache::size() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return cache_.size();
+}
+
+bool BindCache::Consistent() const {
+    std::lock_guard<std::mutex> g(mu_);
+    if (cache_.size() != order_.size() || pos_.size() != order_.size()) {
+        return false;
+    }
+    for (auto it = order_.begin(); it != order_.end(); ++it) {
+        auto p = pos_.find(*it);
+        if (p == pos_.end() || p->second != it || cache_.find(*it) == cache_.end()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+size_t BindCache::max_bytes() const {
+    return max_bytes_;
+}
+
 void DuckboxFlightSqlServer::RememberBind(const std::string &key, const std::string &ipc) const {
-    std::lock_guard<std::mutex> g(bind_mu_);
-    if (bind_cache_.find(key) == bind_cache_.end()) {
-        bind_order_.push_back(key);
+    if (ipc.empty()) {
+        return; // nothing to fall back to
     }
-    bind_cache_[key] = ipc;
-    while (bind_cache_.size() > kMaxBindCache && !bind_order_.empty()) {
-        auto old = bind_order_.front();
-        bind_order_.erase(bind_order_.begin());
-        bind_cache_.erase(old);
-    }
+    bind_cache_.Remember(key, ipc);
 }
 
 std::string DuckboxFlightSqlServer::CallerOf(const ServerCallContext &context) const {
@@ -1257,6 +1352,69 @@ DuckboxFlightSqlServer::GetSchemaStatement(const ServerCallContext &context,
 }
 
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
+DuckboxFlightSqlServer::DoGetVerified(const ServerCallContext &context, StatementHandle h,
+                                      const std::string &cache_key) {
+    auto current = defs_->Get(h.sandbox_id);
+    if (IsExpired(current)) {
+        defs_->Delete(h.sandbox_id);
+        runtime_->PassivateId(h.sandbox_id, "ttl");
+        Metrics().IncExpiration(current.spec.lifecycle.ttl_ms > 0 ? "ttl" : "expires_at");
+        throw NotFoundError("sandbox '" + h.sandbox_id + "' expired");
+    }
+    if (h.handle_gen != current.handle_gen) {
+        throw StaleHandleError("sandbox '" + h.sandbox_id + "' handles were expired; re-prepare");
+    }
+    auto rec = ResolveHandleVersion(*defs_, current, h.version);
+    auto caller = CallerOf(context);
+    RequirePeerQuery(caller);
+    AuthorizeCaller(daemon_, caller, rec.key);
+    (void)ParseTenantKey(h.tenant_raw, rec.spec.key);
+    auto hdr_key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
+    if (!hdr_key.empty() && hdr_key != h.tenant_raw && hdr_key != rec.key) {
+        throw AuthError("tenant key does not match statement handle");
+    }
+    // Params come from the verified handle. bind_cache_ is a same-node
+    // fallback for clients that reuse the original handle on this node.
+    // Local execution uses the cache directly; only the redirect below re-signs.
+    bool params_from_cache = false;
+    if (h.params_ipc.empty()) {
+        params_from_cache = bind_cache_.Lookup(cache_key, &h.params_ipc) && !h.params_ipc.empty();
+    }
+    SandboxRuntime::RequestGuard inflight(*runtime_);
+    std::shared_ptr<TenantSandbox> box;
+    try {
+        box = runtime_->Get(rec);
+    } catch (const RedirectError &re) {
+        Ticket ticket;
+        // Only the redirect needs a ticket that carries cache-sourced params
+        // (the owner has no copy of this node's cache). The caller was already
+        // verified and authorized above; the token stays bound to the same
+        // tenant/sandbox/version/handle_gen and keeps its expiry.
+        ARROW_ASSIGN_OR_RAISE(auto packed, sql::CreateStatementQueryTicket(
+                                               params_from_cache ? signer_->Sign(h) : cache_key));
+        ticket.ticket = packed;
+        return MaybeProxyDoGet(re, ticket, rec.id, rec.key, context,
+                               rec.spec.resources.query_timeout_ms);
+    }
+    std::vector<ddb::Value> params;
+    const std::string &params_ipc = h.params_ipc;
+    if (!params_ipc.empty()) {
+        auto buf =
+            std::make_shared<::arrow::Buffer>(reinterpret_cast<const uint8_t *>(params_ipc.data()),
+                                              static_cast<int64_t>(params_ipc.size()));
+        auto rdr = std::make_shared<::arrow::io::BufferReader>(buf);
+        ARROW_ASSIGN_OR_RAISE(auto br, ::arrow::ipc::RecordBatchStreamReader::Open(rdr));
+        ARROW_ASSIGN_OR_RAISE(auto batch, br->Next());
+        if (batch) {
+            params = RowToValues(*batch);
+        }
+    }
+    QueryInterruptWatch watch(context, box);
+    auto out = box->ExecuteHandle(h.rewritten_sql, std::move(params));
+    return StreamIpc(out.arrow_ipc);
+}
+
+::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::DoGetStatement(const ServerCallContext &context,
                                        const sql::StatementQueryTicket &command) {
     try {
@@ -1267,63 +1425,7 @@ DuckboxFlightSqlServer::DoGetStatement(const ServerCallContext &context,
             ObserveFailure(Metrics(), nullptr, nullptr, e, false, 0);
             throw;
         }
-        auto current = defs_->Get(h.sandbox_id);
-        if (IsExpired(current)) {
-            defs_->Delete(h.sandbox_id);
-            runtime_->PassivateId(h.sandbox_id, "ttl");
-            Metrics().IncExpiration(current.spec.lifecycle.ttl_ms > 0 ? "ttl" : "expires_at");
-            throw NotFoundError("sandbox '" + h.sandbox_id + "' expired");
-        }
-        if (h.handle_gen != current.handle_gen) {
-            throw StaleHandleError("sandbox '" + h.sandbox_id +
-                                   "' handles were expired; re-prepare");
-        }
-        auto rec = ResolveHandleVersion(*defs_, current, h.version);
-        auto caller = CallerOf(context);
-        RequirePeerQuery(caller);
-        AuthorizeCaller(daemon_, caller, rec.key);
-        (void)ParseTenantKey(h.tenant_raw, rec.spec.key);
-        auto hdr_key = Hdr(context, {"x-duckbox-key", "X-Duckbox-Key"});
-        if (!hdr_key.empty() && hdr_key != h.tenant_raw && hdr_key != rec.key) {
-            throw AuthError("tenant key does not match statement handle");
-        }
-        SandboxRuntime::RequestGuard inflight(*runtime_);
-        std::shared_ptr<TenantSandbox> box;
-        try {
-            box = runtime_->Get(rec);
-        } catch (const RedirectError &re) {
-            Ticket ticket;
-            ARROW_ASSIGN_OR_RAISE(auto packed,
-                                  sql::CreateStatementQueryTicket(command.statement_handle));
-            ticket.ticket = packed;
-            return MaybeProxyDoGet(re, ticket, rec.id, rec.key, context,
-                                   rec.spec.resources.query_timeout_ms);
-        }
-        // Params come from the signed handle. bind_cache_ is a same-node
-        // fallback for clients that reuse the original handle on this node.
-        std::vector<ddb::Value> params;
-        std::string params_ipc = h.params_ipc;
-        if (params_ipc.empty()) {
-            std::lock_guard<std::mutex> g(bind_mu_);
-            auto it = bind_cache_.find(command.statement_handle);
-            if (it != bind_cache_.end()) {
-                params_ipc = it->second;
-            }
-        }
-        if (!params_ipc.empty()) {
-            auto buf = std::make_shared<::arrow::Buffer>(
-                reinterpret_cast<const uint8_t *>(params_ipc.data()),
-                static_cast<int64_t>(params_ipc.size()));
-            auto rdr = std::make_shared<::arrow::io::BufferReader>(buf);
-            ARROW_ASSIGN_OR_RAISE(auto br, ::arrow::ipc::RecordBatchStreamReader::Open(rdr));
-            ARROW_ASSIGN_OR_RAISE(auto batch, br->Next());
-            if (batch) {
-                params = RowToValues(*batch);
-            }
-        }
-        QueryInterruptWatch watch(context, box);
-        auto out = box->ExecuteHandle(h.rewritten_sql, std::move(params));
-        return StreamIpc(out.arrow_ipc);
+        return DoGetVerified(context, std::move(h), command.statement_handle);
     } catch (const std::exception &e) {
         return FromEx(e);
     }
@@ -1372,11 +1474,33 @@ DuckboxFlightSqlServer::ClosePreparedStatement(const ServerCallContext &,
 }
 
 Status DuckboxFlightSqlServer::DoPutPreparedStatementQuery(
-    const ServerCallContext &, const sql::PreparedStatementQuery &command,
+    const ServerCallContext &context, const sql::PreparedStatementQuery &command,
     ::arrow::flight::FlightMessageReader *reader, ::arrow::flight::FlightMetadataWriter *writer) {
     try {
         auto h = signer_->Verify(command.prepared_statement_handle);
-        ARROW_ASSIGN_OR_RAISE(auto table, reader->ToTable());
+        auto current = defs_->Get(h.sandbox_id);
+        auto caller = CallerOf(context);
+        RequirePeerQuery(caller);
+        AuthorizeCaller(daemon_, caller, current.key);
+        // Enforce the cap while streaming: never buffer more than
+        // kMaxBindParamsBytes of client data before rejecting.
+        ARROW_ASSIGN_OR_RAISE(auto in_schema, reader->GetSchema());
+        ::arrow::RecordBatchVector batches;
+        int64_t streamed = 0;
+        last_doput_batches_.store(0, std::memory_order_relaxed);
+        while (true) {
+            ARROW_ASSIGN_OR_RAISE(auto chunk, reader->Next());
+            if (!chunk.data) {
+                break;
+            }
+            last_doput_batches_.fetch_add(1, std::memory_order_relaxed);
+            streamed += ::arrow::util::TotalBufferSize(*chunk.data);
+            if (static_cast<size_t>(streamed) > kMaxBindParamsBytes) {
+                throw Error("bind parameters exceed the maximum size");
+            }
+            batches.push_back(std::move(chunk.data));
+        }
+        ARROW_ASSIGN_OR_RAISE(auto table, ::arrow::Table::FromRecordBatches(in_schema, batches));
         std::shared_ptr<::arrow::Buffer> ipc_buf;
         {
             ARROW_ASSIGN_OR_RAISE(auto sink, ::arrow::io::BufferOutputStream::Create());
@@ -1385,11 +1509,15 @@ Status DuckboxFlightSqlServer::DoPutPreparedStatementQuery(
             ARROW_RETURN_NOT_OK(w->Close());
             ARROW_ASSIGN_OR_RAISE(ipc_buf, sink->Finish());
         }
+        if (static_cast<size_t>(ipc_buf->size()) > kMaxBindParamsBytes) {
+            throw Error("bind parameters exceed the maximum size");
+        }
         h.params_ipc.assign(reinterpret_cast<const char *>(ipc_buf->data()),
                             static_cast<size_t>(ipc_buf->size()));
         auto token = signer_->Sign(h);
+        // `token` already seals the params; only the original handle needs the
+        // same-node fallback.
         RememberBind(command.prepared_statement_handle, h.params_ipc);
-        RememberBind(token, h.params_ipc);
         auto packed = EncodeBytesField1(token);
         auto md = std::make_shared<::arrow::Buffer>(
             reinterpret_cast<const uint8_t *>(packed.data()), static_cast<int64_t>(packed.size()));
@@ -1405,16 +1533,6 @@ DuckboxFlightSqlServer::GetFlightInfoPreparedStatement(const ServerCallContext &
                                                        const FlightDescriptor &descriptor) {
     try {
         auto h = signer_->Verify(command.prepared_statement_handle);
-        // A cache miss must not erase parameters already sealed in the handle.
-        if (h.params_ipc.empty()) {
-            std::lock_guard<std::mutex> g(bind_mu_);
-            auto it = bind_cache_.find(command.prepared_statement_handle);
-            if (it != bind_cache_.end()) {
-                h.params_ipc = it->second;
-            }
-        }
-        auto token = signer_->Sign(h);
-        RememberBind(token, h.params_ipc);
         auto current = defs_->Get(h.sandbox_id);
         if (h.handle_gen != current.handle_gen) {
             throw StaleHandleError("sandbox '" + h.sandbox_id +
@@ -1423,6 +1541,11 @@ DuckboxFlightSqlServer::GetFlightInfoPreparedStatement(const ServerCallContext &
         auto caller = CallerOf(context);
         RequirePeerQuery(caller);
         AuthorizeCaller(daemon_, caller, current.key);
+        // A cache miss must not erase parameters already sealed in the handle.
+        if (h.params_ipc.empty()) {
+            bind_cache_.Lookup(command.prepared_statement_handle, &h.params_ipc);
+        }
+        auto token = signer_->Sign(h);
         auto rec = ResolveHandleVersion(*defs_, current, h.version);
         SandboxRuntime::RequestGuard inflight(*runtime_);
         try {
@@ -1448,21 +1571,18 @@ DuckboxFlightSqlServer::GetSchemaPreparedStatement(const ServerCallContext &cont
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::DoGetPreparedStatement(const ServerCallContext &context,
                                                const sql::PreparedStatementQuery &command) {
-    sql::StatementQueryTicket t;
-    t.statement_handle = command.prepared_statement_handle;
     try {
-        auto h = signer_->Verify(command.prepared_statement_handle);
-        if (h.params_ipc.empty()) {
-            std::lock_guard<std::mutex> g(bind_mu_);
-            auto it = bind_cache_.find(command.prepared_statement_handle);
-            if (it != bind_cache_.end()) {
-                h.params_ipc = it->second;
-                t.statement_handle = signer_->Sign(h);
-            }
+        StatementHandle h;
+        try {
+            h = signer_->Verify(command.prepared_statement_handle);
+        } catch (const std::exception &e) {
+            ObserveFailure(Metrics(), nullptr, nullptr, e, false, 0);
+            throw;
         }
-    } catch (...) {
+        return DoGetVerified(context, std::move(h), command.prepared_statement_handle);
+    } catch (const std::exception &e) {
+        return FromEx(e);
     }
-    return DoGetStatement(context, t);
 }
 
 ::arrow::Result<std::unique_ptr<FlightInfo>>
@@ -1959,6 +2079,7 @@ int RunServer(const ServerOptions &opt_in) {
     }
     ::arrow::flight::FlightServerOptions fopt(*loc_res);
     fopt.auth_handler = std::make_shared<HandshakeAuthHandler>(opt.daemon, ListenerPlane::Public);
+    ApplyPublicListenerMessageCap(fopt);
     auto st = pub->Init(fopt);
     if (!st.ok()) {
         std::cerr << "flight init failed: " << st.ToString() << "\n";

@@ -93,6 +93,93 @@ print("warmup query via node-a ok", list(df["id"]))
 db.close()
 PY
 
+# Daemon wiring of the public 4 MiB cap (ApplyPublicListenerMessageCap in
+# RunServer). I3b only exercises the helper the test applies itself, so a
+# one-frame ~5 MiB DoPut on the real public listener is the required check:
+# removing the daemon call must fail this e2e job.
+"$PY" - <<'PY'
+import pyarrow as pa
+import pyarrow.flight as fl
+
+
+def _varint(n):
+    out = bytearray()
+    while True:
+        bits = n & 0x7F
+        n >>= 7
+        out.append(bits | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def _len_field(field, payload):
+    return _varint((field << 3) | 2) + _varint(len(payload)) + payload
+
+
+def anyp(name, value):
+    return _len_field(1, ("type.googleapis.com/arrow.flight.protocol.sql." + name).encode()) + _len_field(
+        2, value
+    )
+
+
+def rd(buf):
+    i = 0
+    out = {}
+    while i < len(buf):
+        tag = 0
+        shift = 0
+        while True:
+            b = buf[i]
+            i += 1
+            tag |= (b & 0x7F) << shift
+            shift += 7
+            if not b & 0x80:
+                break
+        no = tag >> 3
+        ln = 0
+        shift = 0
+        while True:
+            b = buf[i]
+            i += 1
+            ln |= (b & 0x7F) << shift
+            shift += 7
+            if not b & 0x80:
+                break
+        out.setdefault(no, buf[i : i + ln])
+        i += ln
+    return out
+
+
+opts = fl.FlightCallOptions(
+    headers=[
+        (b"x-duckbox-sandbox", b"cluster-analyst"),
+        (b"x-duckbox-caller", b"local"),
+        (b"x-duckbox-key", b"tenant_21:user_sergio"),
+    ],
+    timeout=15,
+)
+client = fl.FlightClient("grpc://127.0.0.1:4747")
+body = anyp("ActionCreatePreparedStatementRequest", _len_field(1, b"SELECT id FROM deals WHERE title <> ?"))
+res = list(client.do_action(fl.Action("CreatePreparedStatement", body), opts))
+handle = rd(rd(res[0].body.to_pybytes())[2])[1]
+desc = fl.FlightDescriptor.for_command(anyp("CommandPreparedStatementQuery", _len_field(1, handle)))
+schema = pa.schema([("$1", pa.utf8())])
+try:
+    writer, reader = client.do_put(desc, schema, opts)
+    writer.write_batch(pa.record_batch([pa.array(["Q" * (5 * 1024 * 1024)])], schema=schema))
+    writer.done_writing()
+    reader.read()
+    writer.close()
+except Exception as e:  # noqa: BLE001
+    msg = str(e)
+    if "larger than max" in msg and "4194304" in msg:
+        print("public 4 MiB cap:", msg.split(". gRPC client debug")[0][:160], flush=True)
+    else:
+        raise SystemExit(f"public 4 MiB cap: want 'larger than max (... vs. 4194304)', got {msg[:240]}")
+else:
+    raise SystemExit("public 4 MiB cap: 5 MiB DoPut accepted (ApplyPublicListenerMessageCap not wired)")
+PY
+
 LIST="$("$BIN" sandbox list --url grpc://127.0.0.1:4748 --id-prefix cluster-analyst)"
 echo "$LIST"
 echo "$LIST" | grep -q '"id":"cluster-analyst"'
