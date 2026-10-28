@@ -38,6 +38,7 @@ int main() {
     RunSecretRedactPatternTests();
     RunTempDirectoryTests();
     RunTokenSanitizeTests();
+    RunRetryableErrorTests();
     RunDeadlineTests();
     return ReportAndExit("unit");
 }
