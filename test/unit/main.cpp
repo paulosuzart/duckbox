@@ -16,6 +16,7 @@ int main() {
     RunHiddenFilterRewriteTests();
     RunInitSqlTests();
     RunHandleTests();
+    RunBindCacheTests();
     RunCryptoTests();
     RunRegistryTests();
     RunMetricsTests();

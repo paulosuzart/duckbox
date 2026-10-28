@@ -259,6 +259,16 @@ if(NOT TARGET absl::strings)
 endif()
 message(STATUS "Using Abseil strings (absl::strings)")
 
+# EncodeBytesField1 / google.protobuf.Any in flight_sql_server.cpp. Link
+# protobuf explicitly; do not rely on Arrow Flight's transitive export.
+if(NOT TARGET protobuf::libprotobuf)
+  find_package(Protobuf REQUIRED)
+endif()
+if(NOT TARGET protobuf::libprotobuf)
+  message(FATAL_ERROR "protobuf::libprotobuf is required (EncodeBytesField1)")
+endif()
+message(STATUS "Using protobuf (protobuf::libprotobuf)")
+
 # QueryErrorInjection is compiled only into test targets. The release duckbox
 # binary links duckbox_core, which is built without this option.
 option(DUCKBOX_TESTING "Compile QueryErrorInjection test seams (OFF in the release binary)" OFF)
@@ -338,6 +348,7 @@ function(duckbox_link_core_deps target)
     ArrowFlight::arrow_flight_shared
     ArrowFlightSql::arrow_flight_sql_shared
     absl::strings
+    protobuf::libprotobuf
     OpenSSL::SSL
     OpenSSL::Crypto
     yaml-cpp)
@@ -479,6 +490,7 @@ duckbox_add_test(duckbox_unit_tests
   test/unit/cte_scope_test.cpp
   test/unit/hidden_filter_rewrite_test.cpp
   test/unit/handle_test.cpp
+  test/unit/bind_cache_test.cpp
   test/unit/crypto_test.cpp
   test/unit/registry_test.cpp
   test/unit/metrics_test.cpp
