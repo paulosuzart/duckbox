@@ -2,6 +2,7 @@
 name: node-a
 listen: 127.0.0.1:4747
 internal_listen: 127.0.0.1:5747
+advertised_address: grpc://127.0.0.1:4747
 auth:
   mode: trusted
   allow_insecure_dev: true

@@ -163,6 +163,7 @@ public:
 struct S3LeaseOptions {
 	std::string owner_id = "local";
 	std::string flight;
+	std::string advertised_address; // public Flight URL; distinct from flight (internal)
 	std::string prefix = "leases/";
 	int64_t ttl_ms = 15000;
 	int64_t heartbeat_ms = 5000;
@@ -179,6 +180,7 @@ S3LeaseOptions LeaseOptionsFromDaemon(const node::DaemonConfig &daemon);
 struct NodeRecord {
 	std::string node_id;
 	std::string flight;
+	std::string advertised_address; // public Flight URL; empty on records written without it
 	int64_t started_at_ms = 0;
 	std::string version;
 	int64_t expiry_ms = 0;
@@ -198,6 +200,9 @@ public:
 	void SetDraining(bool v);
 	bool draining() const;
 	bool IsKnownFlight(const std::string &flight); // advertise URL in the live directory
+	// Public Flight URL for owner_id from the live directory. Same short-TTL
+	// cache as IsKnownFlight (no S3 list while live_cache_until_ms_ is in the future).
+	std::string AdvertisedAddressOf(const std::string &owner_id);
 	void set_flight(std::string flight) {
 		opt_.flight = std::move(flight);
 	}
@@ -224,6 +229,7 @@ private:
 	std::string Encode(const NodeRecord &n) const;
 	NodeRecord Parse(const s3::S3Object &obj) const;
 	std::vector<NodeRecord> ListUncached();
+	std::vector<NodeRecord> CachedLiveNodes(); // live_cache_ hit, else ListUncached + store
 	void PutHeartbeatLocked(); // caller holds mu_
 	void InvalidateLiveCacheLocked();
 	int64_t DirectoryCacheTtlMs() const;

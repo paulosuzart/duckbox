@@ -73,8 +73,13 @@ void duckbox::test::RunTokenSanitizeTests() {
     Expect(ResolveBearerToken("ok-token\n") == "ok-token",
            "trailing newline from a file is trimmed");
     Expect(ResolveBearerToken("\r\nok-token\r\n") == "ok-token", "surrounding CRLF is trimmed");
-    Expect(ResolveBearerToken("!ok-token~") == "!ok-token~",
-           "bang and tilde (0x21/0x7E) are accepted");
+    try {
+        Expect(ResolveBearerToken("!ok-token~") == "!ok-token~",
+               "bang and tilde (0x21/0x7E) are accepted");
+    } catch (const std::exception &e) {
+        Expect(false,
+               std::string("bang and tilde (0x21/0x7E) input='!ok-token~' threw: ") + e.what());
+    }
     Expect(ResolveBearerToken("\v\fok-token\f\v") == "ok-token",
            "surrounding vertical tab and form feed are trimmed");
 
