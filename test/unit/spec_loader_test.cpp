@@ -850,6 +850,19 @@ void duckbox::test::RunSpecLoaderTests() {
                            w.find("127.0.0.1") == std::string::npos,
                        "ValidateDaemonOrThrow uppercase GRPC listen does not echo the value");
             }
+            DaemonConfig metrics = TestDaemon();
+            metrics.metrics_listen = "127.0.0.1";
+            try {
+                ValidateDaemonOrThrow(metrics);
+                Expect(false, "ValidateDaemonOrThrow metrics.listen without port (no throw)");
+            } catch (const std::exception &e) {
+                std::string w = e.what();
+                Expect(w.find("metrics.listen") != std::string::npos &&
+                           w.find("HOST:PORT is required") != std::string::npos,
+                       "ValidateDaemonOrThrow metrics.listen without port names the field");
+                Expect(w.find("127.0.0.1") == std::string::npos,
+                       "ValidateDaemonOrThrow metrics.listen without port does not echo the value");
+            }
             DaemonConfig adv = TestDaemon();
             adv.lease.advertise = "grpc://leakuser:s3cretLeak@127.0.0.1:5747";
             try {

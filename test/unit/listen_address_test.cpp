@@ -60,6 +60,17 @@ void duckbox::test::RunListenAddressTests() {
     ExpectReject("http://127.0.0.1", "HOST:PORT is required",
                  "schemed host without port names HOST:PORT");
     ExpectReject("127.0.0.1:0", "port 0 is not accepted", "port 0 is refused");
+    // Arrow may reject >65535 at parse time; either rule is fine and must not echo.
+    try {
+        (void)ParseListenAddress("127.0.0.1:65536");
+        Expect(false, "port 65536 (no throw)");
+    } catch (const std::exception &e) {
+        const std::string w = e.what();
+        Expect(w.find("port out of range") != std::string::npos ||
+                   w.find("HOST:PORT is required") != std::string::npos,
+               "port 65536 names a port rule");
+        Expect(w.find("65536") == std::string::npos, "port 65536 does not echo the value");
+    }
     ExpectReject("0:0", "port 0 is not accepted", "host 0 with port 0 is refused");
     ExpectReject("GRPC://127.0.0.1:4747", "scheme is invalid / not accepted",
                  "uppercase GRPC scheme is refused");
