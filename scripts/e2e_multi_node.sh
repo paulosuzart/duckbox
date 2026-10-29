@@ -472,11 +472,12 @@ except flight.FlightUnavailableError as e:
     assert "address=grpc://127.0.0.1:4749" in msg, msg
     assert "5749" not in msg, "internal listener leaked: " + msg
     assert ms < 1000, ms
+    # Gherkin 7: pyarrow exposes the JSON extra_info on FlightError.
     extra = getattr(e, "extra_info", b"") or b""
-    print("pyarrow_extra_info_visible=" + ("yes " + extra.decode() if extra else "no"), flush=True)
-    if extra:
-        j = json.loads(extra)
-        assert j.get("code") == "owner_moved" and j.get("owner") == "node-c", j
+    j = json.loads(extra) if extra else {}
+    print("pyarrow_extra_info_visible=" + ("yes " + json.dumps(j, sort_keys=True) if j else "no"), flush=True)
+    assert j.get("code") == "owner_moved", ("pyarrow extra_info", extra)
+    assert j.get("owner") == "node-c" and j.get("address") == "grpc://127.0.0.1:4749", j
 PY
 
 # 150 concurrent DoGets for a sandbox owned by C, sent to A: each fails
@@ -579,9 +580,32 @@ except Exception as e:  # noqa: BLE001
     msg = str(e)
     print("adbc_owner_moved_exception", type(e).__name__, msg[:240], flush=True)
     assert "owner_moved" in msg and "node-c" in msg, msg
+    # Gherkin 7: is the JSON extra_info among the ADBC error details? Only a
+    # detail value that parses as JSON with code=owner_moved counts; the
+    # status message header also contains the text "owner_moved".
+    import json
+    def text(x):
+        return x.decode("utf-8", "replace") if isinstance(x, (bytes, bytearray)) else str(x)
     details = getattr(e, "details", None) or []
-    seen = [k for k, v in details if b"owner_moved" in (v if isinstance(v, bytes) else str(v).encode())]
-    print("adbc_extra_info_visible=" + ("yes " + ",".join(seen) if seen else "no"), flush=True)
+    keys = [text(k) for k, _ in details]
+    found = None
+    for k, v in details:
+        try:
+            j = json.loads(v if isinstance(v, (bytes, bytearray)) else str(v))
+        except ValueError:
+            continue
+        if isinstance(j, dict) and j.get("code") == "owner_moved":
+            found = (text(k), j)
+            break
+    print("adbc_error_detail_keys=" + ",".join(keys), flush=True)
+    print("adbc_extra_info_visible=" + ("yes " + found[0] + " " + json.dumps(found[1], sort_keys=True) if found else "no"), flush=True)
+    # Recorded result (ADBC Flight SQL driver 1.13): the details carry
+    # x-arrow-status, x-arrow-status-detail-bin ("Unavailable") and the
+    # message, not the extra_info JSON. ADBC clients read owner= and address=
+    # from the message (docs/multi-node.md). Fails if a driver starts
+    # exposing it, so the docs get updated.
+    assert found is None, ("ADBC now exposes extra_info; update docs/multi-node.md", found)
+    assert "owner=node-c" in msg and "address=grpc://127.0.0.1:4747" in msg, msg
 finally:
     db.close()
 PY
@@ -591,6 +615,15 @@ wait "$PID_C" 2>/dev/null || true
 PID_C=$!
 wait_port 4749
 wait_port 5749
+
+# node-b is still draining from the drain step above and would answer
+# no_owner; restart it so it can own the sandbox again.
+kill -TERM "$PID_B" 2>/dev/null || true
+wait "$PID_B" 2>/dev/null || true
+"$BIN" serve --daemon "$ROOT/daemons/cluster-node-b.yaml" --no-metrics &
+PID_B=$!
+wait_port 4748
+wait_port 5748
 
 # ADBC connected only to node-a runs a prepared statement with a bound
 # parameter on a sandbox owned by node-b: rows are filtered by the bound value.

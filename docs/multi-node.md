@@ -35,7 +35,12 @@ If the catalog is unreachable after warmup (Postgres stopped, network partition,
 
 **Routing:** `GetFlightInfo` on a non-owner does one short unary describe to the owner, then returns the owner's `advertised_address` from the node directory as every endpoint location. ADBC and other Flight SQL clients **follow that location** for DoGet — the load-balancer address is not enough. `advertised_address` must be reachable by clients. When TLS terminates in front of the node, set `advertised_address` to `grpc+tls://…`; a default `grpc://` + `listen` sends the Bearer token and tenant key in the clear to that node. Locations are never `lease.advertise` (the internal peer listener). A draining node may still describe via a live owner but must not take new ownership. A request already sent to an old owner is **not** replayed onto a new owner.
 
-**DoGet is never proxied.** A node serves DoGet only when this process holds an unexpired lease for the sandbox. It checks ownership without writing the lease (no create, no steal, no takeover) and before executing the query. In every other case it fails immediately with retryable `UNAVAILABLE`: `owner_moved` naming the live owner and its public `advertised_address` (never `lease.advertise`), or `no_owner` when the lease is missing, free or expired. It opens no call to another node. The application retries the query from `GetFlightInfo`, which may take an expired lease. The internal listener rejects DoGet with `Unimplemented`. Metric: `duckbox_retryable_errors_total{op="do_get",reason="owner_moved"|"no_owner"}`.
+**DoGet is never proxied.** This holds for every DoGet: statement, prepared statement and metadata (for example `GetTables` with `include_schema`). A node serves DoGet only when this process holds an unexpired lease for the sandbox. It checks ownership without writing the lease (no create, no steal, no takeover) and before executing the query. In every other case it fails immediately with retryable `UNAVAILABLE`: `owner_moved` naming the live owner and its public `advertised_address` (never `lease.advertise`), or `no_owner` when the lease is missing, free or expired. It opens no call to another node. The application retries the query from `GetFlightInfo`, which may take an expired lease. The internal listener rejects every DoGet with `Unimplemented`. Metric: `duckbox_retryable_errors_total{op="do_get",reason="owner_moved"|"no_owner"}`.
+
+**Reading the retryable error.** The status message is `owner_moved: … (owner=<node> address=<advertised_address>)` or `no_owner: …`; the same fields are in the Flight `extra_info` JSON (`code`, `owner`, `address`, optional `reason`). Measured in `scripts/e2e_multi_node.sh`, which asserts both results:
+
+- pyarrow (26.0): `FlightUnavailableError.extra_info` holds the JSON (`pyarrow_extra_info_visible=yes`).
+- ADBC Flight SQL driver (1.13): the error details are only `x-arrow-status`, `x-arrow-status-detail-bin` (`Unavailable`) and `x-arrow-status-message-bin`. The JSON is not exposed (`adbc_extra_info_visible=no`), so ADBC clients read `owner=` and `address=` from the message.
 
 `RedirectError` is an internal proxy trigger. It is never returned to clients.
 
@@ -48,9 +53,9 @@ Each daemon binds **two** Flight servers:
 | Plane | Config | Serves |
 | --- | --- | --- |
 | **Public** | `listen` (clients / load balancer) | Flight SQL + sandbox CRUD (`CreateSandbox` … `ExpireSandbox`) |
-| **Internal** | `internal_listen` (default loopback, public port+1000) | Node-to-node proxy/peer protocol + operator API (`DrainNode`, `NodeStatus`) |
+| **Internal** | `internal_listen` (default loopback, public port+1000) | Node-to-node GetFlightInfo describe + operator API (`DrainNode`, `NodeStatus`). Never DoGet. |
 
-The public Flight SQL listener must **not** serve `DrainNode`, `NodeStatus`, or peer calls. `lease.advertise` is the **internal** address peers dial. `NodeStatus` includes `proxy_inflight` (current global proxied-call count).
+The public Flight SQL listener must **not** serve `DrainNode`, `NodeStatus`, or peer calls. `lease.advertise` is the **internal** address peers dial. `NodeStatus` includes `proxy_inflight` (current global count of in-flight peer describe calls).
 
 **Never expose the internal listener publicly.** Bind it to loopback, a private network, or an encrypted overlay (WireGuard, a VPC, a mesh). A non-loopback `listen` or an explicit `lease.advertise` requires `internal_listen` in the YAML (or `--internal-listen`) so the internal port cannot accidentally share the public bind.
 
@@ -193,7 +198,7 @@ duckbox node drain --url grpc://127.0.0.1:5748 --peer-secret env:DUCKBOX_PEER_SE
 
 Then stop the process (`SIGINT` / `SIGTERM`). A GetFlightInfo that still hits this node after release is answered with the new owner's location; a DoGet gets the retryable `owner_moved` or `no_owner` error. An ownerless sandbox during drain does **not** return an empty advertise URL.
 
-The proxy validates `lease.flight` against the live node directory before dialing, and returns a generic `peer proxy failed` to clients (peer address is logged server-side only).
+The GetFlightInfo describe validates `lease.flight` against the live node directory before dialing, and returns a generic `peer proxy failed` to clients (peer address is logged server-side only).
 
 ## Crash / partition
 
