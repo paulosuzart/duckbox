@@ -1,0 +1,30 @@
+# Captured 2026-10-24 against a local memory daemon (this environment
+# has no Docker; Flight SQL + named sandbox are the same as DuckLake).
+#
+#   export DUCKBOX_HANDLE_SECRET=duckbox-dev-secret
+#   ./build/duckbox serve --daemon ./daemons/memory.yaml --listen 127.0.0.1:4747
+#   ./build/duckbox sandbox create --url grpc://127.0.0.1:4747 \
+#     --spec ./policies/memory/analyst.yaml \
+#     --id acme-analyst --key tenant_21:user_sergio
+#   ./build/duckbox sandbox create --url grpc://127.0.0.1:4747 \
+#     --spec ./policies/memory/analyst.yaml \
+#     --id acme-kim --key tenant_22:user_kim
+#   make -C examples/goose-adbc
+#   ./examples/goose-adbc/query
+
+$ ./examples/goose-adbc/query
+id	title	amount
+1	alpha deal	100
+
+$ ./examples/goose-adbc/query --sql 'SELECT count(*) AS n FROM deals'
+n
+1
+
+$ ./examples/goose-adbc/query --sql 'SELECT * FROM secrets'
+query: [FlightSQL] table not allowlisted: memory.main.secrets (InvalidArgument; ExecuteQuery)
+# exit 1
+
+$ ./examples/goose-adbc/query --sandbox acme-kim --sql 'SELECT id, title, amount FROM deals ORDER BY id'
+id	title	amount
+3	bravo deal	500
+4	bravo two	50
