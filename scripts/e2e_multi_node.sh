@@ -31,6 +31,57 @@ wait_port() {
 	return 1
 }
 
+dump_leases() {
+	echo "===== lease records (S3 prefix leases/) =====" >&2
+	"$PY" - <<'PY' >&2 || true
+import os, json
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
+ep = os.environ.get("DUCKBOX_S3_ENDPOINT", "http://127.0.0.1:9000")
+c = boto3.client(
+    "s3",
+    endpoint_url=ep,
+    aws_access_key_id=os.environ["DUCKBOX_S3_KEY"],
+    aws_secret_access_key=os.environ["DUCKBOX_S3_SECRET"],
+    region_name="us-east-1",
+    config=Config(s3={"addressing_style": "path"}),
+)
+try:
+    pages = c.get_paginator("list_objects_v2").paginate(Bucket="duckbox-control", Prefix="leases/")
+    n = 0
+    for page in pages:
+        for obj in page.get("Contents") or []:
+            n += 1
+            key = obj["Key"]
+            body = c.get_object(Bucket="duckbox-control", Key=key)["Body"].read().decode("utf-8", "replace")
+            print(f"{key}\t{body}")
+    if n == 0:
+        print("(no objects under leases/)")
+except ClientError as e:
+    print(f"lease dump failed: {e}")
+PY
+	echo "===== end lease records =====" >&2
+}
+
+# Bounded wait for sandbox-list owner to match a regex. Not a query retry.
+wait_owner() {
+	local url="$1"
+	local want="$2"
+	local i list=""
+	for i in $(seq 1 40); do
+		list="$("$BIN" sandbox list --url "$url" --id-prefix cluster-analyst)" || true
+		if echo "$list" | grep -E -q "$want"; then
+			echo "$list"
+			return 0
+		fi
+		sleep 0.25
+	done
+	echo "$list"
+	echo "timeout waiting for owner matching $want via $url" >&2
+	return 1
+}
+
 "$PY" - <<'PY'
 import os, boto3
 from botocore.config import Config
@@ -59,7 +110,11 @@ PID_A=$!
 PID_B=$!
 "$BIN" serve --daemon "$ROOT/daemons/cluster-node-c.yaml" --no-metrics &
 PID_C=$!
+E2E_FAILED=0
 cleanup() {
+	if [[ "${E2E_FAILED}" -ne 0 ]]; then
+		dump_leases || true
+	fi
 	local p
 	for p in ${PID_A:-} ${PID_B:-} ${PID_C:-}; do
 		kill "$p" 2>/dev/null || true
@@ -71,6 +126,10 @@ cleanup() {
 		fi
 	done
 }
+on_err() {
+	E2E_FAILED=1
+}
+trap on_err ERR
 trap cleanup EXIT
 
 wait_port 4747
@@ -86,7 +145,7 @@ wait_port 5749
 
 "$PY" - <<'PY'
 from duckbox_client import connect
-db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=5)
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=1)
 df = db.query("SELECT id, title FROM deals ORDER BY id")
 assert len(df) >= 1, df
 print("warmup query via node-a ok", list(df["id"]))
@@ -187,7 +246,7 @@ echo "$LIST" | grep -q '"owner":"node-a"'
 
 "$PY" - <<'PY'
 from duckbox_client import connect
-db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=5)
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=1)
 df = db.query("SELECT id, title FROM deals ORDER BY id")
 assert len(df) >= 1, df
 print("query via non-owner node-b ok", list(df["id"]))
@@ -199,24 +258,16 @@ kill -9 "$PID_A" 2>/dev/null || true
 sleep 0.5
 PID_A=""
 
+# Lease TTL is 5s (+ 1s skew). Wait for expiry so the next Get can take over.
+# Do not retry the query — one attempt after the lease is stealable.
+sleep 7
 "$PY" - <<'PY'
-import time
 from duckbox_client import connect
-deadline = time.time() + 20
-last = None
-while time.time() < deadline:
-    try:
-        db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=1)
-        df = db.query("SELECT id FROM deals ORDER BY id")
-        assert len(df) >= 1, df
-        print("failover query via node-b ok", list(df["id"]))
-        db.close()
-        break
-    except Exception as e:  # noqa: BLE001
-        last = e
-        time.sleep(0.5)
-else:
-    raise SystemExit(f"query after kill did not succeed: {last}")
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=1)
+df = db.query("SELECT id FROM deals ORDER BY id")
+assert len(df) >= 1, df
+print("failover query via node-b ok", list(df["id"]))
+db.close()
 PY
 
 LIST2="$("$BIN" sandbox list --url grpc://127.0.0.1:4749 --id-prefix cluster-analyst)"
@@ -225,23 +276,12 @@ echo "$LIST2" | grep -E -q '"owner":"node-(b|c)"'
 
 "$BIN" node drain --url grpc://127.0.0.1:5748 --timeout 1000 --peer-secret env:DUCKBOX_PEER_SECRET
 "$PY" - <<'PY'
-import time
 from duckbox_client import connect
-deadline = time.time() + 20
-last = None
-while time.time() < deadline:
-    try:
-        db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4749", retries=1)
-        df = db.query("SELECT id FROM deals ORDER BY id")
-        assert len(df) >= 1, df
-        print("query after drain via node-c ok", list(df["id"]))
-        db.close()
-        break
-    except Exception as e:  # noqa: BLE001
-        last = e
-        time.sleep(0.5)
-else:
-    raise SystemExit(f"query after drain did not succeed: {last}")
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4749", retries=1)
+df = db.query("SELECT id FROM deals ORDER BY id")
+assert len(df) >= 1, df
+print("query after drain via node-c ok", list(df["id"]))
+db.close()
 PY
 
 # Restart the same node_id after SIGKILL (A was killed above).
@@ -251,7 +291,7 @@ wait_port 4747
 wait_port 5747
 "$PY" - <<'PY'
 from duckbox_client import connect
-db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=8)
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=1)
 df = db.query("SELECT id FROM deals ORDER BY id")
 assert len(df) >= 1, df
 print("restart same node_id after SIGKILL ok", list(df["id"]))
@@ -295,7 +335,7 @@ wait_port 4747
 wait_port 5747
 "$PY" - <<'PY'
 from duckbox_client import connect
-db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=8)
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=1)
 df = db.query("SELECT id FROM deals ORDER BY id")
 assert len(df) >= 1, df
 print("restart same node_id after SIGTERM ok", list(df["id"]))
@@ -702,7 +742,7 @@ wait_port 4748
 wait_port 4749
 "$PY" - <<'PY'
 from duckbox_client import connect
-db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=10)
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=1)
 df = db.query("SELECT id FROM deals ORDER BY id")
 assert len(df) >= 1, df
 print("cluster recovered after S3 outage > TTL", list(df["id"]))

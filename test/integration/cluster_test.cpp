@@ -2,6 +2,7 @@
 #include "check.hpp"
 
 #include "common/error.hpp"
+#include "common/json.hpp"
 #include "flight/flight_sql_server.hpp"
 #include "flight/handle.hpp"
 #include "cluster/lease.hpp"
@@ -12,13 +13,184 @@
 #include "s3/s3.hpp"
 
 #include <arrow/flight/client.h>
+#include <arrow/flight/client_auth.h>
 #include <arrow/flight/sql/client.h>
+#include <arrow/flight/types.h>
+#include <arrow/ipc/dictionary.h>
 #include <arrow/table.h>
 
 #include <atomic>
 #include <chrono>
+#include <exception>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <thread>
+
+namespace {
+
+// One-shot Put gate: the next Put waits until Unblock(). Heartbeat is a Put.
+class BlockingS3ControlClient final : public duckbox::s3::S3ControlClient {
+public:
+	explicit BlockingS3ControlClient(std::shared_ptr<duckbox::s3::S3ControlClient> inner)
+	    : inner_(std::move(inner)) {}
+
+	void BlockNextPut() {
+		std::lock_guard<std::mutex> hold(mu_);
+		entered_ = std::make_shared<std::promise<void>>();
+		released_ = std::make_shared<std::promise<void>>();
+		entered_fut_ = entered_->get_future().share();
+		released_fut_ = released_->get_future().share();
+		block_next_ = true;
+	}
+
+	bool WaitUntilBlocked(std::chrono::milliseconds d) const {
+		if (!entered_fut_.valid()) {
+			return false;
+		}
+		return entered_fut_.wait_for(d) == std::future_status::ready;
+	}
+
+	void Unblock() {
+		std::lock_guard<std::mutex> hold(mu_);
+		if (!released_) {
+			return;
+		}
+		try {
+			released_->set_value();
+		} catch (const std::future_error &) {
+		}
+		released_.reset();
+	}
+
+	duckbox::s3::S3Object Get(const std::string &key) const override { return inner_->Get(key); }
+	duckbox::s3::S3Object Put(const std::string &key, const std::string &body,
+	                         const std::string &if_match = "",
+	                         const std::string &if_none_match = "") const override {
+		std::shared_future<void> rel;
+		{
+			std::lock_guard<std::mutex> hold(mu_);
+			if (block_next_) {
+				block_next_ = false;
+				rel = released_fut_;
+				if (entered_) {
+					entered_->set_value();
+				}
+			}
+		}
+		if (rel.valid() && rel.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+			duckbox::s3::S3Object out;
+			out.status = 0;
+			out.error = "heartbeat gate timed out";
+			return out;
+		}
+		return inner_->Put(key, body, if_match, if_none_match);
+	}
+	duckbox::s3::S3Object Delete(const std::string &key,
+	                             const std::string &if_match = "") const override {
+		return inner_->Delete(key, if_match);
+	}
+	std::vector<std::string> ListKeys(const std::string &prefix) const override {
+		return inner_->ListKeys(prefix);
+	}
+	const std::string &bucket() const override { return inner_->bucket(); }
+
+private:
+	std::shared_ptr<duckbox::s3::S3ControlClient> inner_;
+	mutable std::mutex mu_;
+	mutable bool block_next_ = false;
+	mutable std::shared_ptr<std::promise<void>> entered_;
+	mutable std::shared_ptr<std::promise<void>> released_;
+	mutable std::shared_future<void> entered_fut_;
+	mutable std::shared_future<void> released_fut_;
+};
+
+class CountingLeaseManager final : public duckbox::cluster::ILeaseManager {
+public:
+	explicit CountingLeaseManager(std::shared_ptr<duckbox::cluster::ILeaseManager> inner)
+	    : inner_(std::move(inner)) {}
+	int renews() const { return renews_.load(); }
+
+	void BlockNextRenew() {
+		std::lock_guard<std::mutex> hold(mu_);
+		entered_ = std::make_shared<std::promise<void>>();
+		released_ = std::make_shared<std::promise<void>>();
+		entered_fut_ = entered_->get_future().share();
+		released_fut_ = released_->get_future().share();
+		block_next_ = true;
+	}
+
+	bool WaitUntilRenewBlocked(std::chrono::milliseconds d) const {
+		if (!entered_fut_.valid()) {
+			return false;
+		}
+		return entered_fut_.wait_for(d) == std::future_status::ready;
+	}
+
+	void UnblockRenew() {
+		std::lock_guard<std::mutex> hold(mu_);
+		if (!released_) {
+			return;
+		}
+		try {
+			released_->set_value();
+		} catch (const std::future_error &) {
+		}
+		released_.reset();
+	}
+
+	duckbox::cluster::Lease Acquire(const std::string &id) override { return inner_->Acquire(id); }
+	void Renew(const duckbox::cluster::Lease &lease) override {
+		std::shared_future<void> rel;
+		{
+			std::lock_guard<std::mutex> hold(mu_);
+			if (block_next_) {
+				block_next_ = false;
+				rel = released_fut_;
+				if (entered_) {
+					entered_->set_value();
+				}
+			}
+		}
+		if (rel.valid() && rel.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+			renews_.fetch_add(1);
+			inner_->Renew(lease);
+			return;
+		}
+		renews_.fetch_add(1);
+		inner_->Renew(lease);
+	}
+	void Release(const duckbox::cluster::Lease &lease) override { inner_->Release(lease); }
+	duckbox::cluster::Lease Peek(const std::string &id) override { return inner_->Peek(id); }
+	std::vector<std::string> OwnedIds() const override { return inner_->OwnedIds(); }
+	duckbox::cluster::Lease Held(const std::string &id) override { return inner_->Held(id); }
+	void GcTombstones() override { inner_->GcTombstones(); }
+	void set_flight(std::string flight) override { inner_->set_flight(std::move(flight)); }
+
+private:
+	std::shared_ptr<duckbox::cluster::ILeaseManager> inner_;
+	std::atomic<int> renews_{0};
+	mutable std::mutex mu_;
+	mutable bool block_next_ = false;
+	mutable std::shared_ptr<std::promise<void>> entered_;
+	mutable std::shared_ptr<std::promise<void>> released_;
+	mutable std::shared_future<void> entered_fut_;
+	mutable std::shared_future<void> released_fut_;
+};
+
+duckbox::common::Json ExtraOf(const ::arrow::Status &st) {
+	auto detail = ::arrow::flight::FlightStatusDetail::UnwrapStatus(st);
+	if (!detail) {
+		return duckbox::common::Json::object();
+	}
+	try {
+		return duckbox::common::Json::parse(detail->extra_info());
+	} catch (const std::exception &) {
+		return duckbox::common::Json::object();
+	}
+}
+
+} // namespace
 
 void duckbox::test::RunClusterTests() {
 	using namespace duckbox;
@@ -234,6 +406,144 @@ void duckbox::test::RunClusterTests() {
 	}
 
 	{
+		auto inner = MakeMemoryS3ControlClient("hb-inflight");
+		auto gate = std::make_shared<BlockingS3ControlClient>(inner);
+		auto clock_g = std::make_shared<FakeClock>(8'000'000);
+		S3LeaseOptions og;
+		og.owner_id = "node-gate";
+		og.flight = "grpc://127.0.0.1:4751";
+		og.prefix = "leases/";
+		og.ttl_ms = 15'000;
+		auto inner_leases =
+		    std::make_shared<S3ConditionalLeaseManager>(gate, og, std::shared_ptr<IMetrics>{}, clock_g);
+		auto leases_g = std::make_shared<CountingLeaseManager>(inner_leases);
+		auto nodes_g = std::make_shared<S3NodeDirectory>(gate, og, std::shared_ptr<IMetrics>{}, clock_g);
+		auto defs_g = std::make_shared<S3SandboxRegistry>(gate);
+		auto daemon_g = TestDaemon();
+		daemon_g.name = "node-gate";
+		SandboxRuntime rt_g(daemon_g, leases_g, defs_g);
+		rt_g.SetNodeDirectory(nodes_g);
+		rt_g.SetClock(clock_g);
+		rt_g.SetFenceHook([](const std::string &) {});
+
+		auto rec_g = RecordFromSpec(loaded, spec_dir);
+		rec_g.id = "gate-box";
+		rec_g.key = "tenant_21:user_sergio";
+		rec_g.spec.id = rec_g.id;
+		rec_g.spec.bound_key = rec_g.key;
+		rec_g = defs_g->Create(rec_g);
+		auto box_g = rt_g.Get(rec_g);
+		Expect(box_g && leases_g->Peek("gate-box").owned_locally, "gate fixture owns a sandbox");
+		rt_g.TickLeases();
+		const int renews_before = leases_g->renews();
+		Expect(renews_before >= 1 && rt_g.Serving() && nodes_g->has_published(),
+		       "first tick heartbeats and renews the owned sandbox");
+
+		gate->BlockNextPut();
+		std::promise<void> tick_done;
+		auto tick_fut = tick_done.get_future();
+		std::thread ticker([&] {
+			try {
+				rt_g.TickLeases();
+			} catch (...) {
+			}
+			try {
+				tick_done.set_value();
+			} catch (...) {
+			}
+		});
+		Expect(gate->WaitUntilBlocked(std::chrono::seconds(5)),
+		       "Heartbeat Put blocks before sandbox Renew");
+		clock_g->AdvanceMs(15'000);
+		bool fenced_from_assert = false;
+		try {
+			rt_g.AssertServing();
+		} catch (const std::exception &) {
+			fenced_from_assert = true;
+		}
+		Expect(rt_g.fenced() && fenced_from_assert, "AssertServing fences while Heartbeat is blocked");
+		gate->Unblock();
+		Expect(tick_fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+		       "TickLeases returns after Heartbeat unblocks");
+		if (ticker.joinable()) {
+			ticker.join();
+		}
+		Expect(leases_g->renews() == renews_before,
+		       "in-flight TickLeases does not Renew after Fence during Heartbeat");
+	}
+
+	{
+		auto inner = MakeMemoryS3ControlClient("renew-mid-loop");
+		auto clock_m = std::make_shared<FakeClock>(9'000'000);
+		S3LeaseOptions om;
+		om.owner_id = "node-mid";
+		om.flight = "grpc://127.0.0.1:4752";
+		om.prefix = "leases/";
+		om.ttl_ms = 15'000;
+		auto inner_leases =
+		    std::make_shared<S3ConditionalLeaseManager>(inner, om, std::shared_ptr<IMetrics>{}, clock_m);
+		auto leases_m = std::make_shared<CountingLeaseManager>(inner_leases);
+		auto nodes_m = std::make_shared<S3NodeDirectory>(inner, om, std::shared_ptr<IMetrics>{}, clock_m);
+		auto defs_m = std::make_shared<S3SandboxRegistry>(inner);
+		auto daemon_m = TestDaemon();
+		daemon_m.name = "node-mid";
+		SandboxRuntime rt_m(daemon_m, leases_m, defs_m);
+		rt_m.SetNodeDirectory(nodes_m);
+		rt_m.SetClock(clock_m);
+		rt_m.SetFenceHook([](const std::string &) {});
+
+		auto make_rec = [&](const char *id) {
+			auto rec = RecordFromSpec(loaded, spec_dir);
+			rec.id = id;
+			rec.key = "tenant_21:user_sergio";
+			rec.spec.id = rec.id;
+			rec.spec.bound_key = rec.key;
+			rec = defs_m->Create(rec);
+			auto box = rt_m.Get(rec);
+			Expect(box && leases_m->Peek(id).owned_locally,
+			       std::string("mid-loop fixture owns ") + id);
+		};
+		make_rec("loop-box-a");
+		make_rec("loop-box-b");
+		rt_m.TickLeases();
+		const int renews_before = leases_m->renews();
+		Expect(renews_before >= 2 && rt_m.Serving() && nodes_m->has_published(),
+		       "first tick heartbeats and renews both owned sandboxes");
+
+		leases_m->BlockNextRenew();
+		std::promise<void> tick_done;
+		auto tick_fut = tick_done.get_future();
+		std::thread ticker([&] {
+			try {
+				rt_m.TickLeases();
+			} catch (...) {
+			}
+			try {
+				tick_done.set_value();
+			} catch (...) {
+			}
+		});
+		Expect(leases_m->WaitUntilRenewBlocked(std::chrono::seconds(5)),
+		       "first sandbox Renew blocks after Heartbeat");
+		clock_m->AdvanceMs(15'000);
+		bool fenced_from_assert = false;
+		try {
+			rt_m.AssertServing();
+		} catch (const std::exception &) {
+			fenced_from_assert = true;
+		}
+		Expect(rt_m.fenced() && fenced_from_assert, "AssertServing fences during the first Renew");
+		leases_m->UnblockRenew();
+		Expect(tick_fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+		       "TickLeases returns after the in-flight Renew unblocks");
+		if (ticker.joinable()) {
+			ticker.join();
+		}
+		Expect(leases_m->renews() == renews_before + 1,
+		       "Fence mid-loop stops remaining sandbox Renews");
+	}
+
+	{
 		auto daemon_d = TestDaemon();
 		auto leases_d = std::make_shared<S3ConditionalLeaseManager>(s3, opt_a, std::shared_ptr<IMetrics>{}, clock);
 		SandboxRuntime rt_d(daemon_d, leases_d, defs);
@@ -316,12 +626,19 @@ void duckbox::test::RunClusterTests() {
 		oa.ttl_ms = 30'000;
 		S3LeaseOptions ob = oa;
 		ob.owner_id = "node-b";
+		const std::string kAdvA = "grpc://127.0.0.1:4747";
+		const std::string kAdvB = "grpc://127.0.0.1:4748";
 		auto daemon_pa = TestDaemon();
 		daemon_pa.name = "node-a";
 		daemon_pa.peer_secret = "peer-secret-value";
 		daemon_pa.listen = "127.0.0.1:0";
+		daemon_pa.advertised_address = kAdvA;
+		daemon_pa.lease.endpoint = "http://127.0.0.1:9";
 		auto daemon_pb = daemon_pa;
 		daemon_pb.name = "node-b";
+		daemon_pb.advertised_address = kAdvB;
+		auto metrics_p = std::make_shared<MetricsRegistry>("cluster-proxy", std::unordered_set<std::string>{"analyst"});
+		SetMetrics(metrics_p);
 		auto leases_pa = std::make_shared<S3ConditionalLeaseManager>(s3p, oa, std::shared_ptr<IMetrics>{}, clockp);
 		auto leases_pb = std::make_shared<S3ConditionalLeaseManager>(s3p, ob, std::shared_ptr<IMetrics>{}, clockp);
 		auto rt_pa = std::make_shared<SandboxRuntime>(daemon_pa, leases_pa, defs_p);
@@ -386,6 +703,18 @@ void duckbox::test::RunClusterTests() {
 		ob.flight = "grpc://127.0.0.1:" + std::to_string(nb.int_port);
 		leases_pa->set_flight(oa.flight);
 		leases_pb->set_flight(ob.flight);
+		auto nodes_pa = std::make_shared<S3NodeDirectory>(s3p, oa, std::shared_ptr<IMetrics>{}, clockp);
+		auto nodes_pb = std::make_shared<S3NodeDirectory>(s3p, ob, std::shared_ptr<IMetrics>{}, clockp);
+		nodes_pa->set_flight(oa.flight);
+		nodes_pa->set_advertised_address(kAdvA);
+		nodes_pa->Heartbeat();
+		nodes_pb->set_flight(ob.flight);
+		nodes_pb->set_advertised_address(kAdvB);
+		nodes_pb->Heartbeat();
+		peers_a->SetNodeDirectory(nodes_pa);
+		peers_b->SetNodeDirectory(nodes_pb);
+		rt_pa->SetNodeDirectory(nodes_pa);
+		rt_pb->SetNodeDirectory(nodes_pb);
 
 		auto rec_p = RecordFromSpec(loaded, spec_dir);
 		rec_p.id = "proxy-box";
@@ -405,11 +734,52 @@ void duckbox::test::RunClusterTests() {
 		qopt.headers.emplace_back("x-duckbox-sandbox", "proxy-box");
 		qopt.headers.emplace_back("x-duckbox-caller", "local");
 		auto info_res = sql_b.Execute(qopt, "SELECT id FROM deals ORDER BY id");
-		Expect(info_res.ok(), "GetFlightInfo via non-owner proxies to the owner");
+		Expect(info_res.ok(), "GetFlightInfo via non-owner describes on the owner");
 		if (info_res.ok()) {
 			auto info = std::move(info_res).ValueOrDie();
-			Expect(info->endpoints().size() == 1 && info->endpoints()[0].locations.empty(),
-			       "client endpoint locations are empty (never a peer address)");
+			Expect(info->endpoints().size() == 1 && !info->endpoints()[0].locations.empty(),
+			       "client endpoint location is the owner's advertised address");
+			if (!info->endpoints()[0].locations.empty()) {
+				const std::string loc = info->endpoints()[0].locations[0].ToString();
+				Expect(loc == kAdvA, "statement location is node-a's advertised_address, got " + loc);
+				Expect(loc.find(std::to_string(na.int_port)) == std::string::npos,
+				       "location is never the peer-internal listener");
+			}
+			::arrow::ipc::DictionaryMemo memo;
+			auto schema = info->GetSchema(&memo);
+			Expect(schema.ok() && *schema && (*schema)->GetFieldByName("id"),
+			       "FlightInfo has the real result schema computed by the owner");
+			{
+				auto mred = metrics_p->Render();
+				Expect(mred.find("duckbox_redirects_total{") != std::string::npos &&
+				           mred.find("op=\"get_flight_info\"") != std::string::npos,
+				       "successful redirect increments duckbox_redirects_total");
+			}
+			{
+				auto m_before = metrics_p->Render();
+				Expect(m_before.find("duckbox_result_rows_total") == std::string::npos &&
+				           m_before.find("op=\"do_get\"") == std::string::npos,
+				       "unary describe does not execute DoGet or count result rows");
+				auto aloc_i2 = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", na.pub_port);
+				auto acli_i2 = ::arrow::flight::FlightClient::Connect(*aloc_i2);
+				Expect(acli_i2.ok(), "I2 client connects to the owner public listener");
+				if (acli_i2.ok()) {
+					auto owner_cli =
+					    std::shared_ptr<::arrow::flight::FlightClient>(std::move(acli_i2).ValueOrDie());
+					auto owner_get = owner_cli->DoGet(qopt, info->endpoints()[0].ticket);
+					Expect(owner_get.ok(), "DoGet of the redirected ticket is served by the owner");
+					if (owner_get.ok()) {
+						auto tbl = owner_get.ValueOrDie()->ToTable();
+						Expect(tbl.ok() && (*tbl)->num_rows() == 1, "owner DoGet returns query rows");
+					}
+					auto mown = metrics_p->Render();
+					Expect(mown.find("duckbox_query_duration_seconds") != std::string::npos &&
+					           mown.find("duckbox_result_rows_total") != std::string::npos,
+					       "owner query counter advances after DoGet on the owner");
+					Expect(mown.find("op=\"do_get\"") == std::string::npos,
+					       "non-owner proxy DoGet counter does not advance when DoGet hits the owner");
+				}
+			}
 			auto stream_res = bcli->DoGet(qopt, info->endpoints()[0].ticket);
 			Expect(stream_res.ok(), "DoGet via non-owner proxies to the owner");
 			if (stream_res.ok()) {
@@ -418,11 +788,225 @@ void duckbox::test::RunClusterTests() {
 			}
 		}
 
+		{
+			auto binder = sql_b.Execute(qopt, "SELECT no_such_column FROM deals");
+			Expect(!binder.ok(), "binder error via non-owner fails");
+			if (!binder.ok()) {
+				auto bst = binder.status();
+				auto *bd = ::arrow::flight::FlightStatusDetail::UnwrapStatus(bst).get();
+				Expect(bst.IsInvalid(), "binder error via non-owner is InvalidArgument, not UNAVAILABLE");
+				Expect(bd == nullptr || bd->code() != ::arrow::flight::FlightStatusCode::Unavailable,
+				       "binder error is not FlightStatusCode::Unavailable");
+				auto bmsg = bst.ToString();
+				Expect(bmsg.find("owner_moved:") == std::string::npos &&
+				           bmsg.find("owner unreachable") == std::string::npos,
+				       "binder error is not rewritten to owner_unreachable: " + bmsg);
+				Expect(bmsg.find("no_such_column") != std::string::npos ||
+				           bmsg.find("Binder") != std::string::npos,
+				       "binder error keeps the owner's message: " + bmsg);
+				auto mfail = metrics_p->Render();
+				Expect(mfail.find("duckbox_redirect_errors_total{") != std::string::npos &&
+				           mfail.find("reason=\"failed\"") != std::string::npos,
+				       "binder error increments redirect_errors reason=failed");
+			}
+		}
+
+		{
+			auto expect_owner_invalid = [&](const char *sql, const char *label) {
+				auto r = sql_b.Execute(qopt, sql);
+				Expect(!r.ok(), std::string(label) + " via non-owner fails");
+				if (!r.ok()) {
+					auto st = r.status();
+					auto *d = ::arrow::flight::FlightStatusDetail::UnwrapStatus(st).get();
+					Expect(st.IsInvalid(),
+					       std::string(label) + " is InvalidArgument, not UNAVAILABLE");
+					Expect(d == nullptr ||
+					           d->code() != ::arrow::flight::FlightStatusCode::Unavailable,
+					       std::string(label) + " is not FlightStatusCode::Unavailable");
+					auto msg = st.ToString();
+					Expect(msg.find("owner_moved:") == std::string::npos &&
+					           msg.find("owner unreachable") == std::string::npos,
+					       std::string(label) +
+					           " is not rewritten to owner_unreachable: " + msg);
+				}
+			};
+			expect_owner_invalid("SELECT unavailable FROM deals", "SELECT unavailable");
+			expect_owner_invalid("SELECT \"Connect\" FROM deals", "SELECT Connect");
+			expect_owner_invalid("SELECT 'password=not-a-secret' + 1 FROM deals",
+			                    "SELECT password=");
+		}
+
+		{
+			class SecretAuth : public ::arrow::flight::ClientAuthHandler {
+			public:
+				explicit SecretAuth(std::string s) : s_(std::move(s)) {}
+				::arrow::Status Authenticate(::arrow::flight::ClientAuthSender *o,
+				                             ::arrow::flight::ClientAuthReader *i) override {
+					ARROW_RETURN_NOT_OK(o->Write(s_));
+					std::string id;
+					return i->Read(&id);
+				}
+				::arrow::Status GetToken(std::string *t) override {
+					*t = s_;
+					return ::arrow::Status::OK();
+				}
+				std::string s_;
+			};
+			auto iloc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", nb.int_port);
+			auto icli_res = ::arrow::flight::FlightClient::Connect(*iloc);
+			Expect(icli_res.ok(), "internal client connects to the non-owner peer listener");
+			if (icli_res.ok()) {
+				auto icli =
+				    std::shared_ptr<::arrow::flight::FlightClient>(std::move(icli_res).ValueOrDie());
+				auto auth_st =
+				    icli->Authenticate({}, std::make_unique<SecretAuth>("peer-secret-value"));
+				Expect(auth_st.ok(), "internal client authenticates with the peer secret");
+				::arrow::flight::sql::FlightSqlClient sql_int(icli);
+				::arrow::flight::FlightCallOptions iopt;
+				iopt.headers.emplace_back("x-duckbox-sandbox", "proxy-box");
+				iopt.headers.emplace_back("x-duckbox-key", rec_p.key);
+				auto handoff = sql_int.Execute(iopt, "SELECT id FROM deals");
+				Expect(!handoff.ok(), "internal GetFlightInfo on a non-owner fails");
+				if (!handoff.ok()) {
+					auto hst = handoff.status();
+					auto *hd = ::arrow::flight::FlightStatusDetail::UnwrapStatus(hst).get();
+					Expect(hd != nullptr &&
+					           hd->code() == ::arrow::flight::FlightStatusCode::Unavailable,
+					       "internal not-the-owner handoff is UNAVAILABLE");
+					auto extra = ExtraOf(hst);
+					Expect(extra.contains("code") && extra["code"] == "owner_moved" &&
+					           extra.contains("reason") && extra["reason"] == "owner_unreachable",
+					       "internal handoff extra_info is owner_moved owner_unreachable: " +
+					           hst.ToString());
+				}
+			}
+		}
+
+		{
+			peers_b->set_max_inflight(1);
+			auto hold_res = peers_b->AcquireInflight(oa.flight);
+			Expect(hold_res.ok() && peers_b->inflight() == 1,
+			       "test holds the single inflight slot on the non-owner");
+			if (hold_res.ok()) {
+				auto hold = std::move(hold_res).ValueOrDie();
+				auto busy = sql_b.Execute(qopt, "SELECT id FROM deals");
+				Expect(!busy.ok(), "GetFlightInfo fails when the peer inflight cap is full");
+				if (!busy.ok()) {
+					auto bst = busy.status();
+					auto *bd = ::arrow::flight::FlightStatusDetail::UnwrapStatus(bst).get();
+					Expect(bd != nullptr &&
+					           bd->code() == ::arrow::flight::FlightStatusCode::Unavailable,
+					       "peer proxy busy on GetFlightInfo is UNAVAILABLE");
+					auto extra = ExtraOf(bst);
+					Expect(extra.contains("code") && extra["code"] == "owner_moved" &&
+					           extra.contains("reason") && extra["reason"] == "owner_unreachable",
+					       "peer proxy busy extra_info is owner_moved owner_unreachable: " +
+					           bst.ToString());
+				}
+			}
+			peers_b->set_max_inflight(256);
+		}
+
+		{
+			auto prepared = sql_b.Prepare(qopt, "SELECT id FROM deals ORDER BY id");
+			Expect(prepared.ok(), "CreatePreparedStatement via non-owner");
+			if (prepared.ok()) {
+				auto schema = (*prepared)->dataset_schema();
+				Expect(schema && schema->GetFieldByName("id"),
+				       "CreatePreparedStatement dataset_schema is the owner's real schema");
+				Expect(!schema->GetFieldByName("_empty"),
+				       "CreatePreparedStatement does not return a placeholder _empty schema");
+				auto prep_info = (*prepared)->Execute(qopt);
+				Expect(prep_info.ok() && !(*prep_info)->endpoints().empty() &&
+				           !(*prep_info)->endpoints()[0].locations.empty() &&
+				           (*prep_info)->endpoints()[0].locations[0].ToString() == kAdvA,
+				       "prepared GetFlightInfo location is the owner's advertised address");
+			}
+		}
+
+		{
+			auto tables = sql_b.GetTables(qopt, nullptr, nullptr, nullptr, true, nullptr);
+			Expect(tables.ok() && !(*tables)->endpoints().empty() &&
+			           !(*tables)->endpoints()[0].locations.empty() &&
+			           (*tables)->endpoints()[0].locations[0].ToString() == kAdvA,
+			       "GetTables include_schema location is the owner's advertised address");
+		}
+
+		{
+			auto aloc = ::arrow::flight::Location::ForGrpcTcp("127.0.0.1", na.pub_port);
+			auto acli_res = ::arrow::flight::FlightClient::Connect(*aloc);
+			Expect(acli_res.ok(), "client connects to the owner public listener");
+			auto acli = std::shared_ptr<::arrow::flight::FlightClient>(std::move(acli_res).ValueOrDie());
+			::arrow::flight::sql::FlightSqlClient sql_a(acli);
+			auto local_info = sql_a.Execute(qopt, "SELECT id FROM deals ORDER BY id");
+			Expect(local_info.ok() && !(*local_info)->endpoints().empty() &&
+			           !(*local_info)->endpoints()[0].locations.empty() &&
+			           (*local_info)->endpoints()[0].locations[0].ToString() == kAdvA,
+			       "multi-node local GetFlightInfo sets this node's advertised address");
+			auto local_prep = sql_a.Prepare(qopt, "SELECT id FROM deals ORDER BY id");
+			Expect(local_prep.ok(), "multi-node local CreatePreparedStatement");
+			if (local_prep.ok()) {
+				auto local_prep_info = (*local_prep)->Execute(qopt);
+				Expect(local_prep_info.ok() && !(*local_prep_info)->endpoints().empty() &&
+				           !(*local_prep_info)->endpoints()[0].locations.empty() &&
+				           (*local_prep_info)->endpoints()[0].locations[0].ToString() == kAdvA,
+				       "multi-node local prepared GetFlightInfo sets this node's advertised address");
+			}
+		}
+
+		{
+			clockp->AdvanceMs(2000);
+			nodes_pa->set_advertised_address("not a uri !!!");
+			nodes_pa->Heartbeat();
+			clockp->AdvanceMs(2000);
+			auto unp = sql_b.Execute(qopt, "SELECT id FROM deals");
+			Expect(!unp.ok(), "GetFlightInfo fails when advertised_address is unparseable");
+			if (!unp.ok()) {
+				auto umsg = unp.status().ToString();
+				auto extra = ExtraOf(unp.status());
+				Expect(extra.contains("reason") && extra["reason"] == "no_owner_address",
+				       "unparseable advertised_address extra_info reason is no_owner_address: " + umsg);
+				Expect(umsg.find(oa.flight) == std::string::npos &&
+				           umsg.find(std::to_string(na.int_port)) == std::string::npos,
+				       "unparseable-address error never returns a peer-internal address: " + umsg);
+			}
+			nodes_pa->set_advertised_address(kAdvA);
+			nodes_pa->Heartbeat();
+			clockp->AdvanceMs(2000);
+		}
+
+		{
+			clockp->AdvanceMs(2000);
+			nodes_pa->set_advertised_address("");
+			nodes_pa->Heartbeat();
+			clockp->AdvanceMs(2000);
+			auto missing = sql_b.Execute(qopt, "SELECT id FROM deals");
+			Expect(!missing.ok(), "GetFlightInfo fails when the owner has no advertised address");
+			auto msg = missing.status().ToString();
+			auto extra = ExtraOf(missing.status());
+			Expect(extra.contains("code") && extra["code"] == "owner_moved" && extra.contains("reason") &&
+			           extra["reason"] == "no_owner_address",
+			       "missing advertised address extra_info reason is no_owner_address: " + msg);
+			Expect(msg.find(oa.flight) == std::string::npos &&
+			           msg.find(std::to_string(na.int_port)) == std::string::npos,
+			       "missing-address error never returns a peer-internal address: " + msg);
+			nodes_pa->set_advertised_address(kAdvA);
+			nodes_pa->Heartbeat();
+			clockp->AdvanceMs(2000);
+		}
+
 		na.Stop();
 		auto after_kill = sql_b.Execute(qopt, "SELECT id FROM deals");
 		Expect(!after_kill.ok(), "owner killed mid-flight is not replayed to a new owner");
+		if (!after_kill.ok()) {
+			auto kmsg = after_kill.status().ToString();
+			auto kextra = ExtraOf(after_kill.status());
+			Expect(kextra.contains("reason") && kextra["reason"] == "owner_unreachable",
+			       "killed owner extra_info reason is owner_unreachable: " + kmsg);
+		}
 		Expect(!leases_pb->Peek("proxy-box").owned_locally, "non-owner does not take ownership while the lease lives");
 
 		nb.Stop();
+		SetMetrics(nullptr);
 	}
 }

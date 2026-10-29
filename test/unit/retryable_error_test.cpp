@@ -19,8 +19,11 @@ using duckbox::common::FormatRetryableExtraInfo;
 using duckbox::common::FormatRetryableMessage;
 using duckbox::common::Json;
 using duckbox::common::kLakeCatalogUnavailable;
+using duckbox::common::kMaxRetryableDetailBytes;
 using duckbox::common::kRetryableNoOwner;
+using duckbox::common::kRetryableNoOwnerAddress;
 using duckbox::common::kRetryableOwnerMoved;
+using duckbox::common::kRetryableOwnerUnreachable;
 using duckbox::common::LeaseLostError;
 using duckbox::common::NotFoundError;
 using duckbox::common::OwnerMovedError;
@@ -94,6 +97,10 @@ void duckbox::test::RunRetryableErrorTests() {
         Expect(extra["code"] == "owner_moved" && extra["owner"] == "node-c" &&
                    extra["address"] == "grpc://10.0.0.3:4747",
                "owner_moved extra_info has code, owner, address");
+        auto extra_reason = Json::parse(FormatRetryableExtraInfo(
+            kRetryableOwnerMoved, moved.owner_id(), moved.address(), kRetryableOwnerUnreachable));
+        Expect(extra_reason["reason"] == "owner_unreachable",
+               "owner_moved extra_info includes reason when set");
         Expect(extra.dump().find(' ') == std::string::npos, "extra_info is compact JSON");
     }
     {
@@ -142,17 +149,60 @@ void duckbox::test::RunRetryableErrorTests() {
     {
         auto st = StatusFromException(UnavailableError("sandbox describe timed out"));
         ExpectUnavailable(st, "describe timeout");
-        Expect(st.message().find("no_owner:") == 0, "describe timeout keeps no_owner prefix");
+        Expect(st.message().find("owner_moved:") == 0, "describe timeout is owner_moved");
         Expect(st.message().find("sandbox describe timed out") != std::string::npos,
                "describe timeout keeps its text");
+        auto extra = ParseExtra(st, "describe timeout");
+        Expect(extra["code"] == "owner_moved" && extra["reason"] == "owner_unreachable",
+               "describe timeout extra_info reason is owner_unreachable");
     }
     {
         auto st =
             StatusFromException(UnavailableError("peer advertise URL is not a registered node"));
         ExpectUnavailable(st, "unregistered peer");
+        Expect(st.message().find("owner_moved:") == 0, "unregistered peer is owner_moved");
         Expect(st.message().find("peer advertise URL is not a registered node") !=
                    std::string::npos,
                "unregistered peer keeps its text after the prefix");
+        auto extra = ParseExtra(st, "unregistered peer");
+        Expect(extra["reason"] == "owner_unreachable",
+               "unregistered peer extra_info reason is owner_unreachable");
+    }
+    {
+        auto st = StatusFromException(
+            OwnerMovedError("node-b", "grpc://127.0.0.1:4748", kRetryableOwnerUnreachable));
+        ExpectUnavailable(st, "owner_unreachable");
+        Expect(st.message().find("owner_moved:") == 0, "owner_unreachable uses owner_moved code");
+        Expect(st.message().find("owner unreachable") != std::string::npos,
+               "owner_unreachable keeps a clear retry sentence");
+        auto extra = ParseExtra(st, "owner_unreachable");
+        Expect(extra["code"] == "owner_moved" && extra["reason"] == "owner_unreachable" &&
+                   extra["owner"] == "node-b" && extra["address"] == "grpc://127.0.0.1:4748",
+               "owner_unreachable extra_info");
+    }
+    {
+        auto st = StatusFromException(OwnerMovedError("node-b", {}, kRetryableNoOwnerAddress));
+        ExpectUnavailable(st, "no_owner_address");
+        Expect(st.message().find("owner_moved:") == 0, "no_owner_address uses owner_moved code");
+        Expect(st.message().find("advertised address") != std::string::npos,
+               "no_owner_address names the missing field");
+        auto extra = ParseExtra(st, "no_owner_address");
+        Expect(extra["code"] == "owner_moved" && extra["reason"] == "no_owner_address" &&
+                   extra["owner"] == "node-b" && !extra.contains("address"),
+               "no_owner_address extra_info omits address");
+    }
+    {
+        const std::string long_owner(kMaxRetryableDetailBytes + 1, 'o');
+        const std::string long_addr = "grpc://" + std::string(kMaxRetryableDetailBytes, 'a');
+        auto st = StatusFromException(OwnerMovedError(long_owner, long_addr));
+        ExpectUnavailable(st, "oversized owner/address");
+        Expect(st.message().find(long_owner) == std::string::npos,
+               "owner longer than 256 bytes is omitted from the message");
+        Expect(st.message().find(long_addr) == std::string::npos,
+               "address longer than 256 bytes is omitted from the message");
+        auto extra = ParseExtra(st, "oversized owner/address");
+        Expect(!extra.contains("owner") && !extra.contains("address"),
+               "oversized owner/address are omitted from extra_info");
     }
     {
         auto st = StatusFromException(OwnerMovedError("node-c", "grpc://10.0.0.3:4747"));
@@ -221,9 +271,10 @@ void duckbox::test::RunRetryableErrorTests() {
         ExpectUnavailable(st, "redacted UnavailableError");
         Expect(st.message().find(secret) == std::string::npos,
                "retryable mapping never echoes a password= value");
-        Expect(st.message().find(kLakeCatalogUnavailable) != std::string::npos ||
-                   ClientFacingError("password=" + secret).find(secret) == std::string::npos,
-               "safety net still runs on retryable messages");
+        Expect(st.message() == "no_owner: sandbox has no owner; retry",
+               "redaction net yields a generic no_owner sentence, not a fragment");
+        Expect(st.message().find(kLakeCatalogUnavailable) == std::string::npos,
+               "redacted retryable message is not the catalog-unavailable fragment");
         auto extra = ParseExtra(st, "redacted UnavailableError");
         Expect(extra.dump().find(secret) == std::string::npos,
                "extra_info never contains the secret");
@@ -236,9 +287,53 @@ void duckbox::test::RunRetryableErrorTests() {
                "owner field is not compared as a secret value and password= is stripped");
         Expect(st.message().find("user:pass") == std::string::npos,
                "URI userinfo in an address does not reach the tenant");
+        Expect(st.message() == "owner_moved: sandbox owner changed; retry the query",
+               "redaction net yields a generic owner_moved sentence, not a fragment");
         auto extra = ParseExtra(st, "redacted OwnerMovedError");
         Expect(extra.dump().find("should-not-compare") == std::string::npos &&
                    extra.dump().find("user:pass") == std::string::npos,
                "redacted extra_info drops owner and address");
+        Expect(!extra.contains("owner") && !extra.contains("address"),
+               "redacted extra_info omits owner and address fields");
+    }
+    {
+        // what() contains password= so the first-pass net already redacted
+        // (`already_redacted`). Owner/address are clean, so the second-pass
+        // ClientFacingError on the assembled message would not fire. Without
+        // the already_redacted handling the tenant would see the catalog
+        // fragment plus owner/address (#107 S3).
+        class PasswordOwnerMoved : public OwnerMovedError {
+          public:
+            PasswordOwnerMoved(std::string owner, std::string address)
+                : OwnerMovedError(std::move(owner), std::move(address)),
+                  msg_("binder error: password=<fake>") {}
+            const char *what() const noexcept override { return msg_.c_str(); }
+
+          private:
+            std::string msg_;
+        };
+        auto st = StatusFromException(PasswordOwnerMoved("node-c", "grpc://10.0.0.3:4747"));
+        ExpectUnavailable(st, "already-redacted OwnerMovedError message");
+        Expect(st.message() == "owner_moved: sandbox owner changed; retry the query",
+               "already-redacted OwnerMovedError yields the generic owner_moved sentence, "
+               "not the fragment plus owner/address");
+        auto extra = ParseExtra(st, "already-redacted OwnerMovedError message");
+        Expect(!extra.contains("owner") && !extra.contains("address"),
+               "already-redacted extra_info omits owner and address fields");
+    }
+    {
+        auto st = StatusFromException(UnavailableError(kLakeCatalogUnavailable));
+        ExpectUnavailable(st, "catalog-unavailable fragment");
+        Expect(
+            st.message() == "no_owner: sandbox has no owner; retry",
+            "incoming catalog-unavailable fragment is replaced by the generic no_owner sentence");
+        Expect(st.message().find(kLakeCatalogUnavailable) == std::string::npos,
+               "generic no_owner sentence does not keep the catalog fragment");
+    }
+    {
+        auto st = StatusFromException(UnavailableError("Unable to connect to Postgres"));
+        ExpectUnavailable(st, "catalog IO marker");
+        Expect(st.message() == "no_owner: sandbox has no owner; retry",
+               "first-pass catalog marker redaction yields the generic no_owner sentence");
     }
 }

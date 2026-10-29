@@ -5,6 +5,7 @@
 // Unauthenticated / Unavailable). Messages must never contain secret values or
 // raw user SQL beyond a short reason.
 
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -85,18 +86,28 @@ class UnavailableError : public Error {
 // Stable codes at the start of tenant-facing retryable Flight messages (C4).
 inline constexpr const char *kRetryableOwnerMoved = "owner_moved";
 inline constexpr const char *kRetryableNoOwner = "no_owner";
+// extra_info / metrics reasons on owner_moved (C2). Not a second message prefix.
+inline constexpr const char *kRetryableOwnerUnreachable = "owner_unreachable";
+inline constexpr const char *kRetryableNoOwnerAddress = "no_owner_address";
+// Owner/address longer than this are omitted from the tenant-facing message
+// and extra_info (#107 S2).
+inline constexpr size_t kMaxRetryableDetailBytes = 256;
 
 // Sandbox owner changed (or is unknown). Owner id and advertised address are
 // optional and appear on the client message / extra_info only when known.
+// `reason` is an extra_info / metrics label (owner_unreachable, no_owner_address).
 class OwnerMovedError : public Error {
   public:
-    explicit OwnerMovedError(std::string owner_id = {}, std::string address = {});
+    explicit OwnerMovedError(std::string owner_id = {}, std::string address = {},
+                             std::string reason = {});
     const std::string &owner_id() const { return owner_id_; }
     const std::string &address() const { return address_; }
+    const std::string &reason() const { return reason_; }
 
   private:
     std::string owner_id_;
     std::string address_;
+    std::string reason_;
 };
 
 // Prefix `code:` onto an already-redacted message. Owner/address fields are
@@ -104,11 +115,13 @@ class OwnerMovedError : public Error {
 std::string FormatRetryableMessage(const std::string &code, const std::string &message,
                                    const std::string &owner = {}, const std::string &address = {});
 std::string FormatRetryableExtraInfo(const std::string &code, const std::string &owner = {},
-                                     const std::string &address = {});
+                                     const std::string &address = {},
+                                     const std::string &reason = {});
 
 // This node is not the owner. Internal proxy trigger only — never returned to
 // clients. `what()` is `duckbox redirect owner=ID location=URL` (the owner's
-// internal advertise address). Endpoint locations sent to clients stay empty.
+// internal advertise address). Client endpoint locations come from the node
+// directory advertised_address, never this URL.
 class RedirectError : public Error {
   public:
     RedirectError(std::string owner_id, std::string flight);

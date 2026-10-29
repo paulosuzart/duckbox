@@ -29,6 +29,9 @@ void duckbox::test::RunMetricsTests() {
 	reg.IncProxy("get_flight_info");
 	reg.IncProxyError("do_get", "error");
 	reg.ObserveProxy("do_get", 0.01);
+	reg.IncRedirect("get_flight_info");
+	reg.IncRedirectError("create_prepared_statement", "timeout");
+	reg.ObserveRedirect("get_tables", 0.02);
 	auto text = reg.Render();
 	Expect(text.find("# TYPE duckbox_query_duration_seconds histogram") != std::string::npos,
 	       "exposition declares query histogram");
@@ -48,6 +51,11 @@ void duckbox::test::RunMetricsTests() {
 	Expect(text.find("duckbox_proxy_requests_total{") != std::string::npos, "proxy request counter");
 	Expect(text.find("duckbox_proxy_errors_total{") != std::string::npos, "proxy error counter");
 	Expect(text.find("duckbox_proxy_seconds") != std::string::npos, "proxy latency histogram");
+	Expect(text.find("duckbox_redirects_total{") != std::string::npos, "redirect counter");
+	Expect(text.find("op=\"get_flight_info\"") != std::string::npos, "redirect op label");
+	Expect(text.find("duckbox_redirect_errors_total{") != std::string::npos, "redirect error counter");
+	Expect(text.find("reason=\"timeout\"") != std::string::npos, "redirect error reason");
+	Expect(text.find("duckbox_redirect_describe_seconds") != std::string::npos, "redirect describe histogram");
 	reg.SetNodeHealthy(false);
 	auto down = reg.Render();
 	Expect(down.find("duckbox_node_healthy{node=\"node-a\"} 0") != std::string::npos, "unhealthy gauge is 0");

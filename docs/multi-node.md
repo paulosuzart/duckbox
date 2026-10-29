@@ -11,7 +11,7 @@ If the catalog is unreachable after warmup (Postgres stopped, network partition,
 ```
    client ──► load balancer / any public Flight SQL listener
                     │
-                    │  GetFlightInfo / DoGet (sandbox id + SQL)
+                    │  GetFlightInfo (sandbox id + SQL)
                     ▼
               this node: Acquire sandbox id
                     │
@@ -21,16 +21,19 @@ If the catalog is unreachable after warmup (Postgres stopped, network partition,
                yes  │   no
                     │    │
                     ▼    ▼
-              warm DuckDB   proxy over internal listener
+              warm DuckDB   unary describe to the owner
                     │       (peer secret, never the caller)
                     │         │
                     └────┬────┘
                          ▼
-              FlightInfo to the client: empty locations
-              (never a peer-internal address)
+              FlightInfo locations = owner's advertised_address
+              (from the node directory, never lease.advertise)
+                    │
+                    ▼
+              client DoGet ──► owner public listener
 ```
 
-**Routing:** the client talks only to the node it hit (the load-balancer address is enough). A non-owner forwards Flight SQL (`GetFlightInfo`, `DoGet`, prepared statements) to the owner over the **internal** peer channel. Endpoint locations returned to the client are empty (same server) or the public node the client used — never `lease.advertise`. A draining node may still forward to a live owner but must not take new ownership. A request already sent to an old owner is **not** replayed onto a new owner.
+**Routing:** `GetFlightInfo` on a non-owner does one short unary describe to the owner, then returns the owner's `advertised_address` from the node directory as every endpoint location. ADBC and other Flight SQL clients **follow that location** for DoGet — the load-balancer address is not enough. `advertised_address` must be reachable by clients. When TLS terminates in front of the node, set `advertised_address` to `grpc+tls://…`; a default `grpc://` + `listen` sends the Bearer token and tenant key in the clear to that node. Locations are never `lease.advertise` (the internal peer listener). A draining node may still describe via a live owner but must not take new ownership. A request already sent to an old owner is **not** replayed onto a new owner. Streaming DoGet between nodes is still proxied until that path is removed.
 
 `RedirectError` is an internal proxy trigger. It is never returned to clients.
 
@@ -127,10 +130,10 @@ Under `lease:` in the daemon YAML (all optional except the S3 endpoint block you
 | `skew` / `skew_ms` | `1s` | Extra wait past `expiry_ms` before stealing another node’s lease (local-clock skew margin). |
 | `cache_ms` | `250` | Short Acquire cache (also caps the node-directory lookup cache). `0` disables the Acquire cache; directory lookups then use a 1s TTL. Must stay well below TTL. |
 | `gc` / `gc_ms` | `24h` | Age after which a lease tombstone may be deleted. Epoch is copied to `{prefix}epochs/{id}.json` first. `0` disables. |
-| `proxy_timeout` / `proxy_timeout_ms` | `5s` | One `steady_clock` deadline per proxied GetFlightInfo (connect + Authenticate + GetFlightInfo). Each hop uses the remaining time. A failed hop is `peer proxy timed out` only when `now >= deadline` or the status is Arrow `FlightStatusCode::TimedOut` (gRPC `DEADLINE_EXCEEDED`). Applies even when the owner is SIGSTOP'd or the TCP accept succeeds but HTTP/2 never completes. Connect and Authenticate do not hold a process-wide lock: a frozen peer cannot stall proxy calls to a different, healthy owner. Reconnect backoff (`GRPC_ARG_MIN/MAX/INITIAL_RECONNECT_BACKOFF_MS`) is set through `FlightClientOptions::generic_options` on the **peer client channel only** (not the internal listener) so gRPC's default `MIN_CONNECT_TIMEOUT` (20s) cannot outlive this deadline. |
+| `proxy_timeout` / `proxy_timeout_ms` | `5s` | One `steady_clock` deadline per unary peer describe on redirected GetFlightInfo (connect + Authenticate + GetFlightInfo) and per remaining DoGet proxy hop. Each hop uses the remaining time. A redirected GetFlightInfo that hits this deadline (or Arrow `FlightStatusCode::TimedOut` / gRPC `DEADLINE_EXCEEDED`) returns retryable `UNAVAILABLE` with code `owner_moved` and reason `owner_unreachable` (metrics `reason=timeout`). The client does not see `peer proxy timed out` on that path. Proxied DoGet still returns `peer proxy timed out` when the call failed and (`now >= deadline` or Arrow `FlightStatusCode::TimedOut`). Applies even when the owner is SIGSTOP'd or the TCP accept succeeds but HTTP/2 never completes. Connect and Authenticate do not hold a process-wide lock: a frozen peer cannot stall proxy calls to a different, healthy owner. Reconnect backoff (`GRPC_ARG_MIN/MAX/INITIAL_RECONNECT_BACKOFF_MS`) is set through `FlightClientOptions::generic_options` on the **peer client channel only** (not the internal listener) so gRPC's default `MIN_CONNECT_TIMEOUT` (20s) cannot outlive this deadline. |
 | `proxy_first_message_max` / `proxy_first_message_max_ms` | `60s` | Ceiling for the proxied DoGet whole-call deadline. Used as the deadline when the sandbox `query_timeout_ms` is `0`; otherwise the deadline is `min(query_timeout_ms + proxy_timeout_ms, ceiling)`. Must be > 0. Default 60s. |
-| `proxy_max_inflight` | `256` | Global cap on concurrent proxied calls (GetFlightInfo + DoGet). When full, the next call is rejected immediately with `ResourceExhausted` `peer proxy busy` (never queued). Must be > 0. |
-| `proxy_max_inflight_per_peer` | `256` | Per-owner-URL cap on concurrent proxied calls. Same immediate `peer proxy busy` rejection. Must be > 0. |
+| `proxy_max_inflight` | `256` | Global cap on concurrent peer calls (redirected GetFlightInfo describe + remaining DoGet proxy). When full, the next call is rejected immediately (never queued). Redirected GetFlightInfo returns retryable `UNAVAILABLE` with code `owner_moved` and reason `owner_unreachable`. Proxied DoGet still returns `ResourceExhausted` `peer proxy busy`. Must be > 0. |
+| `proxy_max_inflight_per_peer` | `256` | Per-owner-URL cap on concurrent peer calls. Same immediate rejection: redirected GetFlightInfo is `UNAVAILABLE` `owner_moved` / `owner_unreachable`; proxied DoGet is `ResourceExhausted` `peer proxy busy`. Must be > 0. |
 | `shutdown_watchdog` / `shutdown_watchdog_ms` | `8s` | How long SIGTERM graceful shutdown may run before `_Exit(0)`. Default is Drain (2s) + Flight Shutdown (2s) + slack. Must be > 0. |
 | `max_leases` | `0` (unlimited) | Optional cap of sandboxes this node will own. |
 

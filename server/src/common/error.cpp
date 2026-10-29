@@ -8,9 +8,23 @@
 namespace duckbox {
 namespace common {
 
-OwnerMovedError::OwnerMovedError(std::string owner_id, std::string address)
-    : Error("sandbox owner changed; retry the query"), owner_id_(std::move(owner_id)),
-      address_(std::move(address)) {}
+namespace {
+
+const char *OwnerMovedWhat(const std::string &reason) {
+    if (reason == kRetryableOwnerUnreachable) {
+        return "owner unreachable; retry";
+    }
+    if (reason == kRetryableNoOwnerAddress) {
+        return "owner advertised address is missing; retry";
+    }
+    return "sandbox owner changed; retry the query";
+}
+
+} // namespace
+
+OwnerMovedError::OwnerMovedError(std::string owner_id, std::string address, std::string reason)
+    : Error(OwnerMovedWhat(reason)), owner_id_(std::move(owner_id)), address_(std::move(address)),
+      reason_(std::move(reason)) {}
 
 std::string FormatRetryableMessage(const std::string &code, const std::string &message,
                                    const std::string &owner, const std::string &address) {
@@ -33,9 +47,12 @@ std::string FormatRetryableMessage(const std::string &code, const std::string &m
 }
 
 std::string FormatRetryableExtraInfo(const std::string &code, const std::string &owner,
-                                     const std::string &address) {
+                                     const std::string &address, const std::string &reason) {
     Json extra;
     extra["code"] = code;
+    if (!reason.empty()) {
+        extra["reason"] = reason;
+    }
     if (!owner.empty()) {
         extra["owner"] = owner;
     }

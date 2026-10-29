@@ -231,6 +231,7 @@ void duckbox::test::RunAuthFlightTests() {
 	{
 		DaemonConfig cfg = daemon;
 		cfg.listen = "127.0.0.1:0";
+		cfg.advertised_address = "grpc://127.0.0.1:4747";
 		cfg.callers.push_back(CallerRule{"analyst-svc", {"tenant_21:*"}});
 		cfg.operators = {"ops"};
 		auto defs = std::make_shared<MemorySandboxRegistry>();
@@ -529,6 +530,8 @@ void duckbox::test::RunAuthFlightTests() {
 		if (info_res.ok()) {
 			auto info = std::move(info_res).ValueOrDie();
 			Expect(!info->endpoints().empty(), "Execute returns an endpoint");
+			Expect(info->endpoints()[0].locations.empty(),
+			       "single-node GetFlightInfo keeps endpoint locations empty");
 			auto stream_res = raw_client->DoGet(qopt, info->endpoints()[0].ticket);
 			Expect(stream_res.ok(), "DoGet statement ticket");
 			if (stream_res.ok()) {
