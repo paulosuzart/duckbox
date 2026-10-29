@@ -28,10 +28,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <system_error>
@@ -186,6 +188,47 @@ class HangAuthHandler : public ::arrow::flight::ServerAuthHandler {
     std::atomic<bool> stop_{false};
 };
 
+// Owner whose describe (GetFlightInfo) holds until Release(), bounded by
+// kGateMaxMs. Entry is signalled, so tests wait on a condition, not a poll.
+class DescribeGateStub : public FlightServerBase {
+  public:
+    static constexpr int64_t kGateMaxMs = 5000;
+
+    Status GetFlightInfo(const ServerCallContext &, const FlightDescriptor &request,
+                         std::unique_ptr<FlightInfo> *info) override {
+        {
+            std::unique_lock<std::mutex> lock(mu_);
+            entered_++;
+            cv_.notify_all();
+            cv_.wait_for(lock, std::chrono::milliseconds(kGateMaxMs), [this] { return open_; });
+        }
+        auto schema = ::arrow::schema({::arrow::field("id", ::arrow::int32())});
+        std::vector<FlightEndpoint> eps;
+        eps.emplace_back(FlightEndpoint{Ticket{"proxy-hang"}, {}, std::nullopt, ""});
+        ARROW_ASSIGN_OR_RAISE(auto made, FlightInfo::Make(*schema, request, eps, 1, -1));
+        *info = std::make_unique<FlightInfo>(std::move(made));
+        return Status::OK();
+    }
+
+    // Bounded wait for n describes to be held at the gate.
+    bool WaitEntered(int n) {
+        std::unique_lock<std::mutex> lock(mu_);
+        return cv_.wait_for(lock, std::chrono::seconds(3), [&] { return entered_ >= n; });
+    }
+
+    void Release() {
+        std::lock_guard<std::mutex> lock(mu_);
+        open_ = true;
+        cv_.notify_all();
+    }
+
+  private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    int entered_ = 0;
+    bool open_ = false;
+};
+
 struct StubOwner {
     std::unique_ptr<OwnerStub> server;
     std::shared_ptr<::arrow::flight::ServerAuthHandler> auth_handler;
@@ -282,6 +325,121 @@ struct HangFixture {
     }
 };
 
+struct GateOwner {
+    std::unique_ptr<DescribeGateStub> server = std::make_unique<DescribeGateStub>();
+    std::thread th;
+    int port = 0;
+
+    void Start(const DaemonConfig &cfg) {
+        auto loc = Location::ForGrpcTcp("127.0.0.1", 0);
+        FlightServerOptions opt(*loc);
+        opt.auth_handler = std::make_shared<HandshakeAuthHandler>(cfg, ListenerPlane::Internal);
+        duckbox::flight::ApplyInternalListenerKeepalive(opt);
+        Expect(server->Init(opt).ok(), "describe gate stub init");
+        port = server->port();
+        th = std::thread([this] { (void)server->Serve(); });
+    }
+
+    void Stop() {
+        server->Release();
+        auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
+        (void)server->Shutdown(&deadline);
+        if (th.joinable()) {
+            th.join();
+        }
+    }
+
+    std::string Url() const { return "grpc://127.0.0.1:" + std::to_string(port); }
+};
+
+int64_t ElapsedMs(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                 t0)
+        .count();
+}
+
+// Describe calls held at the gate occupy the global peer cap: the next one
+// is rejected at once with "peer proxy busy", not queued. Restores the
+// global-cap test for the GetFlightInfo describe (#100 removed the DoGet one).
+void TestDescribeBusyGlobal() {
+    HangFixture fx;
+    auto peers = std::make_shared<PeerFlight>(fx.daemon_a.peer_secret, 5000, 5000);
+    peers->set_max_inflight(2);
+    peers->set_max_inflight_per_peer(256);
+    GateOwner owner;
+    owner.Start(fx.daemon_b);
+    auto desc = FlightDescriptor::Command("proxy-hang");
+    std::vector<std::thread> workers;
+    std::atomic<int> held_ok{0};
+    for (int i = 0; i < 2; i++) {
+        workers.emplace_back([&] {
+            if (peers->ForwardGetFlightInfo(owner.Url(), desc, fx.rec.id, fx.rec.key).ok()) {
+                held_ok.fetch_add(1);
+            }
+        });
+    }
+    Expect(owner.server->WaitEntered(2), "two describes hold the global cap");
+    Expect(peers->inflight() == 2, "global inflight is 2");
+
+    auto t0 = std::chrono::steady_clock::now();
+    auto busy = peers->ForwardGetFlightInfo(owner.Url(), desc, fx.rec.id, fx.rec.key);
+    auto elapsed_ms = ElapsedMs(t0);
+    std::cout << "describe_busy_global_ms=" << elapsed_ms << "\n";
+    Expect(!busy.ok() && busy.status().IsCapacityError(),
+           "global inflight cap rejects the describe with CapacityError");
+    Expect(!busy.ok() && busy.status().message() == "peer proxy busy", "exact busy message");
+    Expect(elapsed_ms < 100, "global busy is not queued");
+
+    owner.server->Release();
+    for (auto &w : workers) {
+        w.join();
+    }
+    Expect(held_ok.load() == 2, "held describes complete after release");
+    Expect(peers->inflight() == 0, "global inflight returns to 0");
+    owner.Stop();
+}
+
+// One describe held on a peer fills its per-peer cap: the next describe to
+// the same peer is busy at once, while another peer is not blocked.
+void TestDescribeBusyPerPeer() {
+    HangFixture fx;
+    auto peers = std::make_shared<PeerFlight>(fx.daemon_a.peer_secret, 5000, 5000);
+    peers->set_max_inflight(256);
+    peers->set_max_inflight_per_peer(1);
+    GateOwner busy_owner;
+    busy_owner.Start(fx.daemon_b);
+    StubOwner other;
+    other.server = std::make_unique<OwnerStub>(OwnerStub::Mode::Fast);
+    other.Start(fx.daemon_b);
+    auto desc = FlightDescriptor::Command("proxy-hang");
+
+    std::thread worker(
+        [&] { (void)peers->ForwardGetFlightInfo(busy_owner.Url(), desc, fx.rec.id, fx.rec.key); });
+    Expect(busy_owner.server->WaitEntered(1), "one describe holds the per-peer cap");
+
+    auto t0 = std::chrono::steady_clock::now();
+    auto same = peers->ForwardGetFlightInfo(busy_owner.Url(), desc, fx.rec.id, fx.rec.key);
+    auto elapsed_ms = ElapsedMs(t0);
+    std::cout << "describe_busy_per_peer_ms=" << elapsed_ms << "\n";
+    Expect(!same.ok() && same.status().IsCapacityError(),
+           "per-peer inflight cap rejects the describe with CapacityError");
+    Expect(!same.ok() && same.status().message() == "peer proxy busy",
+           "exact per-peer busy message");
+    Expect(elapsed_ms < 100, "per-peer busy is not queued");
+
+    auto t1 = std::chrono::steady_clock::now();
+    auto other_res = peers->ForwardGetFlightInfo(other.Url(), desc, fx.rec.id, fx.rec.key);
+    std::cout << "describe_other_peer_ms=" << ElapsedMs(t1) << "\n";
+    Expect(other_res.ok(), "a different peer is not blocked by the per-peer cap: " +
+                               (other_res.ok() ? std::string() : other_res.status().ToString()));
+
+    busy_owner.server->Release();
+    worker.join();
+    Expect(peers->inflight() == 0, "inflight returns to 0");
+    busy_owner.Stop();
+    other.Stop();
+}
+
 void TestHungPeerDoesNotBlockHealthy() {
     HangFixture fx;
     auto hang_auth = std::make_shared<HangAuthHandler>();
@@ -332,4 +490,6 @@ void TestHungPeerDoesNotBlockHealthy() {
 
 void duckbox::test::RunProxyHangTests() {
     TestHungPeerDoesNotBlockHealthy();
+    TestDescribeBusyGlobal();
+    TestDescribeBusyPerPeer();
 }
