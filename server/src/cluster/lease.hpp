@@ -80,6 +80,11 @@ public:
 	virtual void Renew(const Lease &lease) = 0; // If-Match; throws common::LeaseLostError on lost ownership
 	virtual void Release(const Lease &lease) = 0;
 	virtual Lease Peek(const std::string &resource_id) = 0; // missing => resource set, owned_locally=false, epoch=0
+	// Ownership check that never writes the lease (DoGet, #100). owned_locally
+	// is true only when this node instance holds an unexpired lease. Otherwise
+	// owner_id names the live owner, or is empty when the lease is missing,
+	// free or expired. Never creates, steals or takes over a lease.
+	virtual Lease CheckOwned(const std::string &resource_id) = 0;
 	virtual void SetDraining(bool v) {
 		(void)v;
 	}
@@ -141,6 +146,8 @@ public:
 	void Renew(const Lease &lease) override;
 	void Release(const Lease &lease) override;
 	Lease Peek(const std::string &resource_id) override;
+	// Single process: no other owner exists, so this is Acquire.
+	Lease CheckOwned(const std::string &resource_id) override;
 	void SetDraining(bool v) override;
 	bool draining() const override;
 	void SetHealthy(bool v) override;
@@ -262,6 +269,7 @@ public:
 	void Renew(const Lease &lease) override;
 	void Release(const Lease &lease) override;
 	Lease Peek(const std::string &resource_id) override;
+	Lease CheckOwned(const std::string &resource_id) override;
 	void SetDraining(bool v) override;
 	bool draining() const override;
 	void SetHealthy(bool v) override;

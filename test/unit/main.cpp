@@ -40,5 +40,6 @@ int main() {
     RunTokenSanitizeTests();
     RunRetryableErrorTests();
     RunDeadlineTests();
+    RunLeaseCheckOwnedTests();
     return ReportAndExit("unit");
 }

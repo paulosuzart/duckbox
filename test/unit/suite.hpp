@@ -40,6 +40,7 @@ void RunTempDirectoryTests();
 void RunTokenSanitizeTests();
 void RunRetryableErrorTests();
 void RunDeadlineTests();
+void RunLeaseCheckOwnedTests();
 
 } // namespace test
 } // namespace duckbox

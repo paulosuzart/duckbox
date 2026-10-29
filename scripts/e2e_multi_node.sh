@@ -253,20 +253,114 @@ print("query via non-owner node-b ok", list(df["id"]))
 db.close()
 PY
 
-# Crash the owner (SIGKILL). SIGTERM can wait on the internal Serve thread.
+# Flight SQL CommandStatementQuery without pyarrow.flight.sql (not a
+# package on the CI pyarrow build). Same encoding as test/schema/flight_metadata_pyarrow.py.
+py_flight_sql() {
+	cat <<'PY'
+import pyarrow.flight as flight
+
+def _varint(n):
+    out = bytearray()
+    while True:
+        bits = n & 0x7F
+        n >>= 7
+        out.append(bits | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+def _len_field(field, payload):
+    return _varint((field << 3) | 2) + _varint(len(payload)) + payload
+
+def command_statement_query(sql):
+    body = _len_field(1, sql.encode())
+    return _len_field(1, b"type.googleapis.com/arrow.flight.protocol.sql.CommandStatementQuery") + _len_field(2, body)
+
+def call_opts(timeout=None):
+    kw = dict(headers=[
+        (b"x-duckbox-sandbox", b"cluster-analyst"),
+        (b"x-duckbox-caller", b"local"),
+        (b"x-duckbox-key", b"tenant_21:user_sergio"),
+    ])
+    if timeout is not None:
+        kw["timeout"] = timeout
+    return flight.FlightCallOptions(**kw)
+
+def statement_info(client, sql="SELECT id FROM deals", timeout=None):
+    options = call_opts(timeout)
+    info = client.get_flight_info(
+        flight.FlightDescriptor.for_command(command_statement_query(sql)), options)
+    return info, options
+
+def location_of(info):
+    locs = info.endpoints[0].locations
+    return locs[0].uri.decode() if locs else ""
+
+def follow(info, options):
+    # Honor FlightEndpoint.locations: DoGet at the owner's advertised address.
+    rows = 0
+    for ep in info.endpoints:
+        target = ep.locations[0].uri.decode() if ep.locations else "grpc://127.0.0.1:4747"
+        rows += flight.FlightClient(target).do_get(ep.ticket, options).read_all().num_rows
+    return rows
+
+def node_status(port=5747):
+    import json
+    c = flight.FlightClient(f"grpc://127.0.0.1:{port}")
+    opts = flight.FlightCallOptions(headers=[(b"x-duckbox-caller", b"local")])
+    for rec in c.do_action(flight.Action("NodeStatus", b""), opts):
+        return json.loads(rec.body.to_pybytes())
+    raise SystemExit("NodeStatus returned no result")
+PY
+}
+
+# The client planned a DoGet at the owner (node-a), then the owner crashes
+# (SIGKILL; SIGTERM can wait on the internal Serve thread). That DoGet fails
+# with a retryable UNAVAILABLE, a live non-owner answers the same ticket with
+# owner_moved (no relay, no takeover), and the application retries the query
+# from GetFlightInfo after the lease TTL (#100).
+FAILOVER_TICKET="$("$PY" - <<PY
+$(py_flight_sql)
+import base64
+client = flight.FlightClient("grpc://127.0.0.1:4748")
+info, _ = statement_info(client)
+assert location_of(info) == "grpc://127.0.0.1:4747", location_of(info)
+print(base64.b64encode(info.endpoints[0].ticket.ticket).decode())
+PY
+)"
+export FAILOVER_TICKET
 kill -9 "$PID_A" 2>/dev/null || true
 sleep 0.5
 PID_A=""
+"$PY" - <<PY
+$(py_flight_sql)
+import base64, os, time
+ticket = flight.Ticket(base64.b64decode(os.environ["FAILOVER_TICKET"]))
+try:
+    list(flight.FlightClient("grpc://127.0.0.1:4747").do_get(ticket, call_opts(timeout=10)))
+    raise SystemExit("DoGet at the killed owner succeeded")
+except flight.FlightUnavailableError as e:
+    print("DoGet at the killed owner: UNAVAILABLE", str(e)[:120], flush=True)
+t0 = time.time()
+try:
+    list(flight.FlightClient("grpc://127.0.0.1:4748").do_get(ticket, call_opts(timeout=10)))
+    raise SystemExit("DoGet on non-owner node-b was served")
+except flight.FlightUnavailableError as e:
+    ms = (time.time() - t0) * 1000
+    msg = str(e)
+    print(f"failover_non_owner_doget_ms={ms:.3f}", msg[:200], flush=True)
+    assert "owner_moved:" in msg and "owner=node-a" in msg, msg
+    assert ms < 1000, ms
+PY
 
-# Lease TTL is 5s (+ 1s skew). Wait for expiry so the next Get can take over.
-# Do not retry the query — one attempt after the lease is stealable.
+# Lease TTL is 5s (+ 1s skew). Wait for expiry so the retry's GetFlightInfo
+# can take over. One retry attempt after the lease is stealable.
 sleep 7
 "$PY" - <<'PY'
 from duckbox_client import connect
 db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=1)
 df = db.query("SELECT id FROM deals ORDER BY id")
 assert len(df) >= 1, df
-print("failover query via node-b ok", list(df["id"]))
+print("failover retry via node-b ok", list(df["id"]))
 db.close()
 PY
 
@@ -342,368 +436,283 @@ print("restart same node_id after SIGTERM ok", list(df["id"]))
 db.close()
 PY
 
-# Flight SQL CommandStatementQuery without pyarrow.flight.sql (not a
-# package on the CI pyarrow build). Same encoding as test/schema/flight_metadata_pyarrow.py.
-py_flight_sql() {
-	cat <<'PY'
-import pyarrow.flight as flight
-
-def _varint(n):
-    out = bytearray()
-    while True:
-        bits = n & 0x7F
-        n >>= 7
-        out.append(bits | (0x80 if n else 0))
-        if not n:
-            return bytes(out)
-
-def _len_field(field, payload):
-    return _varint((field << 3) | 2) + _varint(len(payload)) + payload
-
-def command_statement_query(sql):
-    body = _len_field(1, sql.encode())
-    return _len_field(1, b"type.googleapis.com/arrow.flight.protocol.sql.CommandStatementQuery") + _len_field(2, body)
-
-def call_opts(timeout=None):
-    kw = dict(headers=[
-        (b"x-duckbox-sandbox", b"cluster-analyst"),
-        (b"x-duckbox-caller", b"local"),
-        (b"x-duckbox-key", b"tenant_21:user_sergio"),
-    ])
-    if timeout is not None:
-        kw["timeout"] = timeout
-    return flight.FlightCallOptions(**kw)
-
-def statement_info(client, sql="SELECT id FROM deals", timeout=None):
-    options = call_opts(timeout)
-    info = client.get_flight_info(
-        flight.FlightDescriptor.for_command(command_statement_query(sql)), options)
-    return info, options
-
-def node_status(port=5747):
-    import json
-    c = flight.FlightClient(f"grpc://127.0.0.1:{port}")
-    opts = flight.FlightCallOptions(headers=[(b"x-duckbox-caller", b"local")])
-    for rec in c.do_action(flight.Action("NodeStatus", b""), opts):
-        return json.loads(rec.body.to_pybytes())
-    raise SystemExit("NodeStatus returned no result")
-PY
-}
-
-# Healthy-path proxied DoGet latency (owner C is live; client hits proxy A).
-# Do this — and the 150-stream hang — before any freeze longer than lease TTL
-# (5s). A 13s SIGSTOP lets another node steal ownership; later DoGets then
-# succeed locally on A and proxy_inflight stays 0.
+# Redirect and owner_moved (#100). Owner C is live; the client connects to A.
+# The raw pyarrow helper honors FlightEndpoint.locations; a client that
+# ignores them gets an immediate owner_moved from A. No node relays DoGet.
+OWNER_LIST="$("$BIN" sandbox list --url grpc://127.0.0.1:4748 --id-prefix cluster-analyst)"
+echo "$OWNER_LIST"
+echo "$OWNER_LIST" | grep -q '"owner":"node-c"'
 "$PY" - <<PY
 $(py_flight_sql)
-import time
+import json, time
 
 client = flight.FlightClient("grpc://127.0.0.1:4747")
 info, options = statement_info(client)
-list(client.do_get(info.endpoints[0].ticket, options))
+assert location_of(info) == "grpc://127.0.0.1:4749", location_of(info)
+assert follow(info, options) >= 1
 samples = []
 for _ in range(8):
     t0 = time.time()
     info, options = statement_info(client)
-    list(client.do_get(info.endpoints[0].ticket, options))
+    follow(info, options)
     samples.append((time.time() - t0) * 1000)
-print(f"healthy_proxied_doget_mean_ms={sum(samples)/len(samples):.3f}")
-print(f"healthy_proxied_doget_pmax_ms={max(samples):.3f}")
+print(f"redirect_query_mean_ms={sum(samples)/len(samples):.3f}")
+print(f"redirect_query_pmax_ms={max(samples):.3f}")
+
+ticket = info.endpoints[0].ticket
+t0 = time.time()
+try:
+    list(client.do_get(ticket, options))
+    raise SystemExit("DoGet on non-owner node-a was served (relayed)")
+except flight.FlightUnavailableError as e:
+    ms = (time.time() - t0) * 1000
+    msg = str(e)
+    print(f"non_owner_doget_ms={ms:.3f}", msg[:200], flush=True)
+    assert "owner_moved:" in msg and "owner=node-c" in msg, msg
+    assert "address=grpc://127.0.0.1:4749" in msg, msg
+    assert "5749" not in msg, "internal listener leaked: " + msg
+    assert ms < 1000, ms
+    # Gherkin 7: pyarrow exposes the JSON extra_info on FlightError.
+    extra = getattr(e, "extra_info", b"") or b""
+    j = json.loads(extra) if extra else {}
+    print("pyarrow_extra_info_visible=" + ("yes " + json.dumps(j, sort_keys=True) if j else "no"), flush=True)
+    assert j.get("code") == "owner_moved", ("pyarrow extra_info", extra)
+    assert j.get("owner") == "node-c" and j.get("address") == "grpc://127.0.0.1:4749", j
 PY
 
-# SIGTERM the proxy while N DoGets are hung on a frozen owner. One FlightClient
-# per stream (a shared client serializes DoGet). Caps default 256/256 so N=150
-# must be accepted, not "peer proxy busy". Wait on NodeStatus.proxy_inflight.
-OWNER_LIST="$("$BIN" sandbox list --url grpc://127.0.0.1:4748 --id-prefix cluster-analyst)"
-echo "$OWNER_LIST"
-echo "$OWNER_LIST" | grep -q '"owner":"node-c"'
-export OWNER_PID="$PID_C"
-export PROXY_PID="$PID_A"
+# 150 concurrent DoGets for a sandbox owned by C, sent to A: each fails
+# immediately; A adds no threads and holds no peer call (NodeStatus).
+export NON_OWNER_PID="$PID_A"
 "$PY" - <<PY
 $(py_flight_sql)
-import os, signal, threading, time
+import os, threading, time
+from concurrent.futures import ThreadPoolExecutor
 
-signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-owner = int(os.environ["OWNER_PID"])
-proxy = int(os.environ["PROXY_PID"])
+pid = int(os.environ["NON_OWNER_PID"])
 N = 150
+WORKERS = 16
 
-def snap(pid):
-    threads, rss = 0, 0
-    with open(f"/proc/{pid}/status", encoding="utf-8") as f:
+def threads(p):
+    with open(f"/proc/{p}/status", encoding="utf-8") as f:
         for line in f:
             if line.startswith("Threads:"):
-                threads = int(line.split()[1])
-            elif line.startswith("VmRSS:"):
-                rss = int(line.split()[1])
-    return threads, rss
+                return int(line.split()[1])
+    return -1
 
 warm = flight.FlightClient("grpc://127.0.0.1:4747")
 info, options = statement_info(warm)
 ticket = info.endpoints[0].ticket
-# Separate channel per stream so HTTP/2 / client locks cannot serialize them.
-clients = [flight.FlightClient("grpc://127.0.0.1:4747") for _ in range(N)]
+clients = [flight.FlightClient("grpc://127.0.0.1:4747") for _ in range(WORKERS)]
+for c in clients:
+    try:
+        list(c.do_get(ticket, options))
+    except flight.FlightUnavailableError:
+        pass
 lock = threading.Lock()
-state = {"busy": 0, "other": 0, "ok": 0, "other_msgs": []}
-
-def hung_get(i):
-    try:
-        list(clients[i].do_get(ticket, options))
-        with lock:
-            state["ok"] += 1
-    except Exception as e:  # noqa: BLE001
-        msg = str(e)
-        with lock:
-            if "peer proxy busy" in msg:
-                state["busy"] += 1
-            else:
-                state["other"] += 1
-                if len(state["other_msgs"]) < 3:
-                    state["other_msgs"].append(msg[:160])
-
-before = snap(proxy)
-os.kill(owner, signal.SIGSTOP)
-workers = [threading.Thread(target=hung_get, args=(i,), daemon=True) for i in range(N)]
-for th in workers:
-    th.start()
-deadline = time.time() + 8
-inflight = 0
-while time.time() < deadline:
-    try:
-        inflight = int(node_status(5747).get("proxy_inflight", 0))
-    except Exception:  # noqa: BLE001
-        inflight = 0
-    if inflight >= N:
-        break
-    time.sleep(0.05)
-during = snap(proxy)
-print(
-    f"proxy_hung_doget_n={N} in_flight={inflight} rejected_busy={state['busy']} "
-    f"other_done={state['other']} ok_done={state['ok']} "
-    f"threads_before={before[0]} threads_during={during[0]} "
-    f"rss_before_kb={before[1]} rss_during_kb={during[1]}",
-    flush=True,
-)
-if state["other_msgs"]:
-    print("proxy_hung_doget_other", state["other_msgs"])
-if state["busy"] != 0:
-    raise SystemExit(
-        f"{state['busy']} of {N} rejected with peer proxy busy "
-        "(defaults proxy_max_inflight=256 / per_peer=256; N=150 must be under the cap)"
-    )
-if inflight < N:
-    raise SystemExit(
-        f"only {inflight}/{N} proxied DoGets in flight at measurement "
-        f"(busy={state['busy']} other={state['other']} ok={state['ok']})"
-    )
-grown = during[0] - before[0]
-# Incoming public DoGets may use one gRPC handler thread each. A per-stream
-# watcher would add a second set of N on top of that.
-if grown >= 2 * N:
-    raise SystemExit(
-        f"proxy grew {grown} threads under {N} hung DoGets "
-        "(want no per-stream watcher threads)"
-    )
-t0 = time.time()
-os.kill(proxy, signal.SIGTERM)
-exited = False
-while time.time() - t0 < 8:
-    try:
-        os.kill(proxy, 0)
-    except OSError:
-        print(f"sigterm_hung_doget_exit_s={time.time()-t0:.3f}", flush=True)
-        exited = True
-        break
-    time.sleep(0.05)
-try:
-    os.kill(owner, signal.SIGCONT)
-except OSError:
-    pass
-if not exited:
-    raise SystemExit("proxy did not exit after SIGTERM with hung DoGet")
-PY
-kill -CONT "$PID_C" 2>/dev/null || true
-wait "$PID_A" 2>/dev/null || true
-PID_A=""
-
-# Over-cap: same node_id, caps 2/2. Extra DoGets must reject immediately.
-BUSY_YAML="$(mktemp)"
-"$PY" - <<PY
-from pathlib import Path
-src = Path("$ROOT/daemons/cluster-node-a.yaml").read_text()
-if "proxy_max_inflight:" not in src:
-    src = src.rstrip() + "\n  proxy_max_inflight: 2\n  proxy_max_inflight_per_peer: 2\n"
-Path("$BUSY_YAML").write_text(src)
-PY
-kill -TERM "$PID_A" 2>/dev/null || true
-wait "$PID_A" 2>/dev/null || true
-PID_A=""
-"$BIN" serve --daemon "$BUSY_YAML" --no-metrics &
-PID_A=$!
-wait_port 4747
-wait_port 5747
-export OWNER_PID="$PID_C"
-export PROXY_PID="$PID_A"
-"$PY" - <<PY
-$(py_flight_sql)
-import os, signal, threading, time
-
-signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-owner = int(os.environ["OWNER_PID"])
-N = 8
-CAP = 2
-warm = flight.FlightClient("grpc://127.0.0.1:4747")
-info, options = statement_info(warm)
-ticket = info.endpoints[0].ticket
-clients = [flight.FlightClient("grpc://127.0.0.1:4747") for _ in range(N)]
-lock = threading.Lock()
-state = {"busy": 0, "other": 0, "ok": 0, "busy_ms": []}
+state = {"moved": 0, "other": [], "max_ms": 0.0}
 
 def one(i):
     t0 = time.time()
     try:
-        list(clients[i].do_get(ticket, options))
-        with lock:
-            state["ok"] += 1
+        list(clients[i % WORKERS].do_get(ticket, options))
+        msg = "served"
     except Exception as e:  # noqa: BLE001
-        ms = (time.time() - t0) * 1000
         msg = str(e)
-        with lock:
-            if "peer proxy busy" in msg:
-                state["busy"] += 1
-                state["busy_ms"].append(ms)
-            else:
-                state["other"] += 1
+    ms = (time.time() - t0) * 1000
+    with lock:
+        state["max_ms"] = max(state["max_ms"], ms)
+        if "owner_moved:" in msg:
+            state["moved"] += 1
+        else:
+            state["other"].append(msg[:160])
 
-os.kill(owner, signal.SIGSTOP)
-workers = [threading.Thread(target=one, args=(i,), daemon=True) for i in range(N)]
-for th in workers:
-    th.start()
-deadline = time.time() + 5
-inflight = 0
-while time.time() < deadline:
-    try:
-        inflight = int(node_status(5747).get("proxy_inflight", 0))
-    except Exception:  # noqa: BLE001
-        inflight = 0
-    if inflight >= CAP and state["busy"] >= N - CAP:
-        break
-    time.sleep(0.05)
+before = threads(pid)
+t0 = time.time()
+with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+    futs = [pool.submit(one, i) for i in range(N)]
+    during = threads(pid)
+    for f in futs:
+        f.result()
+total_ms = (time.time() - t0) * 1000
+after = threads(pid)
+inflight = int(node_status(5747).get("proxy_inflight", 0))
 print(
-    f"proxy_busy_e2e_n={N} cap={CAP} in_flight={inflight} rejected_busy={state['busy']} "
-    f"other_done={state['other']} ok_done={state['ok']}",
+    f"non_owner_doget_n={N} workers={WORKERS} owner_moved={state['moved']} "
+    f"threads_before={before} threads_during={during} threads_after={after} "
+    f"total_ms={total_ms:.1f} max_call_ms={state['max_ms']:.1f} peer_inflight={inflight}",
     flush=True,
 )
-if state["busy_ms"]:
-    print(f"proxy_busy_e2e_reject_pmax_ms={max(state['busy_ms']):.3f}")
-if inflight != CAP:
-    raise SystemExit(f"expected {CAP} in flight under the cap, got {inflight}")
-if state["busy"] < N - CAP:
-    raise SystemExit(
-        f"expected at least {N - CAP} immediate peer proxy busy, got {state['busy']}"
-    )
-if state["busy_ms"] and max(state["busy_ms"]) >= 200:
-    raise SystemExit(
-        f"busy rejection was queued ({max(state['busy_ms']):.1f}ms; want < 200ms)"
-    )
-try:
-    os.kill(owner, signal.SIGCONT)
-except OSError:
-    pass
-# Skip pyarrow/gRPC atexit: tearing down live DoGet clients against a
-# just-continued owner has SIGSEGV'd the interpreter (CI exit 139).
-os._exit(0)
+if state["other"]:
+    print("non_owner_doget_other", state["other"][:5])
+assert state["moved"] == N, state
+assert state["max_ms"] < 2000, state["max_ms"]
+assert inflight == 0, inflight
+assert after <= before + WORKERS, (before, after)
 PY
-# Always continue C in the shell so later steps (S3 pause) are not talking
-# to a still-frozen owner. The freeze case below uses a 60s client timeout
-# and asserts the proxy itself returned within the documented bound.
-kill -CONT "$PID_C" 2>/dev/null || true
-kill -TERM "$PID_A" 2>/dev/null || true
-wait "$PID_A" 2>/dev/null || true
-PID_A=""
-rm -f "$BUSY_YAML"
-"$BIN" serve --daemon "$ROOT/daemons/cluster-node-a.yaml" --no-metrics &
-PID_A=$!
-wait_port 4747
-wait_port 5747
 
-# Owner freeze longer than lease TTL (5s). The client timeout is 60s — well
-# above the documented proxy bounds — so a pass cannot be the client giving
-# up first. GetFlightInfo must return within proxy_timeout_ms (5s);
-# DoGet within query_timeout_ms + proxy_timeout_ms (8+5=13s). Timeout or
-# post-takeover success are both fine; an unbounded proxy wait is not.
-export OWNER_PID="$PID_C"
+# ADBC surfaces owner_moved to Python. Restart node-c with advertised_address
+# pointing at node-a (a stale location); C takes the free lease on
+# GetFlightInfo and the driver's DoGet lands on A, which does not own it.
+kill -TERM "$PID_C" 2>/dev/null || true
+wait "$PID_C" 2>/dev/null || true
+PID_C=""
+STALE_YAML="$(mktemp)"
+"$PY" - <<PY
+from pathlib import Path
+src = Path("$ROOT/daemons/cluster-node-c.yaml").read_text()
+src = src.replace("advertised_address: grpc://127.0.0.1:4749", "advertised_address: grpc://127.0.0.1:4747")
+assert "advertised_address: grpc://127.0.0.1:4747" in src
+Path("$STALE_YAML").write_text(src)
+PY
+"$BIN" serve --daemon "$STALE_YAML" --no-metrics &
+PID_C=$!
+wait_port 4749
+wait_port 5749
+"$PY" - <<'PY'
+from duckbox_client import connect
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4749", retries=1)
+try:
+    db.query("SELECT id FROM deals ORDER BY id")
+    raise SystemExit("ADBC DoGet at a non-owner was served")
+except SystemExit:
+    raise
+except Exception as e:  # noqa: BLE001
+    msg = str(e)
+    print("adbc_owner_moved_exception", type(e).__name__, msg[:240], flush=True)
+    assert "owner_moved" in msg and "node-c" in msg, msg
+    # Gherkin 7: is the JSON extra_info among the ADBC error details? Only a
+    # detail value that parses as JSON with code=owner_moved counts; the
+    # status message header also contains the text "owner_moved".
+    import json
+    def text(x):
+        return x.decode("utf-8", "replace") if isinstance(x, (bytes, bytearray)) else str(x)
+    details = getattr(e, "details", None) or []
+    keys = [text(k) for k, _ in details]
+    found = None
+    for k, v in details:
+        try:
+            j = json.loads(v if isinstance(v, (bytes, bytearray)) else str(v))
+        except ValueError:
+            continue
+        if isinstance(j, dict) and j.get("code") == "owner_moved":
+            found = (text(k), j)
+            break
+    print("adbc_error_detail_keys=" + ",".join(keys), flush=True)
+    print("adbc_extra_info_visible=" + ("yes " + found[0] + " " + json.dumps(found[1], sort_keys=True) if found else "no"), flush=True)
+    # Recorded result (ADBC Flight SQL driver 1.13): the details carry
+    # x-arrow-status, x-arrow-status-detail-bin ("Unavailable") and the
+    # message, not the extra_info JSON. ADBC clients read owner= and address=
+    # from the message (docs/multi-node.md). Fails if a driver starts
+    # exposing it, so the docs get updated.
+    assert found is None, ("ADBC now exposes extra_info; update docs/multi-node.md", found)
+    assert "owner=node-c" in msg and "address=grpc://127.0.0.1:4747" in msg, msg
+finally:
+    db.close()
+PY
+kill -TERM "$PID_C" 2>/dev/null || true
+wait "$PID_C" 2>/dev/null || true
+"$BIN" serve --daemon "$ROOT/daemons/cluster-node-c.yaml" --no-metrics &
+PID_C=$!
+wait_port 4749
+wait_port 5749
+
+# node-b is still draining from the drain step above and would answer
+# no_owner; restart it so it can own the sandbox again.
+kill -TERM "$PID_B" 2>/dev/null || true
+wait "$PID_B" 2>/dev/null || true
+"$BIN" serve --daemon "$ROOT/daemons/cluster-node-b.yaml" --no-metrics &
+PID_B=$!
+wait_port 4748
+wait_port 5748
+
+# ADBC connected only to node-a runs a prepared statement with a bound
+# parameter on a sandbox owned by node-b: rows are filtered by the bound value.
+"$PY" - <<'PY'
+from duckbox_client import connect
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4748", retries=1)
+assert len(db.query("SELECT id FROM deals ORDER BY id")) >= 1
+db.close()
+PY
+OWNER_B="$("$BIN" sandbox list --url grpc://127.0.0.1:4747 --id-prefix cluster-analyst)"
+echo "$OWNER_B"
+echo "$OWNER_B" | grep -q '"owner":"node-b"'
+"$PY" - <<'PY'
+from duckbox_client import connect
+db = connect(sandbox="cluster-analyst", key="tenant_21:user_sergio", url="grpc://127.0.0.1:4747", retries=1)
+all_ids = list(db.query("SELECT id FROM deals ORDER BY id")["id"])
+want = all_ids[0]
+df = db.query("SELECT id FROM deals WHERE id = ?", [want])
+print("adbc_prepared_bound_rows", list(df["id"]), "of", all_ids, flush=True)
+assert list(df["id"]) == [want], (list(df["id"]), want)
+# The driver's choice of DoPut-returned vs original handle is not visible to
+# the client. Both are correct: the owner executes the params sealed in the
+# signed ticket that node-a re-signs on GetFlightInfo (#95 C3).
+print("adbc_prepared_handle=not observable from the client; params sealed in the signed ticket", flush=True)
+db.close()
+PY
+
+# Owner freeze longer than lease TTL (5s). The client timeout is 60s, well
+# above the documented bounds, so a pass cannot be the client giving up
+# first. GetFlightInfo on a non-owner returns within proxy_timeout_ms (5s).
+# A DoGet on the non-owner never waits on the owner: it fails immediately
+# with UNAVAILABLE (owner_moved or no_owner).
+export OWNER_PID="$PID_B"
 "$PY" - <<PY
 $(py_flight_sql)
 import os, signal, time
 
 owner = int(os.environ["OWNER_PID"])
-# Documented bounds (cluster YAML defaults): proxy_timeout_ms=5000,
-# query_timeout_ms=8000, first-message ceiling=60s.
 CLIENT_TIMEOUT_S = 60.0
 GETINFO_BOUND_S = 5.0
-DOGET_BOUND_S = 13.0
+DOGET_BOUND_S = 1.0
 ASSERT_SLACK_S = 2.0  # assertion tolerance only; not a client timeout
 client = flight.FlightClient("grpc://127.0.0.1:4747")
 
 
 def is_client_timeout(exc):
-    # Only the Flight client deadline. "peer proxy timed out" is an IO error
-    # the proxy returned within its own bound.
     timed = getattr(flight, "FlightTimedOutError", ())
     return isinstance(exc, timed) or type(exc).__name__ == "FlightTimedOutError"
 
 
-def assert_proxy_bound(elapsed, bound, label, client_timeout):
+def assert_bound(elapsed, bound, label, client_timeout):
     if client_timeout:
-        raise SystemExit(
-            f"{label}: client timeout fired after {elapsed:.3f}s; "
-            f"proxy did not return within {bound}s"
-        )
+        raise SystemExit(f"{label}: client timeout fired after {elapsed:.3f}s; want <= {bound}s")
     if elapsed > bound + ASSERT_SLACK_S:
-        raise SystemExit(
-            f"{label}: proxy returned in {elapsed:.3f}s; "
-            f"want <= {bound}+{ASSERT_SLACK_S}s"
-        )
+        raise SystemExit(f"{label}: returned in {elapsed:.3f}s; want <= {bound}+{ASSERT_SLACK_S}s")
 
 
-t0 = time.time()
-try:
-    info, options = statement_info(client, timeout=CLIENT_TIMEOUT_S)
-    print("GetFlightInfo before freeze ok elapsed", round(time.time() - t0, 3), flush=True)
-except Exception as e:  # noqa: BLE001
-    elapsed = time.time() - t0
-    print("GetFlightInfo before freeze failed", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 3), flush=True)
-    assert_proxy_bound(elapsed, GETINFO_BOUND_S, "GetFlightInfo before freeze", is_client_timeout(e))
-    raise
-
+info, options = statement_info(client, timeout=CLIENT_TIMEOUT_S)
+assert location_of(info) == "grpc://127.0.0.1:4748", location_of(info)
 ticket = info.endpoints[0].ticket
 os.kill(owner, signal.SIGSTOP)
 
 t1 = time.time()
 try:
-    info2, _ = statement_info(client, timeout=CLIENT_TIMEOUT_S)
+    statement_info(client, timeout=CLIENT_TIMEOUT_S)
     elapsed = time.time() - t1
     print("GetFlightInfo during freeze ok (takeover) elapsed", round(elapsed, 3), flush=True)
-    assert_proxy_bound(elapsed, GETINFO_BOUND_S, "GetFlightInfo during freeze", False)
+    assert_bound(elapsed, GETINFO_BOUND_S, "GetFlightInfo during freeze", False)
+except flight.FlightUnavailableError as e:
+    elapsed = time.time() - t1
+    print("GetFlightInfo during freeze UNAVAILABLE", str(e)[:200], "elapsed", round(elapsed, 3), flush=True)
+    assert_bound(elapsed, GETINFO_BOUND_S, "GetFlightInfo during freeze", False)
 except Exception as e:  # noqa: BLE001
     elapsed = time.time() - t1
-    print("GetFlightInfo during freeze failed", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 3), flush=True)
-    assert_proxy_bound(elapsed, GETINFO_BOUND_S, "GetFlightInfo during freeze", is_client_timeout(e))
+    assert_bound(elapsed, GETINFO_BOUND_S, "GetFlightInfo during freeze", is_client_timeout(e))
+    raise
 
 t2 = time.time()
 try:
-    doget_opts = call_opts(timeout=CLIENT_TIMEOUT_S)
-    list(client.do_get(ticket, doget_opts))
+    list(client.do_get(ticket, call_opts(timeout=CLIENT_TIMEOUT_S)))
+    raise SystemExit("DoGet on non-owner node-a was served during the owner freeze")
+except flight.FlightUnavailableError as e:
     elapsed = time.time() - t2
-    print("DoGet during freeze ok elapsed", round(elapsed, 3), flush=True)
-    assert_proxy_bound(elapsed, DOGET_BOUND_S, "DoGet during freeze", False)
-except Exception as e:  # noqa: BLE001
-    elapsed = time.time() - t2
-    print("DoGet during freeze failed", type(e).__name__, str(e)[:200], "elapsed", round(elapsed, 3), flush=True)
-    assert_proxy_bound(elapsed, DOGET_BOUND_S, "DoGet during freeze", is_client_timeout(e))
+    msg = str(e)
+    print("DoGet on non-owner during freeze", msg[:200], "elapsed", round(elapsed, 3), flush=True)
+    assert "owner_moved:" in msg or "no_owner:" in msg, msg
+    assert_bound(elapsed, DOGET_BOUND_S, "DoGet during freeze", False)
 PY
-kill -CONT "$PID_C" 2>/dev/null || true
+kill -CONT "$PID_B" 2>/dev/null || true
 
 # S3 outage longer than TTL (5s): nodes self-fence (exit 3), then restart recovers.
 docker compose pause rustfs

@@ -159,6 +159,8 @@ private:
 	std::string CallerOf(const ::arrow::flight::ServerCallContext &context) const;
 	void RequirePeerQuery(const std::string &caller) const;
 	std::shared_ptr<sandbox::TenantSandbox> Box(const CallCtx &c) const;
+	// Ownership check without acquiring (every DoGet, #100); counts the retryable error.
+	std::shared_ptr<sandbox::TenantSandbox> OwnedBox(const sandbox::SandboxRecord &rec) const;
 	StatementHandle MakeHandle(const CallCtx &c, const std::string &rewritten, int user_params) const;
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightInfo>> Info(
 	    const ::arrow::flight::FlightDescriptor &descriptor, const std::string &token,
@@ -174,9 +176,6 @@ private:
 	    const common::RedirectError &re, const ::arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
 	    const std::string &key, const std::string &token, const std::shared_ptr<::arrow::Schema> &schema,
 	    const char *op = "get_flight_info");
-	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> MaybeProxyDoGet(
-	    const common::RedirectError &re, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
-	    const std::string &key, const ::arrow::flight::ServerCallContext &context, int64_t query_timeout_ms);
 
 	node::DaemonConfig daemon_;
 	std::shared_ptr<sandbox::SandboxRegistry> defs_;
@@ -295,9 +294,6 @@ public:
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightInfo>> ForwardGetFlightInfo(
 	    const std::string &url, const ::arrow::flight::FlightDescriptor &descriptor, const std::string &sandbox_id,
 	    const std::string &key);
-	::arrow::Result<std::unique_ptr<::arrow::flight::FlightDataStream>> ForwardDoGet(
-	    const std::string &url, const ::arrow::flight::Ticket &ticket, const std::string &sandbox_id,
-	    const std::string &key, const ::arrow::flight::ServerCallContext &context, int64_t query_timeout_ms = 0);
 
 	class InflightGuard {
 	public:

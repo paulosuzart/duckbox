@@ -65,6 +65,9 @@ public:
 	virtual void IncRedirect(const char *op) = 0;
 	virtual void IncRedirectError(const char *op, const char *reason) = 0;
 	virtual void ObserveRedirect(const char *op, double seconds) = 0;
+	// Retryable UNAVAILABLE answered to the client (#100). op: do_get.
+	// reason: owner_moved|no_owner.
+	virtual void IncRetryableError(const char *op, const char *reason) = 0;
 	virtual std::string Render() const = 0; // Prometheus text; no tenant/user/key/sandbox-id labels
 };
 
@@ -104,6 +107,7 @@ public:
 	void IncRedirect(const char *op) override;
 	void IncRedirectError(const char *op, const char *reason) override;
 	void ObserveRedirect(const char *op, double seconds) override;
+	void IncRetryableError(const char *op, const char *reason) override;
 	std::string Render() const override;
 
 	std::string Node() const {
@@ -195,6 +199,8 @@ public:
 	void IncRedirectError(const char *, const char *) override {
 	}
 	void ObserveRedirect(const char *, double) override {
+	}
+	void IncRetryableError(const char *, const char *) override {
 	}
 	std::string Render() const override {
 		return "";

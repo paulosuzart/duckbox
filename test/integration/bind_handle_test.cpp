@@ -418,6 +418,8 @@ void duckbox::test::RunBindHandleTests() {
     nodes_b->Heartbeat();
     peers_a->SetNodeDirectory(nodes_a);
     peers_b->SetNodeDirectory(nodes_b);
+    rt_a->SetNodeDirectory(nodes_a);
+    rt_b->SetNodeDirectory(nodes_b);
     auto owned = rt_b->Get(rec);
     Expect(owned && leases_b->Peek("bind-handle-box").owned_locally, "node-b owns the sandbox");
 
@@ -505,10 +507,14 @@ void duckbox::test::RunBindHandleTests() {
     }
 
     {
-        // Non-owner cache hit: the redirect carries the cache-sourced params to the owner.
+        // Non-owner DoGet never relays (#100): the cache hit on A is not
+        // served; the client gets owner_moved naming B's public address.
         std::string err_a;
         auto rows_a = DoGetRowCount(*client_a, opt, Ticket{desc_orig.cmd}, &err_a);
-        Expect(rows_a == 1, "DoGetPreparedStatement on A uses bind_cache fallback: " + err_a);
+        Expect(rows_a < 0 && err_a.find("owner_moved:") != std::string::npos &&
+                   err_a.find("grpc://127.0.0.1:" + std::to_string(nb.pub_port)) !=
+                       std::string::npos,
+               "DoGetPreparedStatement on non-owner A is owner_moved to B: " + err_a);
         // The cache path is still verified + authorized: another caller or another
         // tenant key with the same original handle gets nothing.
         auto other_c = opt;
@@ -595,8 +601,8 @@ void duckbox::test::RunBindHandleTests() {
         auto rows = DoGetRowCount(*client_b, opt, Ticket{PreparedDescriptor(put1).cmd}, &err);
         Expect(rows == 1, "DoGetPreparedStatement prefers handle params over bind_cache_: rows=" +
                               std::to_string(rows) + " " + err);
-        auto rows3 = DoGetRowCount(*client_a, opt, Ticket{PreparedDescriptor(put3).cmd}, &err);
-        Expect(rows3 == 0, "re-bound handle via non-owner uses the new value: rows=" +
+        auto rows3 = DoGetRowCount(*client_b, opt, Ticket{PreparedDescriptor(put3).cmd}, &err);
+        Expect(rows3 == 0, "re-bound handle on the owner uses the new value: rows=" +
                                std::to_string(rows3) + " " + err);
     }
 

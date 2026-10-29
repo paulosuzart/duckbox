@@ -151,6 +151,9 @@ const char *Help(const std::string &name) {
     if (name == "duckbox_redirect_errors_total") {
         return "Unary owner describe failures (timeout, unreachable, missing address).";
     }
+    if (name == "duckbox_retryable_errors_total") {
+        return "Retryable UNAVAILABLE answers (owner moved or no owner); the client retries.";
+    }
     if (name == "duckbox_redirect_describe_seconds") {
         return "Unary peer GetFlightInfo used to compute the owner schema.";
     }
@@ -502,6 +505,14 @@ void MetricsRegistry::IncRedirectError(const char *op, const char *reason) {
                    "\",reason=\"" + EscapeLabel(reason ? reason : "failed") + "\"");
     std::lock_guard<std::mutex> hold(mu_);
     IncLocked("duckbox_redirect_errors_total", labels);
+}
+
+void MetricsRegistry::IncRetryableError(const char *op, const char *reason) {
+    std::string labels =
+        NodeLabels(std::string("op=\"") + EscapeLabel(op ? op : "do_get") + "\",reason=\"" +
+                   EscapeLabel(reason ? reason : "owner_moved") + "\"");
+    std::lock_guard<std::mutex> hold(mu_);
+    IncLocked("duckbox_retryable_errors_total", labels);
 }
 
 void MetricsRegistry::ObserveRedirect(const char *op, double seconds) {

@@ -162,6 +162,7 @@ public:
 	}
 	void Release(const duckbox::cluster::Lease &lease) override { inner_->Release(lease); }
 	duckbox::cluster::Lease Peek(const std::string &id) override { return inner_->Peek(id); }
+	duckbox::cluster::Lease CheckOwned(const std::string &id) override { return inner_->CheckOwned(id); }
 	std::vector<std::string> OwnedIds() const override { return inner_->OwnedIds(); }
 	duckbox::cluster::Lease Held(const std::string &id) override { return inner_->Held(id); }
 	void GcTombstones() override { inner_->GcTombstones(); }
@@ -781,10 +782,13 @@ void duckbox::test::RunClusterTests() {
 				}
 			}
 			auto stream_res = bcli->DoGet(qopt, info->endpoints()[0].ticket);
-			Expect(stream_res.ok(), "DoGet via non-owner proxies to the owner");
-			if (stream_res.ok()) {
-				auto tbl = stream_res.ValueOrDie()->ToTable();
-				Expect(tbl.ok() && (*tbl)->num_rows() == 1, "client on a non-owner node gets query rows");
+			Expect(!stream_res.ok(), "DoGet via non-owner is not relayed to the owner (#100)");
+			if (!stream_res.ok()) {
+				auto extra = ExtraOf(stream_res.status());
+				Expect(extra.value("code", "") == "owner_moved" && extra.value("owner", "") == "node-a" &&
+				           extra.value("address", "") == kAdvA,
+				       "non-owner DoGet names node-a and its advertised_address: " +
+				           stream_res.status().ToString());
 			}
 		}
 

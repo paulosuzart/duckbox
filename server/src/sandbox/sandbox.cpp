@@ -922,6 +922,28 @@ std::shared_ptr<TenantSandbox> SandboxRuntime::Get(const SandboxRecord &rec) {
         Metrics().IncRoute("redirect");
         throw RedirectError(lease.owner_id, lease.flight);
     }
+    return ServeOwned(rec, key);
+}
+
+std::shared_ptr<TenantSandbox> SandboxRuntime::GetOwned(const SandboxRecord &rec) {
+    AssertServing();
+    auto key = ParseTenantKey(rec.key, rec.spec.key);
+    auto lease = leases_->CheckOwned(rec.id);
+    if (!lease.owned_locally) {
+        if (lease.owner_id.empty()) {
+            throw UnavailableError("sandbox has no owner; retry");
+        }
+        // Public advertised_address from the node directory, never
+        // lease.flight (the owner's internal listener).
+        std::string address = nodes_ ? nodes_->AdvertisedAddressOf(lease.owner_id) : std::string();
+        const char *reason = address.empty() ? kRetryableNoOwnerAddress : "";
+        throw OwnerMovedError(lease.owner_id, std::move(address), reason);
+    }
+    return ServeOwned(rec, key);
+}
+
+std::shared_ptr<TenantSandbox> SandboxRuntime::ServeOwned(const SandboxRecord &rec,
+                                                          const rewriter::TenantKey &key) {
     if (router_) {
         router_->Decide(key);
     } else {

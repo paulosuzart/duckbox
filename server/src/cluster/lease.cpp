@@ -156,6 +156,10 @@ Lease SingleNodeLeaseManager::Peek(const std::string &resource_id) {
 	return lease;
 }
 
+Lease SingleNodeLeaseManager::CheckOwned(const std::string &resource_id) {
+	return Acquire(resource_id);
+}
+
 LocalRouter::LocalRouter(std::shared_ptr<IMetrics> metrics) : LeaseTelemetry(std::move(metrics)) {
 }
 
@@ -511,6 +515,33 @@ void S3ConditionalLeaseManager::Release(const Lease &lease) {
 Lease S3ConditionalLeaseManager::Peek(const std::string &resource_id) {
 	ValidateResourceId(resource_id);
 	return Load(resource_id);
+}
+
+Lease S3ConditionalLeaseManager::CheckOwned(const std::string &resource_id) {
+	ValidateResourceId(resource_id);
+	// Same freshness rules as Acquire (cache, skew, instance_id), but no PUT.
+	auto cached = CachedAcquire(resource_id);
+	if (!cached.resource.empty() && !cached.etag.empty() && cached.owned_locally &&
+	    cached.expiry_ms > clock_->NowMs()) {
+		return cached;
+	}
+	auto current = Load(resource_id);
+	const int64_t now = clock_->NowMs();
+	const bool missing = current.etag.empty();
+	const bool expired =
+	    !missing && (current.owner_id.empty() || current.expiry_ms + opt_.skew_ms <= now);
+	if (missing || expired) {
+		current.owner_id.clear();
+		current.owned_locally = false;
+		return current;
+	}
+	current.owned_locally = current.owner_id == opt_.owner_id &&
+	                        (current.instance_id.empty() || current.instance_id == instance_id_);
+	if (current.owned_locally) {
+		current.instance_id = instance_id_;
+	}
+	Remember(current);
+	return current;
 }
 
 void S3ConditionalLeaseManager::SetDraining(bool v) {
