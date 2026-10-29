@@ -355,6 +355,38 @@ void duckbox::test::RunDoGetOwnerTests() {
         Expect(!proxied, "no proxied DoGet is recorded");
     }
 
+    // 1b. Metadata DoGet (GetTables include_schema) on a non-owner: the same
+    // owner_moved with the PUBLIC address, no lease write, never lease.flight.
+    auto tables_info = sql_a.GetTables(opt1, nullptr, nullptr, nullptr, true, nullptr);
+    Expect(tables_info.ok() && !(*tables_info)->endpoints().empty(),
+           "GetTables(include_schema) GetFlightInfo on A: " +
+               (tables_info.ok() ? std::string() : tables_info.status().ToString()));
+    Ticket tables_ticket;
+    if (tables_info.ok() && !(*tables_info)->endpoints().empty()) {
+        tables_ticket = (*tables_info)->endpoints()[0].ticket;
+        auto before = leases_a->Peek(rec1.id);
+        auto t0 = std::chrono::steady_clock::now();
+        auto rows = DoGetRows(*cli_a, opt1, tables_ticket);
+        auto ms = MsSince(t0);
+        auto after = leases_a->Peek(rec1.id);
+        auto st = rows.ok() ? ::arrow::Status::OK() : rows.status();
+        auto extra = ExtraOf(st);
+        auto msg = st.ToString();
+        std::cout << "doget_tables_owner_moved_ms=" << ms << " msg=" << msg << "\n";
+        Expect(!rows.ok() && IsUnavailable(st),
+               "GetTables DoGet on non-owner is UNAVAILABLE: " + msg);
+        Expect(extra.value("code", "") == "owner_moved" && extra.value("owner", "") == "node-b" &&
+                   extra.value("address", "") == adv_b,
+               "GetTables DoGet names node-b's public advertised_address: " + msg);
+        Expect(!absl::StrContains(msg, absl::StrCat(":", nb.int_port)) &&
+                   !absl::StrContains(msg, "duckbox redirect"),
+               "GetTables DoGet never carries node-b's internal listener: " + msg);
+        Expect(ms < 1000, "GetTables DoGet on non-owner fails immediately");
+        Expect(before.etag == after.etag && before.epoch == after.epoch &&
+                   after.owner_id == "node-b" && !leases_a->Held(rec1.id).owned_locally,
+               "GetTables DoGet on non-owner does not acquire or touch the lease");
+    }
+
     // 2. The client follows endpoint.locations[0] to the owner; rows stream from B.
     {
         const auto &locs = (*info1)->endpoints()[0].locations;
@@ -376,10 +408,33 @@ void duckbox::test::RunDoGetOwnerTests() {
         auto auth =
             cli_int->Authenticate({}, std::make_unique<PeerSecretAuth>(daemon_b.peer_secret));
         Expect(auth.ok(), "peer handshake on the internal listener: " + auth.ToString());
-        auto rows = DoGetRows(*cli_int, opt1, ticket1);
-        Expect(!rows.ok() && rows.status().IsNotImplemented(),
-               "internal-listener DoGet is Unimplemented: " +
-                   (rows.ok() ? std::string("ok") : rows.status().ToString()));
+        auto rejected = [&](const Ticket &t, const std::string &what) {
+            auto rows = DoGetRows(*cli_int, opt1, t);
+            Expect(!rows.ok() && rows.status().IsNotImplemented(),
+                   "internal-listener " + what + " DoGet is Unimplemented: " +
+                       (rows.ok() ? std::string("ok") : rows.status().ToString()));
+        };
+        rejected(ticket1, "statement");
+        auto prep = sql_a.Prepare(opt1, "SELECT id FROM deals ORDER BY id");
+        Expect(prep.ok(),
+               "prepare on A: " + (prep.ok() ? std::string() : prep.status().ToString()));
+        if (prep.ok()) {
+            auto pinfo = (*prep)->Execute(opt1);
+            Expect(pinfo.ok() && !(*pinfo)->endpoints().empty(),
+                   "prepared GetFlightInfo on A: " +
+                       (pinfo.ok() ? std::string() : pinfo.status().ToString()));
+            if (pinfo.ok() && !(*pinfo)->endpoints().empty()) {
+                rejected((*pinfo)->endpoints()[0].ticket, "prepared");
+            }
+        }
+        if (!tables_ticket.ticket.empty()) {
+            rejected(tables_ticket, "GetTables");
+        }
+        auto cats = sql_a.GetCatalogs(opt1);
+        Expect(cats.ok() && !(*cats)->endpoints().empty(), "GetCatalogs GetFlightInfo on A");
+        if (cats.ok() && !(*cats)->endpoints().empty()) {
+            rejected((*cats)->endpoints()[0].ticket, "GetCatalogs");
+        }
     }
 
     // 4. 150 concurrent non-owner DoGets: each fails immediately; A adds no
@@ -447,6 +502,30 @@ void duckbox::test::RunDoGetOwnerTests() {
                "duckbox_retryable_errors_total{op=do_get,reason=no_owner} increments");
     }
 
+    // 5b. Live owner with no advertised_address in the node directory:
+    // owner_moved naming the owner, reason no_owner_address, no address.
+    {
+        S3LeaseOptions oc = oa;
+        oc.owner_id = "node-c";
+        auto leases_c = std::make_shared<S3ConditionalLeaseManager>(
+            s3, oc, std::shared_ptr<duckbox::metrics::IMetrics>{}, clock);
+        leases_c->set_flight("grpc://127.0.0.1:1");
+        auto held = leases_c->Acquire(rec1.id);
+        Expect(held.owned_locally, "node-c takes the free lease");
+        auto rows = DoGetRows(*cli_a, opt1, ticket1);
+        auto st = rows.ok() ? ::arrow::Status::OK() : rows.status();
+        auto extra = ExtraOf(st);
+        Expect(!rows.ok() && IsUnavailable(st) && extra.value("code", "") == "owner_moved" &&
+                   extra.value("owner", "") == "node-c" &&
+                   extra.value("reason", "") == "no_owner_address" && !extra.contains("address"),
+               "owner without advertised_address is owner_moved reason=no_owner_address: " +
+                   st.ToString());
+        Expect(!absl::StrContains(st.ToString(), "127.0.0.1:1"),
+               "the owner's lease.flight is never published: " + st.ToString());
+        Expect(leases_a->Peek(rec1.id).etag == held.etag, "the lease is unchanged");
+        leases_c->Release(held);
+    }
+
     // 6. Owner killed after GetFlightInfo returned its location: DoGet fails,
     // and after the TTL the application's retry from GetFlightInfo succeeds
     // on a live node that takes the lease.
@@ -471,6 +550,17 @@ void duckbox::test::RunDoGetOwnerTests() {
                        (on_a.ok() ? std::string("ok") : on_a.status().ToString()));
             Expect(before.etag == after.etag && after.owner_id == "node-b",
                    "DoGet on an expired lease does not take it over");
+            if (!tables_ticket.ticket.empty()) {
+                auto meta = DoGetRows(*cli_a, opt2, tables_ticket);
+                auto after_meta = leases_a->Peek(rec2.id);
+                Expect(!meta.ok() && IsUnavailable(meta.status()) &&
+                           ExtraOf(meta.status()).value("code", "") == "no_owner",
+                       "GetTables DoGet on an expired lease is UNAVAILABLE no_owner: " +
+                           (meta.ok() ? std::string("ok") : meta.status().ToString()));
+                Expect(before.etag == after_meta.etag && after_meta.owner_id == "node-b" &&
+                           !leases_a->Held(rec2.id).owned_locally,
+                       "GetTables DoGet on an expired lease does not take it over");
+            }
         }
         auto retry = sql_a.Execute(opt2, "SELECT id FROM deals ORDER BY id");
         Expect(retry.ok() && !(*retry)->endpoints().empty(),

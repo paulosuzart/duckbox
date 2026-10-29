@@ -159,6 +159,8 @@ private:
 	std::string CallerOf(const ::arrow::flight::ServerCallContext &context) const;
 	void RequirePeerQuery(const std::string &caller) const;
 	std::shared_ptr<sandbox::TenantSandbox> Box(const CallCtx &c) const;
+	// Ownership check without acquiring (every DoGet, #100); counts the retryable error.
+	std::shared_ptr<sandbox::TenantSandbox> OwnedBox(const sandbox::SandboxRecord &rec) const;
 	StatementHandle MakeHandle(const CallCtx &c, const std::string &rewritten, int user_params) const;
 	::arrow::Result<std::unique_ptr<::arrow::flight::FlightInfo>> Info(
 	    const ::arrow::flight::FlightDescriptor &descriptor, const std::string &token,

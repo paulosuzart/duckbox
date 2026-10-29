@@ -250,7 +250,8 @@ Status FromEx(const std::exception &e) {
 }
 
 // Nothing relays DoGet between nodes any more (#100): the internal listener
-// serves only the unary describe and operator actions.
+// serves only the unary describe and operator actions. Rejected for every
+// ticket kind in DuckboxFlightServer::DoGet, before Flight SQL dispatch.
 Status InternalDoGetRejected() {
     return Status::NotImplemented("DoGet is not served on the internal listener");
 }
@@ -1329,6 +1330,20 @@ std::shared_ptr<TenantSandbox> DuckboxFlightSqlServer::Box(const CallCtx &c) con
     return runtime_->Get(c.rec);
 }
 
+std::shared_ptr<TenantSandbox> DuckboxFlightSqlServer::OwnedBox(const SandboxRecord &rec) const {
+    // Every DoGet (#100): no lease write, no takeover, no peer call. A
+    // non-owner answers owner_moved (public address) or no_owner.
+    try {
+        return runtime_->GetOwned(rec);
+    } catch (const OwnerMovedError &) {
+        Metrics().IncRetryableError("do_get", kRetryableOwnerMoved);
+        throw;
+    } catch (const UnavailableError &) {
+        Metrics().IncRetryableError("do_get", kRetryableNoOwner);
+        throw;
+    }
+}
+
 std::string DuckboxFlightSqlServer::LocalAdvertisedLocation() const {
     if (daemon_.lease.endpoint.empty() && daemon_.lease.endpoint_env.empty()) {
         return "";
@@ -1523,18 +1538,8 @@ DuckboxFlightSqlServer::DoGetVerified(const ServerCallContext &context, Statemen
         (void)bind_cache_.Lookup(cache_key, &h.params_ipc);
     }
     SandboxRuntime::RequestGuard inflight(*runtime_);
-    // Ownership check before ExecuteHandle (#100, C5): no lease write, no
-    // takeover, no peer call. A non-owner answers with the retryable error.
-    std::shared_ptr<TenantSandbox> box;
-    try {
-        box = runtime_->GetOwned(rec);
-    } catch (const OwnerMovedError &) {
-        Metrics().IncRetryableError("do_get", kRetryableOwnerMoved);
-        throw;
-    } catch (const UnavailableError &) {
-        Metrics().IncRetryableError("do_get", kRetryableNoOwner);
-        throw;
-    }
+    // Ownership check before ExecuteHandle (#100, C5).
+    auto box = OwnedBox(rec);
     std::vector<ddb::Value> params;
     const std::string &params_ipc = h.params_ipc;
     if (!params_ipc.empty()) {
@@ -1556,9 +1561,6 @@ DuckboxFlightSqlServer::DoGetVerified(const ServerCallContext &context, Statemen
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::DoGetStatement(const ServerCallContext &context,
                                        const sql::StatementQueryTicket &command) {
-    if (plane_ == ListenerPlane::Internal) {
-        return InternalDoGetRejected();
-    }
     try {
         StatementHandle h;
         try {
@@ -1721,9 +1723,6 @@ DuckboxFlightSqlServer::GetSchemaPreparedStatement(const ServerCallContext &cont
 ::arrow::Result<std::unique_ptr<FlightDataStream>>
 DuckboxFlightSqlServer::DoGetPreparedStatement(const ServerCallContext &context,
                                                const sql::PreparedStatementQuery &command) {
-    if (plane_ == ListenerPlane::Internal) {
-        return InternalDoGetRejected();
-    }
     try {
         StatementHandle h;
         try {
@@ -1825,8 +1824,9 @@ DuckboxFlightSqlServer::DoGetTables(const ServerCallContext &context,
         auto schema = command.include_schema ? sql::SqlSchema::GetTablesSchemaWithIncludedSchema()
                                              : sql::SqlSchema::GetTablesSchema();
         std::shared_ptr<TenantSandbox> box;
+        SandboxRuntime::RequestGuard inflight(*runtime_);
         if (command.include_schema) {
-            box = Box(c);
+            box = OwnedBox(c.rec);
         }
         ::arrow::StringBuilder cat, db, name, typ;
         ::arrow::BinaryBuilder schb;
@@ -2141,6 +2141,9 @@ DuckboxFlightServer::GetSchema(const ServerCallContext &context, const FlightDes
 }
 ::arrow::Status DuckboxFlightServer::DoGet(const ServerCallContext &context, const Ticket &request,
                                            std::unique_ptr<FlightDataStream> *stream) {
+    if (sql_->plane() == ListenerPlane::Internal) {
+        return InternalDoGetRejected();
+    }
     return sql_->DoGet(context, request, stream);
 }
 ::arrow::Status
