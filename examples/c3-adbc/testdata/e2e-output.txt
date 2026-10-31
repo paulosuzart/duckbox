@@ -1,0 +1,32 @@
+# Captured 2026-10-30 on macOS arm64 (c3c 0.8.1, Flight SQL driver 1.12.0)
+# against a local memory daemon on a non-default port:
+#
+#   export DUCKBOX_HANDLE_SECRET=duckbox-dev-secret
+#   ./build/duckbox serve --daemon ./daemons/memory.yaml \
+#     --listen 127.0.0.1:47471 --internal-listen 127.0.0.1:48471 --no-metrics
+#   ./build/duckbox sandbox create --url grpc://127.0.0.1:47471 \
+#     --spec ./policies/memory/analyst.yaml --id acme-analyst --key tenant_21:user_sergio
+#   ./build/duckbox sandbox create --url grpc://127.0.0.1:47471 \
+#     --spec ./policies/memory/analyst.yaml --id acme-kim --key tenant_22:user_kim
+#   make -C examples/c3-adbc
+#   export DUCKBOX_URL=grpc://127.0.0.1:47471
+
+$ ./build/query
+id	title	amount
+1	alpha deal	100
+# exit 0
+
+$ DUCKBOX_SANDBOX=acme-kim ./build/query
+id	title	amount
+3	bravo deal	500
+4	bravo two	50
+# exit 0
+
+$ DUCKBOX_SQL='SELECT count(*) AS n FROM deals' ./build/query
+n
+1
+# exit 0
+
+$ DUCKBOX_SQL='SELECT * FROM secrets' ./build/query
+ExecuteQuery: [FlightSQL] table not allowlisted: memory.main.secrets (InvalidArgument; ExecuteQuery)
+# exit 1
