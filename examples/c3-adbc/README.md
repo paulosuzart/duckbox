@@ -8,14 +8,36 @@ to a running duckbox over the
 C3 is C ABI compatible but has no C header import. `src/adbc.c3` declares
 the part of `arrow-adbc/adbc.h` (ADBC 1.1.0, `apache-arrow-adbc-18`) and of
 the Arrow C Data / C Stream interface that the program uses, as C3 structs
-with the same layout and `extern fn … @cname("Adbc…")`. `src/main.c3` then
-holds `AdbcDatabase`, `AdbcConnection`, `AdbcStatement`, and
-`ArrowArrayStream`, including `private_data` and release callbacks, as
-ordinary C3 values. There is no C shim.
+with the same layout and `extern fn … @cname("Adbc…")`. `src/flightsql.c3`
+wraps them in idiomatic C3: optionals and a fault instead of status codes
+and `AdbcError` out-parameters, `close()` methods for `defer`, and a batch
+iterator over the Arrow C stream. There is no C shim.
 
-`src/main.c3` is a short program, not a CLI. URI, sandbox id and SQL are
-constants at the top of the file. The environment variables `DUCKBOX_URL`,
-`DUCKBOX_SANDBOX` and `DUCKBOX_SQL` override them.
+`src/main.c3` is a short program, not a CLI:
+
+```c3
+fn void? run()
+{
+    Database db = flightsql::open(env_or("DUCKBOX_URL", URI), {
+        "x-duckbox-sandbox", env_or("DUCKBOX_SANDBOX", SANDBOX),
+        "x-duckbox-caller", "local",
+    })!;
+    defer db.close();
+    Connection conn = db.connect()!;
+    defer conn.close();
+    Rows rows = conn.query(env_or("DUCKBOX_SQL", SQL))!;
+    defer rows.close();
+
+    tsv::print_header(&rows.schema);
+    while (rows.next()!) tsv::print_batch(&rows.schema, &rows.batch);
+}
+```
+
+URI, sandbox id and SQL are constants at the top of the file. The
+environment variables `DUCKBOX_URL`, `DUCKBOX_SANDBOX` and `DUCKBOX_SQL`
+override them. On failure `main` prints `flightsql::last_error()`, which is
+the failing call plus the driver's message, unchanged (so retryable
+`owner_moved … (owner=… address=…)` details stay visible), and exits 1.
 
 ## What it does
 
@@ -76,7 +98,7 @@ make          # fetch .deps if needed, then c3c compile
 ```bash
 ./scripts/fetch_deps.sh
 mkdir -p build
-c3c compile -O1 --output-dir build -o query src/main.c3 src/adbc.c3 \
+c3c compile -O1 --output-dir build -o query src/main.c3 src/flightsql.c3 src/tsv.c3 src/adbc.c3 \
   -L .deps/adbc/lib -l adbc_driver_flightsql -z -rpath -z '$ORIGIN/../.deps/adbc/lib'
 ./build/query
 ```
@@ -94,8 +116,10 @@ DUCKBOX_SQL='SELECT count(*) AS n FROM deals' ./build/query
 
 | Path | Role |
 | --- | --- |
-| `src/main.c3` | The program: connect, headers, SELECT, print, release |
-| `src/adbc.c3` | C3 declarations of the ADBC / Arrow C structs and functions used |
+| `src/main.c3` | The program: open, connect, query, print, `defer` close |
+| `src/flightsql.c3` | Idiomatic wrapper: `Database`, `Connection`, `Rows`, fault `ADBC_ERROR`, `last_error()` |
+| `src/tsv.c3` | Print Arrow C Data batches as TSV |
+| `src/adbc.c3` | Raw C3 declarations of the ADBC / Arrow C structs and functions used |
 | `Makefile` | `c3c compile`, link the driver, rpath (and the macOS install-name fix) |
 | `scripts/fetch_deps.sh` | Pinned Flight SQL 1.12.0 wheel → `.deps/adbc/lib/` |
 | `testdata/e2e-output.txt` | Captured local run against the memory daemon |
@@ -108,8 +132,10 @@ function pointers. Zig (PR #51) translates `adbc.h` with translate-c.
 
 C3 can pass pointers and call C function pointers directly, but cannot read
 C headers. So the structs are written out by hand in `src/adbc.c3`, one for
-one with `adbc.h` and the Arrow C Data Interface. If ADBC changes a struct
-layout, that file has to follow.
+one with `adbc.h` and the Arrow C Data Interface (every field is kept,
+because the driver writes the whole struct). If ADBC changes a struct
+layout, that file has to follow. Only `src/flightsql.c3` and `src/tsv.c3`
+use it.
 
 ## Limitations
 

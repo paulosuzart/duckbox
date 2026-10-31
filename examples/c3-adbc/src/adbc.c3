@@ -1,14 +1,11 @@
-// C3 declarations for the subset of the ADBC C API (arrow-adbc/adbc.h,
-// apache-arrow-adbc-18, ADBC 1.1.0) and the Arrow C Data / C Stream
-// interface that this example uses. C3 is C ABI compatible: these structs
-// have the same layout as the C ones, and `extern fn ... @cname` binds the
-// symbols exported by the Flight SQL driver library. There is no C shim.
-module adbc;
+// Raw C3 declarations for the part of the ADBC C API (arrow-adbc/adbc.h,
+// ADBC 1.1.0) and the Arrow C Data / C Stream interface this example uses.
+// The structs must match the C layout field for field, because the driver
+// writes them. src/flightsql.c3 wraps them; nothing else uses this module.
+module adbc::ffi;
 
-alias StatusCode = char; // AdbcStatusCode is uint8_t
+alias StatusCode = char; // uint8_t
 const StatusCode STATUS_OK = 0;
-
-alias ErrorReleaseFn = fn void(AdbcError* error);
 
 struct AdbcError
 {
@@ -16,29 +13,17 @@ struct AdbcError
     CInt vendor_code;
     char[5] sqlstate;
     ErrorReleaseFn release;
-    void* private_data;   // ADBC 1.1.0
-    void* private_driver; // ADBC 1.1.0
+    void* private_data;
+    void* private_driver;
 }
+alias ErrorReleaseFn = fn void(AdbcError*);
 
-struct AdbcDatabase
+// AdbcDatabase, AdbcConnection and AdbcStatement share this layout.
+struct AdbcHandle
 {
     void* private_data;
     void* private_driver;
 }
-
-struct AdbcConnection
-{
-    void* private_data;
-    void* private_driver;
-}
-
-struct AdbcStatement
-{
-    void* private_data;
-    void* private_driver;
-}
-
-alias SchemaReleaseFn = fn void(ArrowSchema* schema);
 
 struct ArrowSchema
 {
@@ -52,8 +37,7 @@ struct ArrowSchema
     SchemaReleaseFn release;
     void* private_data;
 }
-
-alias ArrayReleaseFn = fn void(ArrowArray* array);
+alias SchemaReleaseFn = fn void(ArrowSchema*);
 
 struct ArrowArray
 {
@@ -68,11 +52,7 @@ struct ArrowArray
     ArrayReleaseFn release;
     void* private_data;
 }
-
-alias StreamGetSchemaFn = fn CInt(ArrowArrayStream* stream, ArrowSchema* out);
-alias StreamGetNextFn = fn CInt(ArrowArrayStream* stream, ArrowArray* out);
-alias StreamGetLastErrorFn = fn ZString(ArrowArrayStream* stream);
-alias StreamReleaseFn = fn void(ArrowArrayStream* stream);
+alias ArrayReleaseFn = fn void(ArrowArray*);
 
 struct ArrowArrayStream
 {
@@ -82,17 +62,19 @@ struct ArrowArrayStream
     StreamReleaseFn release;
     void* private_data;
 }
+alias StreamGetSchemaFn = fn CInt(ArrowArrayStream*, ArrowSchema*);
+alias StreamGetNextFn = fn CInt(ArrowArrayStream*, ArrowArray*);
+alias StreamGetLastErrorFn = fn ZString(ArrowArrayStream*);
+alias StreamReleaseFn = fn void(ArrowArrayStream*);
 
-extern fn StatusCode database_new(AdbcDatabase* database, AdbcError* error) @cname("AdbcDatabaseNew");
-extern fn StatusCode database_set_option(AdbcDatabase* database, ZString key, ZString value, AdbcError* error) @cname("AdbcDatabaseSetOption");
-extern fn StatusCode database_init(AdbcDatabase* database, AdbcError* error) @cname("AdbcDatabaseInit");
-extern fn StatusCode database_release(AdbcDatabase* database, AdbcError* error) @cname("AdbcDatabaseRelease");
-
-extern fn StatusCode connection_new(AdbcConnection* connection, AdbcError* error) @cname("AdbcConnectionNew");
-extern fn StatusCode connection_init(AdbcConnection* connection, AdbcDatabase* database, AdbcError* error) @cname("AdbcConnectionInit");
-extern fn StatusCode connection_release(AdbcConnection* connection, AdbcError* error) @cname("AdbcConnectionRelease");
-
-extern fn StatusCode statement_new(AdbcConnection* connection, AdbcStatement* statement, AdbcError* error) @cname("AdbcStatementNew");
-extern fn StatusCode statement_set_sql_query(AdbcStatement* statement, ZString query, AdbcError* error) @cname("AdbcStatementSetSqlQuery");
-extern fn StatusCode statement_execute_query(AdbcStatement* statement, ArrowArrayStream* out, long* rows_affected, AdbcError* error) @cname("AdbcStatementExecuteQuery");
-extern fn StatusCode statement_release(AdbcStatement* statement, AdbcError* error) @cname("AdbcStatementRelease");
+extern fn StatusCode database_new(AdbcHandle* db, AdbcError* err) @cname("AdbcDatabaseNew");
+extern fn StatusCode database_set_option(AdbcHandle* db, ZString key, ZString value, AdbcError* err) @cname("AdbcDatabaseSetOption");
+extern fn StatusCode database_init(AdbcHandle* db, AdbcError* err) @cname("AdbcDatabaseInit");
+extern fn StatusCode database_release(AdbcHandle* db, AdbcError* err) @cname("AdbcDatabaseRelease");
+extern fn StatusCode connection_new(AdbcHandle* conn, AdbcError* err) @cname("AdbcConnectionNew");
+extern fn StatusCode connection_init(AdbcHandle* conn, AdbcHandle* db, AdbcError* err) @cname("AdbcConnectionInit");
+extern fn StatusCode connection_release(AdbcHandle* conn, AdbcError* err) @cname("AdbcConnectionRelease");
+extern fn StatusCode statement_new(AdbcHandle* conn, AdbcHandle* stmt, AdbcError* err) @cname("AdbcStatementNew");
+extern fn StatusCode statement_set_sql_query(AdbcHandle* stmt, ZString sql, AdbcError* err) @cname("AdbcStatementSetSqlQuery");
+extern fn StatusCode statement_execute_query(AdbcHandle* stmt, ArrowArrayStream* out, long* rows_affected, AdbcError* err) @cname("AdbcStatementExecuteQuery");
+extern fn StatusCode statement_release(AdbcHandle* stmt, AdbcError* err) @cname("AdbcStatementRelease");

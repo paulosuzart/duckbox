@@ -15,7 +15,7 @@ DRIVER := $(LIBDIR)/libadbc_driver_flightsql.so
 RPATH := $$ORIGIN/../.deps/adbc/lib
 FIXUP = true
 endif
-SRC := src/main.c3 src/adbc.c3
+SRC := src/main.c3 src/flightsql.c3 src/tsv.c3 src/adbc.c3
 
 .PHONY: all deps run
 
